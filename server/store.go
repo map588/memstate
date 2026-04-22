@@ -13,6 +13,7 @@ import (
 const schema = `
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
+PRAGMA busy_timeout = 5000;
 
 CREATE TABLE IF NOT EXISTS projects (
   id         TEXT PRIMARY KEY,
@@ -42,12 +43,26 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
   content, keypath, tokenize = 'porter unicode61'
 );
 
--- Stub for future Ollama-powered semantic search.
+-- Stub kept for historical compatibility; current semantic-search code uses
+-- keypath_embeddings (one row per keypath, not per memory version).
 CREATE TABLE IF NOT EXISTS embeddings (
   memory_id INTEGER PRIMARY KEY REFERENCES memories(id),
   model     TEXT    NOT NULL,
   dim       INTEGER NOT NULL,
   vector    BLOB    NOT NULL
+);
+
+-- Semantic search embeds the keypath string (not content). Keypaths are
+-- stable across versions, so one row per (project, keypath, model) is both
+-- cheaper and avoids re-embedding on every remember-at-same-keypath.
+CREATE TABLE IF NOT EXISTS keypath_embeddings (
+  project_id TEXT    NOT NULL,
+  keypath    TEXT    NOT NULL,
+  model      TEXT    NOT NULL,
+  dim        INTEGER NOT NULL,
+  vector     BLOB    NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (project_id, keypath, model)
 );
 `
 
@@ -69,7 +84,11 @@ type Store struct {
 }
 
 func OpenStore(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	// Apply PRAGMAs per connection via DSN so every pooled connection
+	// shares busy-wait behaviour and WAL mode. SQLite PRAGMAs set on one
+	// connection do not propagate to siblings.
+	dsn := path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -228,6 +247,129 @@ func writeExec(exec dbExec, projectID, keypath, content, source string, tombston
 		m.ParentID = &pid
 	}
 	return m, prev, nil
+}
+
+// HasKeypathEmbedding reports whether an embedding row exists for
+// (project, keypath, model). Used to skip redundant Ollama calls when a
+// keypath has already been embedded under the current model.
+func (s *Store) HasKeypathEmbedding(projectID, keypath, model string) (bool, error) {
+	var one int
+	err := s.db.QueryRow(
+		`SELECT 1 FROM keypath_embeddings
+		 WHERE project_id=? AND keypath=? AND model=?`,
+		projectID, keypath, model,
+	).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// UpsertKeypathEmbedding inserts or replaces the vector for (project, keypath, model).
+func (s *Store) UpsertKeypathEmbedding(projectID, keypath, model string, dim int, vector []byte) error {
+	_, err := s.db.Exec(
+		`INSERT INTO keypath_embeddings(project_id, keypath, model, dim, vector, created_at)
+		 VALUES(?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(project_id, keypath, model) DO UPDATE SET
+		   dim=excluded.dim, vector=excluded.vector, created_at=excluded.created_at`,
+		projectID, keypath, model, dim, vector, time.Now().Unix(),
+	)
+	return err
+}
+
+// KeypathEmbedding is a row from keypath_embeddings, exposed to the search
+// path after the vector is unpacked.
+type KeypathEmbedding struct {
+	ProjectID string
+	Keypath   string
+	Vector    []float32
+}
+
+// ListKeypathEmbeddings returns every (project, keypath, vector) row for a
+// given model, optionally scoped to a single project. Vectors are unpacked
+// from BLOB so the caller can compute cosine in memory.
+func (s *Store) ListKeypathEmbeddings(projectID, model string) ([]*KeypathEmbedding, error) {
+	q := `SELECT project_id, keypath, vector FROM keypath_embeddings WHERE model=?`
+	args := []any{model}
+	if projectID != "" {
+		q += ` AND project_id=?`
+		args = append(args, projectID)
+	}
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*KeypathEmbedding
+	for rows.Next() {
+		var pid, kp string
+		var blob []byte
+		if err := rows.Scan(&pid, &kp, &blob); err != nil {
+			return nil, err
+		}
+		vec, err := unpackVector(blob)
+		if err != nil {
+			return nil, fmt.Errorf("decode vector for %s/%s: %w", pid, kp, err)
+		}
+		out = append(out, &KeypathEmbedding{ProjectID: pid, Keypath: kp, Vector: vec})
+	}
+	return out, rows.Err()
+}
+
+// SemanticHit pairs a current-version memory with its cosine similarity to
+// the query vector. Sorted by Score descending by the caller.
+type SemanticHit struct {
+	*Memory
+	Score float32 `json:"score"`
+}
+
+// SemanticSearch ranks keypaths in the given project (or all projects if
+// projectID is empty) by cosine similarity to query. Returns at most limit
+// hits whose similarity is >= threshold, paired with the current non-
+// tombstoned memory at that keypath.
+//
+// Callers that want to skip the embedding lookup (e.g. because they already
+// have a vector) can pass the pre-embedded query directly.
+func (s *Store) SemanticSearch(projectID string, query []float32, model string, threshold float32, limit int) ([]*SemanticHit, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.ListKeypathEmbeddings(projectID, model)
+	if err != nil {
+		return nil, err
+	}
+	type ranked struct {
+		pid, kp string
+		score   float32
+	}
+	picks := make([]ranked, 0, len(rows))
+	for _, r := range rows {
+		sc := cosine(query, r.Vector)
+		if sc >= threshold {
+			picks = append(picks, ranked{r.ProjectID, r.Keypath, sc})
+		}
+	}
+	// Sort descending by score (simple insertion sort, N is small).
+	for i := 1; i < len(picks); i++ {
+		for j := i; j > 0 && picks[j].score > picks[j-1].score; j-- {
+			picks[j], picks[j-1] = picks[j-1], picks[j]
+		}
+	}
+	if len(picks) > limit {
+		picks = picks[:limit]
+	}
+	out := make([]*SemanticHit, 0, len(picks))
+	for _, p := range picks {
+		m, err := s.GetLatest(p.pid, p.kp)
+		if err != nil {
+			return nil, err
+		}
+		if m == nil || m.Tombstone {
+			continue
+		}
+		out = append(out, &SemanticHit{Memory: m, Score: p.score})
+	}
+	return out, nil
 }
 
 // BatchItem reports the outcome of one section in a WriteBatch call.

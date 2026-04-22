@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // healthResponse is the JSON shape probed by double-start detection.
@@ -28,7 +30,7 @@ func decodeHealth(r io.Reader) (*healthResponse, error) {
 	return &h, nil
 }
 
-func newRouter(store *Store, shutdown func()) http.Handler {
+func newRouter(store *Store, shutdown func(), embedder *Embedder) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -53,13 +55,13 @@ func newRouter(store *Store, shutdown func()) http.Handler {
 	})
 
 	// --- writes -----------------------------------------------------------
-	mux.HandleFunc("POST /api/v1/memories/store", handleStore(store))
-	mux.HandleFunc("POST /api/v1/memories/remember", handleRemember(store))
+	mux.HandleFunc("POST /api/v1/memories/store", handleStore(store, embedder))
+	mux.HandleFunc("POST /api/v1/memories/remember", handleRemember(store, embedder))
 	mux.HandleFunc("POST /api/v1/memories/delete", handleDelete(store))
 	mux.HandleFunc("POST /api/v1/projects/delete", handleDeleteProject(store))
 
 	// --- reads ------------------------------------------------------------
-	mux.HandleFunc("POST /api/v1/memories/search", handleSearch(store))
+	mux.HandleFunc("POST /api/v1/memories/search", handleSearch(store, embedder))
 	mux.HandleFunc("POST /api/v1/memories/history", handleHistory(store))
 	mux.HandleFunc("POST /api/v1/keypaths", handleKeypaths(store))
 	mux.HandleFunc("GET /api/v1/tree", handleTree(store))
@@ -107,6 +109,42 @@ func checkProjectLive(store *Store, projectID string) error {
 	return nil
 }
 
+// maybeEmbedKeypath fires a fire-and-forget goroutine that embeds the given
+// keypath with the configured model and upserts into keypath_embeddings.
+// No-op if the embedder is nil or the row already exists. Errors are logged
+// (throttled) and do not surface to the caller — writes succeed regardless.
+func maybeEmbedKeypath(store *Store, embedder *Embedder, projectID, keypath string) {
+	if embedder == nil {
+		return
+	}
+	embedder.inFlight.Add(1)
+	go func() {
+		defer embedder.inFlight.Done()
+		has, err := store.HasKeypathEmbedding(projectID, keypath, embedder.Model)
+		if err != nil {
+			embedder.maybeLog(fmt.Sprintf("has-embedding check failed for %s/%s: %v",
+				projectID, keypath, err))
+			return
+		}
+		if has {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		vec, err := embedder.Embed(ctx, keypath)
+		if err != nil {
+			embedder.maybeLog(fmt.Sprintf("embed failed for %s/%s: %v",
+				projectID, keypath, err))
+			return
+		}
+		if err := store.UpsertKeypathEmbedding(projectID, keypath, embedder.Model,
+			len(vec), packVector(vec)); err != nil {
+			embedder.maybeLog(fmt.Sprintf("upsert embedding for %s/%s: %v",
+				projectID, keypath, err))
+		}
+	}()
+}
+
 // ---------- write handlers ----------
 
 type storeReq struct {
@@ -124,7 +162,7 @@ type writeResp struct {
 	Superseded *Memory `json:"superseded,omitempty"`
 }
 
-func handleStore(store *Store) http.HandlerFunc {
+func handleStore(store *Store, embedder *Embedder) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var in storeReq
 		if err := decodeJSON(r, &in); err != nil {
@@ -145,6 +183,7 @@ func handleStore(store *Store) http.HandlerFunc {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		maybeEmbedKeypath(store, embedder, in.ProjectID, kp)
 		writeJSON(w, http.StatusOK, writeResp{
 			Action:     classifyWrite(stored, prev),
 			Stored:     stored,
@@ -182,7 +221,7 @@ type rememberResp struct {
 	Items  []extractedItem `json:"items"`
 }
 
-func handleRemember(store *Store) http.HandlerFunc {
+func handleRemember(store *Store, embedder *Embedder) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var in rememberReq
 		if err := decodeJSON(r, &in); err != nil {
@@ -230,6 +269,7 @@ func handleRemember(store *Store) http.HandlerFunc {
 				Stored:     it.Stored,
 				Superseded: it.Superseded,
 			}
+			maybeEmbedKeypath(store, embedder, in.ProjectID, it.Keypath)
 		}
 		writeJSON(w, http.StatusOK, out)
 	}
@@ -330,12 +370,14 @@ func handleDeleteProject(store *Store) http.HandlerFunc {
 // ---------- read handlers ----------
 
 type searchReq struct {
-	Query     string `json:"query"`
-	ProjectID string `json:"project_id,omitempty"`
-	Limit     int    `json:"limit,omitempty"`
+	Query     string  `json:"query"`
+	ProjectID string  `json:"project_id,omitempty"`
+	Limit     int     `json:"limit,omitempty"`
+	Mode      string  `json:"mode,omitempty"`      // "fts" (default) | "semantic"
+	Threshold float32 `json:"threshold,omitempty"` // semantic only; 0 = use env / default
 }
 
-func handleSearch(store *Store) http.HandlerFunc {
+func handleSearch(store *Store, embedder *Embedder) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var in searchReq
 		if err := decodeJSON(r, &in); err != nil {
@@ -352,16 +394,59 @@ func handleSearch(store *Store) http.HandlerFunc {
 				return
 			}
 		}
-		hits, err := store.Search(in.ProjectID, in.Query, in.Limit)
-		if err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error()) // usually bad FTS syntax
-			return
+
+		mode := in.Mode
+		if mode == "" {
+			mode = "fts"
 		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"query":       in.Query,
-			"results":     hits,
-			"total_found": len(hits),
-		})
+		switch mode {
+		case "fts":
+			hits, err := store.Search(in.ProjectID, in.Query, in.Limit)
+			if err != nil {
+				writeErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"mode":        "fts",
+				"query":       in.Query,
+				"results":     hits,
+				"total_found": len(hits),
+			})
+		case "semantic":
+			if embedder == nil {
+				writeErr(w, http.StatusServiceUnavailable,
+					"semantic search disabled (no embedder configured)")
+				return
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+			defer cancel()
+			qvec, err := embedder.Embed(ctx, in.Query)
+			if err != nil {
+				writeErr(w, http.StatusBadGateway,
+					fmt.Sprintf("embed query: %v", err))
+				return
+			}
+			threshold := in.Threshold
+			if threshold == 0 {
+				threshold = envThreshold()
+			}
+			hits, err := store.SemanticSearch(in.ProjectID, qvec, embedder.Model, threshold, in.Limit)
+			if err != nil {
+				writeErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"mode":        "semantic",
+				"model":       embedder.Model,
+				"threshold":   threshold,
+				"query":       in.Query,
+				"results":     hits,
+				"total_found": len(hits),
+			})
+		default:
+			writeErr(w, http.StatusBadRequest,
+				fmt.Sprintf("unknown mode %q (expected fts|semantic)", mode))
+		}
 	}
 }
 

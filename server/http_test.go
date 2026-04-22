@@ -11,8 +11,13 @@ import (
 
 func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
+	return newTestServerWithEmbedder(t, nil)
+}
+
+func newTestServerWithEmbedder(t *testing.T, embedder *Embedder) *httptest.Server {
+	t.Helper()
 	store := newTestStore(t)
-	ts := httptest.NewServer(newRouter(store, nil))
+	ts := httptest.NewServer(newRouter(store, nil, embedder))
 	t.Cleanup(ts.Close)
 	return ts
 }

@@ -138,8 +138,10 @@ func main() {
 	// the server by cancelling the root context.
 	shutdownFn := func() { stop() }
 
+	embedder := NewEmbedder()
+
 	srv := &http.Server{
-		Handler:           newRouter(store, shutdownFn),
+		Handler:           newRouter(store, shutdownFn, embedder),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

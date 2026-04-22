@@ -351,13 +351,29 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: "memstate_search",
-    description: "Full-text search (SQLite FTS5) across current, non-tombstoned memories.",
+    description:
+      "Find memories when the exact keypath is unknown. Two modes:\n" +
+      '- mode="fts" (default): SQLite FTS5 keyword match on content + keypath.\n' +
+      '- mode="semantic": cosine similarity between the query and the stored ' +
+      "keypath embeddings (nomic-embed-text via local Ollama). Returns only " +
+      "matches above `threshold` (default 0.5), sorted by score.",
     inputSchema: {
       type: "object",
       properties: {
         query: { type: "string" },
         project_id: { type: "string" },
         limit: { type: "integer", default: 20 },
+        mode: {
+          type: "string",
+          enum: ["fts", "semantic"],
+          default: "fts",
+        },
+        threshold: {
+          type: "number",
+          description:
+            "Semantic mode only. Cosine floor for hits (default 0.5). Raise " +
+            "to tighten, lower to widen.",
+        },
       },
       required: ["query"],
     },
