@@ -1,2 +1,17 @@
 node_modules
 
+.tokensave
+
+# Go build output
+/server/memstated
+
+# TS build output — regenerated via `npm run build`
+/client/dist/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Local scratch
+/tmp/
+.cache/

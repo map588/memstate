@@ -1,230 +1,108 @@
-# Memstate AI - MCP
+# memstate-local
 
-[![npm version](https://img.shields.io/npm/v/@memstate/mcp?color=brightgreen)](https://www.npmjs.com/package/@memstate/mcp)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![MCP](https://img.shields.io/badge/MCP-compatible-blue)](https://modelcontextprotocol.io)
-[![Node](https://img.shields.io/badge/node-%3E%3D18-green)](https://nodejs.org)
-[![memstate-mcp MCP server](https://glama.ai/mcp/servers/memstate-ai/memstate-mcp/badges/score.svg)](https://glama.ai/mcp/servers/memstate-ai/memstate-mcp)
+Local-only fork of [memstate-mcp](https://github.com/memstate-ai/memstate-mcp).
+Everything runs on your machine — no hosted service, no API key.
 
-**Versioned memory for AI agents.** Store facts, detect conflicts, and track how decisions change over time — exposed as a hosted MCP server.
+```
+Claude Code ──stdio──> client/   (TS MCP proxy) ──HTTP loopback──> server/   (Go daemon) ──> SQLite
+                                                                        ▲
+Python CLI scripts ──── same HTTP ─────────────────────────────────────┘
+```
 
-[Dashboard](https://memstate.ai/dashboard) · [Docs](https://memstate.ai/docs) · [Pricing](https://memstate.ai/pricing)
+## Layout
 
----
+| Dir | What it is |
+|---|---|
+| `server/` | Go daemon. Owns the SQLite file, exposes a REST API, no MCP knowledge. |
+| `client/` | TypeScript MCP stdio proxy + Python CLI scripts (for the `memstate-local` skill). Both translate to HTTP calls on the daemon. |
 
-## Why Memstate?
+## Build
 
-| | RAG (most other memory systems) | Memstate AI |
-|---|---|---|
-| Token usage per conversation | ~7,500 | ~1,500 |
-| Agent visibility | Black box | Full transparency |
-| Memory versioning | None | Full history |
-| Token growth as memories scale | O(n) | O(1) |
-| Infrastructure required | Yes | None — hosted SaaS |
+```bash
+# Go daemon
+cd server && go build -o memstated .
 
-Other memory systems dump everything into your context window and hope for the best. Memstate gives your agent a **structured, versioned knowledge base** it navigates precisely — load only what you need, know what changed, know when facts conflict.
+# MCP proxy
+cd ../client && npm install && npm run build
+```
 
----
+Verify:
+```bash
+node client/dist/index.js --test
+```
 
-## Benchmarks
+Expected output (with no daemon running): proxy spawns a child on a random
+port, lists the 7 tools, then exits — taking the child with it.
 
-We built an [open-source benchmark suite](benchmark/) that tests what actually matters for agent memory: can your system store facts, recall them accurately across sessions, detect conflicts when things change, and maintain context as a project evolves?
+## Process model
 
-### Head-to-Head: Memstate AI vs Mem0
+The proxy and the daemon have two lifetimes depending on how they're started.
 
-Both systems were tested under identical conditions using the same agent (Claude Sonnet 4.6, temperature 0), the same scenarios, and the same scoring rubric.
+| Mode | How | Daemon lifetime | Use when |
+|---|---|---|---|
+| **Child** (default) | MCP proxy or Python script spawns `memstated` as a non-detached child with `--owner-pid=$$` | Dies with the spawner (via SIGTERM on clean exit, owner-pid watchdog on SIGKILL) | Single Claude Code session, or one-off Python calls. Nothing leftover. |
+| **Attach** | `MEMSTATE_ADDR=host:port` set; the daemon was started separately (`memstated --addr 127.0.0.1:8765`) | Survives proxy exits; stopped manually | Sharing one daemon across multiple Claude Code sessions and/or Python scripts. |
 
-| Metric | Memstate AI | Mem0 | Winner |
-|--------|:-----------:|:----:|--------|
-| **Overall Score** | **69.1** | 15.4 | Memstate |
-| Accuracy (fact recall) | 74.1 | 12.6 | Memstate |
-| Conflict Detection | 85.5 | 19.0 | Memstate |
-| Context Continuity | 63.7 | 10.1 | Memstate |
-| Token Efficiency | 22.3 | 30.6 | Mem0 |
+Multiple Claude Code sessions with no `MEMSTATE_ADDR` each get their own
+daemon on their own random port. They all read and write the same SQLite
+file — SQLite WAL mode handles concurrency.
 
-*Scoring weights: Accuracy 40%, Conflict Detection 25%, Context Continuity 25%, Token Efficiency 10%.*
+### Stopping a shared daemon
 
-### Per-Scenario Breakdown
+```bash
+server/memstated stop --addr 127.0.0.1:8765     # POST /admin/shutdown
+server/memstated status --addr 127.0.0.1:8765   # GET /health
+```
 
-The benchmark runs five real-world scenarios that simulate multi-session agent workflows:
+### Guards against runaway spawning
 
-| Scenario | Memstate AI | Mem0 |
-|----------|:-----------:|:----:|
-| Web App Architecture Evolution | 43.2 | 55.6 |
-| Auth System Migration | 66.2 | 10.2 |
-| Database Schema Evolution | 72.7 | 7.0 |
-| API Versioning Conflicts | 86.5 | 0.9 |
-| Team Decision Reversal | 77.2 | 3.3 |
+- Go daemon on `--addr` EADDRINUSE: probes `/health`. If the occupant is one
+  of ours, it exits 0. If it's alien, it exits 2 loudly — the proxy does not
+  try to respawn.
+- Go daemon polls `--owner-pid` via `kill(pid, 0)` every 2s; on ESRCH it
+  shuts down. Orphans can't linger.
+- Proxy has no respawn logic at all — if the child crashes, the proxy dies
+  with it and the MCP session reports the failure.
 
-Mem0 won the first scenario (simple architecture tracking), but struggled severely on scenarios requiring contradiction handling, cross-session context, and decision reversal tracking — scoring near zero on three of five scenarios.
+## Env vars
 
-### Why Memstate Wins
+| Var | Effect |
+|---|---|
+| `MEMSTATE_ADDR` | `host:port` to attach to instead of spawning. Disables child mode. |
+| `MEMSTATE_BIN` | Path to the `memstated` binary. Defaults to `server/memstated` (sibling), then PATH. |
+| `MEMSTATE_DB` | SQLite file. Default `~/.memstate/memstate.db`. `~/` is expanded. **Ignored in attach mode** — the already-running daemon picked its DB when it started; the proxy warns if you set both. |
+| `MEMSTATE_LOCAL_URL` | Full base URL override, e.g. `http://127.0.0.1:9000/api/v1`. Takes precedence over `MEMSTATE_ADDR`. |
 
-The benchmark reveals a fundamental architectural difference:
-
-**Mem0 uses embedding-based semantic search.** Facts are chunked, embedded, and retrieved by similarity. This works for simple lookups but breaks down when:
-- Facts contradict earlier facts (the system can't distinguish current vs. outdated)
-- Precise recall is needed (embeddings return "similar" results, not exact ones)
-- Write-to-read latency matters (new memories take seconds to become searchable)
-
-**Memstate uses structured, versioned key-value storage.** Every fact lives at an explicit keypath with a full version history. This means:
-- **Conflict detection is built in** — when a new fact contradicts an old one, the system knows and preserves both versions
-- **Recall is deterministic** — you get back exactly what was stored, not an approximate match
-- **Cross-session continuity is reliable** — the agent navigates a structured tree rather than hoping semantic search surfaces the right context
-- **Token cost stays O(1)** — the agent loads summaries first and drills into detail only when needed, instead of dumping all potentially-relevant embeddings into the context window
-
-### Fairness Notes
-
-- Both systems used the same agent model, temperature, and evaluation rubric
-- Mem0 was given a 10-second ingestion delay between writes and reads to account for its async embedding pipeline
-- Mem0 scores higher on token efficiency, but this metric should be read in context — lower token usage can simply reflect less information being returned. A system that retrieves incomplete or incorrect facts uses fewer tokens per response but may require more follow-up calls, ultimately costing more tokens to reach the same answer
-- The benchmark source code is included in this repository for full reproducibility
-- Mem0 may perform differently with custom configuration or a different embedding model
-
----
-
-## Quick Start
-
-Get your API key at [memstate.ai/dashboard](https://memstate.ai/dashboard), then add to your MCP client config:
+Claude Code MCP configs pass env explicitly. If you want a per-project DB,
+put it in the `env:` block when registering the server:
 
 ```json
 {
   "mcpServers": {
-    "memstate": {
-      "command": "npx",
-      "args": ["-y", "@memstate/mcp"],
+    "memstate-local": {
+      "command": "node",
+      "args": ["/abs/path/to/client/dist/index.js"],
       "env": {
-        "MEMSTATE_API_KEY": "YOUR_API_KEY_HERE"
+        "MEMSTATE_DB": "/abs/path/to/project.db"
       }
     }
   }
 }
 ```
 
-No Docker. No database. No infrastructure. Running in 60 seconds.
-
----
-
-## Client Setup
-
-### Claude Desktop
-
-Config location:
-- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
-
-```json
-{
-  "mcpServers": {
-    "memstate": {
-      "command": "npx",
-      "args": ["-y", "@memstate/mcp"],
-      "env": { "MEMSTATE_API_KEY": "YOUR_API_KEY_HERE" }
-    }
-  }
-}
-```
-
-### Claude Code
+## Test suite
 
 ```bash
-claude mcp add memstate npx @memstate/mcp -e MEMSTATE_API_KEY=YOUR_API_KEY_HERE
+cd server && go test ./...           # 22 tests: store, HTTP, lifecycle
+cd ../client && npx tsc              # TS build
 ```
 
-### Cursor
+## Not implemented (yet)
 
-In Cursor Settings → MCP → Add Server — same JSON format as Claude Desktop above.
+- Semantic search via Ollama (`embeddings` table exists, logic doesn't).
+- `--category`, `--topics`, and `--at-revision` are accepted by the REST
+  layer for compat with the hosted-API Python scripts, but are ignored.
 
-### Cline / Windsurf / Kilo Code / Roo Code
+## License
 
-All support the same stdio MCP config format. Add to your client's MCP settings file.
-
----
-
-## Core Tools
-
-| Tool | When to use |
-|------|-------------|
-| `memstate_remember` | Store markdown, task summaries, decisions. Server extracts keypaths and detects conflicts automatically. **Use for most writes.** |
-| `memstate_set` | Set a single keypath to a short value (e.g. `config.port = 8080`). Not for prose. |
-| `memstate_get` | Browse all memories for a project or subtree. **Use at the start of every task.** |
-| `memstate_search` | Semantic search by meaning when you don't know the exact keypath. |
-| `memstate_history` | See how a piece of knowledge changed over time — full version chain. |
-| `memstate_delete` | Soft-delete a keypath. Creates a tombstone; full history is preserved. |
-| `memstate_delete_project` | Soft-delete an entire project and all its memories. |
-
-### How keypaths work
-
-Memories are organized in hierarchical dot-notation:
-
-```
-project.my_app.database.schema
-project.my_app.auth.provider
-project.my_app.deploy.environment
-```
-
-Keypaths are auto-prefixed: `keypath="database"` with `project_id="my_app"` → `project.my_app.database`. Your agent can drill into exactly what it needs — no full-context dumps.
-
----
-
-## How It Works
-
-```
-Agent: memstate_remember(project_id="my_app", content="## Auth\nUsing SuperTokens...")
-         ↓
-Server extracts keypaths:  [project.my_app.auth.provider, ...]
-         ↓
-Conflict detection:  compare against existing memories at those keypaths
-         ↓
-New version stored — old version preserved in history chain
-         ↓
-Next session: memstate_get(project_id="my_app") → structured summaries only
-         ↓
-Agent drills into project.my_app.auth only when it needs auth details
-```
-
-**Token cost stays constant** regardless of how many total memories exist.
-
----
-
-## Add to Your Agent Instructions
-
-Copy into your `AGENTS.md` or system prompt:
-
-```markdown
-## Memory (Memstate MCP)
-
-### Before each task
-- memstate_get(project_id="my_project") — browse existing knowledge
-- memstate_search(query="topic", project_id="my_project") — find by meaning
-
-### After each task
-- memstate_remember(project_id="my_project", content="## Summary\n- ...", source="agent")
-
-### Tool guide
-- memstate_remember — markdown summaries, decisions, task results (preferred)
-- memstate_set — single short values only (config flags, status)
-- memstate_get — browse/retrieve before tasks
-- memstate_search — semantic lookup when keypath unknown
-- memstate_history — audit how knowledge evolved
-- memstate_delete — remove outdated memories (history preserved)
-```
-
----
-
-## Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MEMSTATE_API_KEY` | *(required)* | API key from [memstate.ai/dashboard](https://memstate.ai/dashboard) |
-| `MEMSTATE_MCP_URL` | `https://mcp.memstate.ai` | Override for self-hosted deployments |
-
-## Verify Your Connection
-
-```bash
-MEMSTATE_API_KEY=your_key npx @memstate/mcp --test
-```
-
-Prints all available tools and confirms your API key works.
-
-*Built for AI agents that deserve to know what they know.*
+MIT, inherited from upstream.

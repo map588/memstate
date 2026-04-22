@@ -1,0 +1,43 @@
+{
+  "name": "@memstate/local-mcp",
+  "version": "0.1.0",
+  "description": "Local-only memstate — MCP stdio front-end for a self-hosted Go daemon with versioned SQLite memory.",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "memstate-local-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "node dist/index.js --test"
+  },
+  "files": [
+    "dist/",
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "mcp",
+    "memory",
+    "agent-memory",
+    "versioned-memory",
+    "keypath",
+    "local",
+    "self-hosted",
+    "sqlite"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.2"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.3",
+    "typescript": "^5.0.0"
+  }
+}
