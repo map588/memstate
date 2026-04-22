@@ -13,14 +13,23 @@ does and stops when your agent does.
 ## Install
 
 ```bash
-git clone <this repo>
-cd memstate-local
+git clone git@github.com:map588/memstate.git
+cd memstate
 
 cd server && go build -o memstated .
 cd ../client && npm install && npm run build
 ```
 
-You need Go 1.22+ and Node 18+. That's the whole toolchain.
+You need Go 1.25+ and Node 18+. That's the whole toolchain. Semantic
+search additionally wants a local [Ollama](https://ollama.com) with an
+embedding model pulled:
+
+```bash
+ollama pull nomic-embed-text
+```
+
+If Ollama isn't running, memstate still works — writes and FTS search
+are unaffected; semantic search returns 503 until the embedder is up.
 
 ## Wire it into your agent
 
@@ -59,26 +68,46 @@ names, exits cleanly.
 
 ## The seven tools
 
-All scoped by `project_id`. Keypaths are explicit dot-notation
-(`auth.provider`, `task.summary.2026-04-21`). No LLM-based extraction.
+All scoped by `project_id` (snake_case, usually the repo name). Keypaths
+are dot-notation.
 
 | Tool | Purpose |
 |---|---|
 | `memstate_set` | Write a short value at a keypath (`config.port = "8080"`). |
-| `memstate_remember` | Write a markdown summary at a keypath. |
+| `memstate_remember` | Write a markdown summary. Explicit keypath writes there; omit the keypath and each `## heading` becomes its own versioned memory nested by `###` depth. |
 | `memstate_get` | Read a keypath, browse a subtree, or return the whole project tree. |
-| `memstate_search` | Full-text (SQLite FTS5) search across current memories. |
+| `memstate_search` | Search current memories. `mode="fts"` (default) uses SQLite FTS5; `mode="semantic"` embeds the query via Ollama and cosine-ranks against stored keypath vectors. |
 | `memstate_history` | Every version of a keypath, newest first — including tombstones. |
 | `memstate_delete` | Tombstone a keypath. History is preserved. |
 | `memstate_delete_project` | Soft-delete a project. |
 
 A useful agent loop:
 
-- **At task start** → `memstate_get(project_id=<project>)` to load context
-- **At task end** → `memstate_remember(project_id=<project>, keypath="task.summary.<date>", content="## Summary ...")`
+- **At task start** → `memstate_get(project_id=<project>)` to load the tree; `memstate_search(query=..., mode="semantic")` when the exact keypath isn't known.
+- **At task end** → `memstate_remember(project_id=<project>, content="## Summary\n...\n## Decisions\n...")` and let the server extract.
 
 `node client/dist/index.js init` writes rule files for several agents
 (`CLAUDE.md`, `AGENTS.md`, `.cursor/rules/`, etc.) that encode this loop.
+
+### `memstate_remember` — write shape
+
+Returns `{ method, items: [{keypath, action, stored, superseded?}] }`
+for both explicit-keypath and heading-extract modes.
+
+- `method` is `"explicit"` or `"headings"`.
+- `action` is `"created"`, `"superseded"` (a prior version at that keypath existed), or `"unchanged"` (identical content to current live version — no new row written).
+- When extracting, each `##` becomes a keypath prefixed with `<project_id>.` by default. Pass `root: ""` to disable the prefix, or `root: "<anything>"` to override.
+- Common section names collapse to canonical slugs: `## TODOs → todo`, `## Open Questions → questions`, `## Files to touch → files`, etc.
+- Prose before the first `##` is captured under `<root>.preamble`.
+
+### `memstate_search` — semantic mode
+
+Under `mode="semantic"` the daemon embeds the query via Ollama, cosine-
+ranks against stored **keypath** embeddings (one row per unique
+`(project, keypath, model)` — keypaths are stable across versions), and
+filters by `threshold` (default 0.5). Tune via the request field or
+`MEMSTATE_SEMANTIC_THRESHOLD`. Each result pairs the keypath with the
+current non-tombstoned memory at that keypath and the similarity score.
 
 ## How storage works
 
@@ -97,9 +126,11 @@ rather than silently overwriting. `memstate_history` walks the full
 chain. `memstate_delete` appends a tombstone row: the data is still
 there in history, but no longer surfaces in reads or search.
 
-Search is SQLite FTS5 — fast, lexical, works offline. Semantic search
-(via Ollama) is on the roadmap and has an empty embeddings table
-waiting for it.
+Two search paths: SQLite FTS5 (fast, lexical, works offline) and
+semantic keypath search via Ollama embeddings. Embeddings are fire-and-
+forget on write — the HTTP write returns immediately and a goroutine
+embeds the new keypath in the background. If Ollama is unreachable the
+daemon logs once per hour and moves on; FTS search is unaffected.
 
 ## Where your data lives
 
@@ -107,7 +138,10 @@ waiting for it.
 |---|---|
 | SQLite DB | `~/.memstate/memstate.db` (override with `MEMSTATE_DB`; `~/` is expanded) |
 | Daemon log | `~/.memstate/memstated.log` |
-| Network egress | None. The daemon binds `127.0.0.1` only. |
+| Ollama URL | `http://127.0.0.1:11434` (override `MEMSTATE_OLLAMA_URL`) |
+| Embed model | `nomic-embed-text` (override `MEMSTATE_EMBED_MODEL`) |
+| Semantic threshold | `0.5` (override `MEMSTATE_SEMANTIC_THRESHOLD` or per-request) |
+| Network egress | The daemon binds `127.0.0.1` only. Ollama calls, when enabled, go to the configured Ollama URL — typically also loopback. |
 
 For a per-project DB, put it in the MCP config's `env:` block:
 
@@ -151,10 +185,20 @@ child-vs-attach model as the MCP proxy. Each invocation with no
 exit.
 
 ```bash
+# Explicit keypath
 python3 client/skill/scripts/memstate_remember.py \
   --project my_app \
   --keypath task.summary.2026-04-21 \
   --content "## Auth migration done"
+
+# Or omit --keypath to extract one memory per heading
+python3 client/skill/scripts/memstate_remember.py \
+  --project my_app \
+  --content "$(cat summary.md)"
+
+# Semantic search
+python3 client/skill/scripts/memstate_search.py \
+  --project my_app --mode semantic --query "how do users log in"
 ```
 
 See `client/skill/SKILL.md` for the skill-style usage contract.
@@ -183,9 +227,10 @@ mode.
 
 ## Not done yet
 
-- Semantic search via Ollama. Empty `embeddings` table in the schema.
+- LLM fallback for keypath extraction when headings are absent (currently such content lands under `<root>.preamble`).
 - Time-travel reads (`at_revision` is accepted but ignored).
 - Category / topic facets (same).
+- `reindex-embeddings` subcommand for when `MEMSTATE_EMBED_MODEL` changes — existing embeddings get silently ignored on search until their keypaths are written again.
 
 ## License
 
