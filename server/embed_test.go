@@ -86,10 +86,11 @@ func mockOllama(t *testing.T) *httptest.Server {
 func newTestEmbedder(t *testing.T, ollama *httptest.Server) *Embedder {
 	t.Helper()
 	return &Embedder{
-		URL:          ollama.URL,
-		Model:        "mock",
-		Client:       &http.Client{Timeout: 2 * time.Second},
-		errorLogCool: time.Hour,
+		URL:    ollama.URL,
+		Model:  "mock",
+		Client: &http.Client{Timeout: 2 * time.Second},
+		// No throttle in tests — we want every goroutine error visible.
+		errorLogCool: 0,
 	}
 }
 
@@ -115,18 +116,19 @@ func TestHTTPEmbedOnWriteAndSemanticSearch(t *testing.T) {
 	ts := newTestServerWithEmbedder(t, embedder)
 
 	// Seed three keypaths with distinct topics so the mock produces distinct vectors.
-	postJSON(t, ts.URL+"/api/v1/memories/remember", map[string]any{
-		"project_id": "my_app",
-		"content":    "## Authentication provider\n\nUsing SuperTokens.\n",
-	})
-	postJSON(t, ts.URL+"/api/v1/memories/remember", map[string]any{
-		"project_id": "my_app",
-		"content":    "## Database engine\n\nPostgres 15.\n",
-	})
-	postJSON(t, ts.URL+"/api/v1/memories/remember", map[string]any{
-		"project_id": "my_app",
-		"content":    "## Cache layer\n\nRedis cluster.\n",
-	})
+	for _, c := range []string{
+		"## Authentication provider\n\nUsing SuperTokens.\n",
+		"## Database engine\n\nPostgres 15.\n",
+		"## Cache layer\n\nRedis cluster.\n",
+	} {
+		code, body := postJSON(t, ts.URL+"/api/v1/memories/remember", map[string]any{
+			"project_id": "my_app",
+			"content":    c,
+		})
+		if code != 200 {
+			t.Fatalf("remember failed %d: %+v (content=%q)", code, body, c)
+		}
+	}
 
 	// Deterministic: block until all fire-and-forget goroutines finish.
 	embedder.WaitForPending()

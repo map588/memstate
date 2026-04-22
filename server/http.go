@@ -117,9 +117,7 @@ func maybeEmbedKeypath(store *Store, embedder *Embedder, projectID, keypath stri
 	if embedder == nil {
 		return
 	}
-	embedder.inFlight.Add(1)
-	go func() {
-		defer embedder.inFlight.Done()
+	embedder.inFlight.Go(func() {
 		has, err := store.HasKeypathEmbedding(projectID, keypath, embedder.Model)
 		if err != nil {
 			embedder.maybeLog(fmt.Sprintf("has-embedding check failed for %s/%s: %v",
@@ -142,7 +140,7 @@ func maybeEmbedKeypath(store *Store, embedder *Embedder, projectID, keypath stri
 			embedder.maybeLog(fmt.Sprintf("upsert embedding for %s/%s: %v",
 				projectID, keypath, err))
 		}
-	}()
+	})
 }
 
 // ---------- write handlers ----------
@@ -370,11 +368,14 @@ func handleDeleteProject(store *Store) http.HandlerFunc {
 // ---------- read handlers ----------
 
 type searchReq struct {
-	Query     string  `json:"query"`
-	ProjectID string  `json:"project_id,omitempty"`
-	Limit     int     `json:"limit,omitempty"`
-	Mode      string  `json:"mode,omitempty"`      // "fts" (default) | "semantic"
-	Threshold float32 `json:"threshold,omitempty"` // semantic only; 0 = use env / default
+	Query     string `json:"query"`
+	ProjectID string `json:"project_id,omitempty"`
+	Limit     int    `json:"limit,omitempty"`
+	Mode      string `json:"mode,omitempty"` // "fts" (default) | "semantic"
+	// Threshold is semantic-only. nil (absent) → MEMSTATE_SEMANTIC_THRESHOLD
+	// env / defaultThreshold. An explicit value (including 0 or negative) is
+	// honoured as-is so callers can accept-all with threshold=0.
+	Threshold *float32 `json:"threshold,omitempty"`
 }
 
 func handleSearch(store *Store, embedder *Embedder) http.HandlerFunc {
@@ -426,8 +427,10 @@ func handleSearch(store *Store, embedder *Embedder) http.HandlerFunc {
 					fmt.Sprintf("embed query: %v", err))
 				return
 			}
-			threshold := in.Threshold
-			if threshold == 0 {
+			var threshold float32
+			if in.Threshold != nil {
+				threshold = *in.Threshold
+			} else {
 				threshold = envThreshold()
 			}
 			hits, err := store.SemanticSearch(in.ProjectID, qvec, embedder.Model, threshold, in.Limit)

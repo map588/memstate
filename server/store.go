@@ -11,10 +11,6 @@ import (
 )
 
 const schema = `
-PRAGMA journal_mode = WAL;
-PRAGMA foreign_keys = ON;
-PRAGMA busy_timeout = 5000;
-
 CREATE TABLE IF NOT EXISTS projects (
   id         TEXT PRIMARY KEY,
   created_at INTEGER NOT NULL,
@@ -85,13 +81,49 @@ type Store struct {
 
 func OpenStore(path string) (*Store, error) {
 	// Apply PRAGMAs per connection via DSN so every pooled connection
-	// shares busy-wait behaviour and WAL mode. SQLite PRAGMAs set on one
-	// connection do not propagate to siblings.
-	dsn := path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
-	db, err := sql.Open("sqlite", dsn)
+	// inherits the same behaviour. SQLite PRAGMAs set on one connection do
+	// not propagate to siblings, so the DSN is the only reliable place.
+	//
+	// - busy_timeout=5000: writers wait up to 5s when another writer holds
+	//   the DB lock. Belt-and-suspenders with MaxOpenConns=1 below.
+	// - journal_mode=WAL: concurrent readers + single writer.
+	// - synchronous=NORMAL: safe under WAL, faster than FULL.
+	// - cache_size=-64000: 64MB page cache (negative = KB).
+	// - mmap_size=268435456: 256MB memory-mapped reads. Safe because we
+	//   use a single pooled connection (see SetMaxOpenConns below), so the
+	//   cross-connection stale-read race that can surface on macOS does
+	//   not apply here.
+	// - temp_store=MEMORY: keep temp tables / sort scratch in RAM.
+	// - foreign_keys=1: enforce FK constraints.
+	pragmas := []string{
+		"busy_timeout(5000)",
+		"journal_mode(WAL)",
+		"synchronous(NORMAL)",
+		"cache_size(-64000)",
+		"mmap_size(268435456)",
+		"temp_store(MEMORY)",
+		"foreign_keys(1)",
+	}
+	var dsn strings.Builder
+	dsn.WriteString(path)
+	for i, p := range pragmas {
+		if i == 0 {
+			dsn.WriteByte('?')
+		} else {
+			dsn.WriteByte('&')
+		}
+		dsn.WriteString("_pragma=")
+		dsn.WriteString(p)
+	}
+	db, err := sql.Open("sqlite", dsn.String())
 	if err != nil {
 		return nil, err
 	}
+	// Single connection serializes all DB access. At this scale (small
+	// writes, small reads, no long-running queries) the contention savings
+	// outweigh the parallelism loss, and it sidesteps modernc.org/sqlite's
+	// per-connection PRAGMA quirks under concurrent fire-and-forget embeds.
+	db.SetMaxOpenConns(1)
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
