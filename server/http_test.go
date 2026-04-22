@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 )
 
@@ -199,7 +198,7 @@ func TestHTTPRememberExtractHeadings(t *testing.T) {
 	ts := newTestServer(t)
 	md := "## Auth\n\nSuperTokens.\n\n## Database\n\nPostgres 15.\n"
 	code, body := postJSON(t, ts.URL+"/api/v1/memories/remember", map[string]any{
-		"project_id": "p", "content": md,
+		"project_id": "my_app", "content": md,
 	})
 	if code != 200 || body["method"] != "headings" {
 		t.Fatalf("headings: %d %+v", code, body)
@@ -216,28 +215,159 @@ func TestHTTPRememberExtractHeadings(t *testing.T) {
 			t.Fatalf("want created, got %+v", it)
 		}
 	}
-	if !keypaths["auth"] || !keypaths["database"] {
-		t.Fatalf("missing expected keypaths: %+v", keypaths)
+	if !keypaths["my_app.auth"] || !keypaths["my_app.database"] {
+		t.Fatalf("keypaths missing project_id prefix: %+v", keypaths)
 	}
 }
 
-func TestHTTPRememberRejectsUnstructuredProse(t *testing.T) {
+func TestHTTPRememberRootOverrideEmpty(t *testing.T) {
+	ts := newTestServer(t)
+	empty := ""
+	code, body := postJSON(t, ts.URL+"/api/v1/memories/remember", map[string]any{
+		"project_id": "my_app",
+		"content":    "## Auth\n\nx\n",
+		"root":       empty, // explicit "" disables the project_id default
+	})
+	if code != 200 {
+		t.Fatalf("code %d %+v", code, body)
+	}
+	items := body["items"].([]any)
+	it := items[0].(map[string]any)
+	if it["keypath"] != "auth" {
+		t.Fatalf("explicit empty root should drop prefix, got %v", it["keypath"])
+	}
+}
+
+func TestHTTPRememberRootOverrideExplicit(t *testing.T) {
 	ts := newTestServer(t)
 	code, body := postJSON(t, ts.URL+"/api/v1/memories/remember", map[string]any{
-		"project_id": "p", "content": "Just prose with no headings.",
+		"project_id": "my_app",
+		"content":    "## Auth\n\nx\n",
+		"root":       "session.today",
 	})
-	if code != 400 || !strings.Contains(body["error"].(string), "heading") {
-		t.Fatalf("expected headings-required error: %d %+v", code, body)
+	if code != 200 {
+		t.Fatalf("code %d %+v", code, body)
+	}
+	items := body["items"].([]any)
+	it := items[0].(map[string]any)
+	if it["keypath"] != "session.today.auth" {
+		t.Fatalf("explicit root ignored: %v", it["keypath"])
+	}
+}
+
+func TestHTTPRememberPreambleCaptured(t *testing.T) {
+	ts := newTestServer(t)
+	md := "Intro text outside any heading.\nMore intro.\n\n## Auth\n\nbody\n"
+	code, body := postJSON(t, ts.URL+"/api/v1/memories/remember", map[string]any{
+		"project_id": "my_app", "content": md,
+	})
+	if code != 200 {
+		t.Fatalf("code %d %+v", code, body)
+	}
+	items := body["items"].([]any)
+	kps := map[string]string{}
+	for _, raw := range items {
+		it := raw.(map[string]any)
+		kps[it["keypath"].(string)] = it["stored"].(map[string]any)["content"].(string)
+	}
+	if _, ok := kps["my_app.preamble"]; !ok {
+		t.Fatalf("preamble not captured: %+v", kps)
+	}
+	if _, ok := kps["my_app.auth"]; !ok {
+		t.Fatalf("auth missing: %+v", kps)
+	}
+}
+
+func TestHTTPRememberReservedAliases(t *testing.T) {
+	ts := newTestServer(t)
+	md := "## TODOs\n\na\n\n## Decisions\n\nb\n\n## Open Questions\n\nc\n"
+	code, body := postJSON(t, ts.URL+"/api/v1/memories/remember", map[string]any{
+		"project_id": "my_app", "content": md,
+	})
+	if code != 200 {
+		t.Fatalf("code %d %+v", code, body)
+	}
+	items := body["items"].([]any)
+	got := map[string]bool{}
+	for _, raw := range items {
+		got[raw.(map[string]any)["keypath"].(string)] = true
+	}
+	for _, want := range []string{"my_app.todo", "my_app.decisions", "my_app.questions"} {
+		if !got[want] {
+			t.Fatalf("want %s in %+v", want, got)
+		}
+	}
+}
+
+func TestHTTPRememberUnchangedOnIdenticalContent(t *testing.T) {
+	ts := newTestServer(t)
+	md := "## Auth\n\nSuperTokens.\n"
+	postJSON(t, ts.URL+"/api/v1/memories/remember", map[string]any{
+		"project_id": "my_app", "content": md,
+	})
+	_, body := postJSON(t, ts.URL+"/api/v1/memories/remember", map[string]any{
+		"project_id": "my_app", "content": md,
+	})
+	items := body["items"].([]any)
+	it := items[0].(map[string]any)
+	if it["action"] != "unchanged" {
+		t.Fatalf("want unchanged on identical content: %+v", it)
+	}
+	// Identity: stored and superseded reference the same memory id.
+	stored := it["stored"].(map[string]any)
+	superseded := it["superseded"].(map[string]any)
+	if stored["id"] != superseded["id"] {
+		t.Fatalf("unchanged should return same id for stored and superseded: %+v", it)
+	}
+}
+
+func TestHTTPStoreUnchangedOnIdenticalContent(t *testing.T) {
+	ts := newTestServer(t)
+	postJSON(t, ts.URL+"/api/v1/memories/store", map[string]any{
+		"project_id": "p", "keypath": "k", "content": "v1",
+	})
+	_, body := postJSON(t, ts.URL+"/api/v1/memories/store", map[string]any{
+		"project_id": "p", "keypath": "k", "content": "v1",
+	})
+	if body["action"] != "unchanged" {
+		t.Fatalf("want unchanged: %+v", body)
+	}
+}
+
+func TestHTTPRememberProseBecomesPreamble(t *testing.T) {
+	ts := newTestServer(t)
+	code, body := postJSON(t, ts.URL+"/api/v1/memories/remember", map[string]any{
+		"project_id": "my_app", "content": "Just prose with no headings.",
+	})
+	if code != 200 {
+		t.Fatalf("prose-only content should succeed as preamble: %d %+v", code, body)
+	}
+	items := body["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("want 1 item, got %+v", items)
+	}
+	if items[0].(map[string]any)["keypath"] != "my_app.preamble" {
+		t.Fatalf("prose should go to <project>.preamble: %+v", items[0])
+	}
+}
+
+func TestHTTPRememberRejectsWhitespaceOnly(t *testing.T) {
+	ts := newTestServer(t)
+	code, _ := postJSON(t, ts.URL+"/api/v1/memories/remember", map[string]any{
+		"project_id": "p", "content": "   \n\n\n",
+	})
+	if code != 400 {
+		t.Fatalf("whitespace-only content should 400, got %d", code)
 	}
 }
 
 func TestHTTPRememberSupersedesAcrossCalls(t *testing.T) {
 	ts := newTestServer(t)
 	postJSON(t, ts.URL+"/api/v1/memories/remember", map[string]any{
-		"project_id": "p", "content": "## Auth\n\nv1 body.\n",
+		"project_id": "my_app", "content": "## Auth\n\nv1 body.\n",
 	})
 	_, body := postJSON(t, ts.URL+"/api/v1/memories/remember", map[string]any{
-		"project_id": "p", "content": "## Auth\n\nv2 body.\n",
+		"project_id": "my_app", "content": "## Auth\n\nv2 body.\n",
 	})
 	items := body["items"].([]any)
 	it := items[0].(map[string]any)

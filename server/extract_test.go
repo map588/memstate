@@ -24,11 +24,7 @@ func TestSlug(t *testing.T) {
 }
 
 func TestExtractHeadings_FlatSections(t *testing.T) {
-	md := `# Doc Title
-
-Preamble prose is ignored.
-
-## Auth
+	md := `## Auth
 
 Using SuperTokens.
 
@@ -40,6 +36,57 @@ Postgres 15.
 	want := []Section{
 		{Keypath: "auth", Content: "Using SuperTokens."},
 		{Keypath: "database", Content: "Postgres 15."},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}
+
+func TestExtractHeadings_PreambleCaptured(t *testing.T) {
+	md := `Intro prose here.
+
+## Auth
+
+body
+`
+	got := ExtractHeadings(md, "root")
+	want := []Section{
+		{Keypath: "root.preamble", Content: "Intro prose here."},
+		{Keypath: "root.auth", Content: "body"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}
+
+func TestExtractHeadings_H1ContentFlushed(t *testing.T) {
+	md := `# Title
+
+Some lead paragraph.
+
+## Auth
+
+body
+`
+	got := ExtractHeadings(md, "")
+	// "Some lead paragraph." comes between h1 and h2 → captured as preamble.
+	want := []Section{
+		{Keypath: "preamble", Content: "Some lead paragraph."},
+		{Keypath: "auth", Content: "body"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}
+
+func TestExtractHeadings_ReservedAliases(t *testing.T) {
+	md := "## TODOs\n\na\n\n## Decisions\n\nb\n\n## Open Questions\n\nc\n\n## Files to touch\n\nd\n"
+	got := ExtractHeadings(md, "")
+	want := []Section{
+		{Keypath: "todo", Content: "a"},
+		{Keypath: "decisions", Content: "b"},
+		{Keypath: "questions", Content: "c"},
+		{Keypath: "files", Content: "d"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v, want %+v", got, want)
@@ -120,9 +167,14 @@ Has body.
 }
 
 func TestExtractHeadings_NoHeadings(t *testing.T) {
-	got := ExtractHeadings("Just prose.\nNothing structural.\n", "")
-	if len(got) != 0 {
-		t.Fatalf("want 0 sections, got %+v", got)
+	// With preamble capture, prose-only content becomes a single "preamble"
+	// section rather than being silently dropped.
+	got := ExtractHeadings("Just prose.\nNothing structural.", "")
+	want := []Section{
+		{Keypath: "preamble", Content: "Just prose.\nNothing structural."},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v, want %+v", got, want)
 	}
 }
 

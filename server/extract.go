@@ -21,6 +21,11 @@ var headingRe = regexp.MustCompile(`^(#{1,6})\s+(.+?)\s*#*\s*$`)
 // section is every line from its heading to the next heading of the same
 // or shallower level. Sections with empty content are dropped.
 //
+// Any non-empty prose appearing before the first h2+ heading is captured
+// as a synthetic "preamble" section so it is not silently discarded.
+// Common section names are normalized via aliasSlug so equivalent phrasings
+// collapse to a canonical keypath (see reservedAliases).
+//
 // If root is non-empty, each extracted keypath is prefixed with it.
 // Headings inside fenced code blocks (``` or ~~~) are ignored.
 func ExtractHeadings(content, root string) []Section {
@@ -37,17 +42,27 @@ func ExtractHeadings(content, root string) []Section {
 	var curKey string
 	inFence := false
 
+	prefix := func(seg string) string {
+		if root == "" {
+			return seg
+		}
+		if seg == "" {
+			return root
+		}
+		return root + "." + seg
+	}
+
 	flush := func() {
-		if curKey == "" {
-			buf.Reset()
+		body := strings.TrimSpace(buf.String())
+		buf.Reset()
+		if body == "" {
 			return
 		}
-		body := strings.TrimSpace(buf.String())
-		if body != "" {
-			out = append(out, Section{Keypath: curKey, Content: body})
+		key := curKey
+		if key == "" {
+			key = prefix("preamble")
 		}
-		buf.Reset()
-		curKey = ""
+		out = append(out, Section{Keypath: key, Content: body})
 	}
 
 	keyFromStack := func() string {
@@ -55,14 +70,7 @@ func ExtractHeadings(content, root string) []Section {
 		for _, f := range stack {
 			parts = append(parts, f.slug)
 		}
-		k := strings.Join(parts, ".")
-		if root != "" && k != "" {
-			return root + "." + k
-		}
-		if root != "" {
-			return root
-		}
-		return k
+		return prefix(strings.Join(parts, "."))
 	}
 
 	for _, ln := range lines {
@@ -88,6 +96,7 @@ func ExtractHeadings(content, root string) []Section {
 		title := strings.TrimSpace(m[2])
 
 		flush()
+		curKey = ""
 
 		if level == 1 {
 			stack = stack[:0]
@@ -96,7 +105,7 @@ func ExtractHeadings(content, root string) []Section {
 		for len(stack) > 0 && stack[len(stack)-1].level >= level {
 			stack = stack[:len(stack)-1]
 		}
-		sl := Slug(title)
+		sl := aliasSlug(Slug(title))
 		if sl == "" {
 			continue
 		}
@@ -105,6 +114,36 @@ func ExtractHeadings(content, root string) []Section {
 	}
 	flush()
 	return out
+}
+
+// reservedAliases maps common section-name slugs to canonical forms so
+// that equivalent phrasings converge on the same keypath.
+var reservedAliases = map[string]string{
+	"todo":           "todo",
+	"todos":          "todo",
+	"to_do":          "todo",
+	"to_dos":         "todo",
+	"decision":       "decisions",
+	"decisions":      "decisions",
+	"question":       "questions",
+	"questions":      "questions",
+	"open_question":  "questions",
+	"open_questions": "questions",
+	"file":           "files",
+	"files":          "files",
+	"files_to_touch": "files",
+	"files_touched":  "files",
+	"note":           "notes",
+	"notes":          "notes",
+	"gotcha":         "gotchas",
+	"gotchas":        "gotchas",
+}
+
+func aliasSlug(s string) string {
+	if canonical, ok := reservedAliases[s]; ok {
+		return canonical
+	}
+	return s
 }
 
 // Slug converts a heading title to a keypath segment: lowercase, runs of

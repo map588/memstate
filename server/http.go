@@ -145,21 +145,24 @@ func handleStore(store *Store) http.HandlerFunc {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		action := "created"
-		if prev != nil {
-			action = "superseded"
-		}
-		writeJSON(w, http.StatusOK, writeResp{Action: action, Stored: stored, Superseded: prev})
+		writeJSON(w, http.StatusOK, writeResp{
+			Action:     classifyWrite(stored, prev),
+			Stored:     stored,
+			Superseded: prev,
+		})
 	}
 }
 
 type rememberReq struct {
-	ProjectID string `json:"project_id"`
-	Keypath   string `json:"keypath,omitempty"` // optional — extraction runs when empty
-	Content   string `json:"content"`
-	Source    string `json:"source,omitempty"`
-	Root      string `json:"root,omitempty"`    // prefix applied to extracted keypaths
-	Context   string `json:"context,omitempty"` // accepted but not used
+	ProjectID string  `json:"project_id"`
+	Keypath   string  `json:"keypath,omitempty"` // optional — extraction runs when empty
+	Content   string  `json:"content"`
+	Source    string  `json:"source,omitempty"`
+	// Root is the prefix applied to every extracted keypath. Absent (nil)
+	// means "default to <project_id>". An explicit "" disables the prefix.
+	// Any explicit value is used as-is after keypath normalization.
+	Root    *string `json:"root,omitempty"`
+	Context string  `json:"context,omitempty"` // accepted but not used
 }
 
 // extractedItem is one entry in a batch remember response.
@@ -200,7 +203,11 @@ func handleRemember(store *Store) http.HandlerFunc {
 		if in.Keypath != "" {
 			sections = []Section{{Keypath: NormalizeKeypath(in.Keypath), Content: in.Content}}
 		} else {
-			sections = ExtractHeadings(in.Content, NormalizeKeypath(in.Root))
+			root := in.ProjectID
+			if in.Root != nil {
+				root = NormalizeKeypath(*in.Root)
+			}
+			sections = ExtractHeadings(in.Content, root)
 			method = "headings"
 			if len(sections) == 0 {
 				writeErr(w, http.StatusBadRequest,
@@ -217,19 +224,29 @@ func handleRemember(store *Store) http.HandlerFunc {
 		}
 		out := rememberResp{Method: method, Items: make([]extractedItem, len(batch))}
 		for i, it := range batch {
-			action := "created"
-			if it.Superseded != nil {
-				action = "superseded"
-			}
 			out.Items[i] = extractedItem{
 				Keypath:    it.Keypath,
-				Action:     action,
+				Action:     classifyWrite(it.Stored, it.Superseded),
 				Stored:     it.Stored,
 				Superseded: it.Superseded,
 			}
 		}
 		writeJSON(w, http.StatusOK, out)
 	}
+}
+
+// classifyWrite names the outcome of a single write:
+// "created"    — no prior version existed
+// "superseded" — a new version superseded a distinct prior version
+// "unchanged"  — identical content to the current version, nothing written
+func classifyWrite(stored, prev *Memory) string {
+	if prev == nil {
+		return "created"
+	}
+	if stored != nil && stored.ID == prev.ID {
+		return "unchanged"
+	}
+	return "superseded"
 }
 
 type deleteReq struct {

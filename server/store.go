@@ -174,10 +174,18 @@ func (s *Store) Write(projectID, keypath, content, source string, tombstone bool
 
 // writeExec is the tx-capable core of Write. Caller is responsible for
 // ensureProject; within a batch tx we hoist that call outside the loop.
+//
+// Idempotency: if the prior live version has identical content (and this
+// call is not a tombstone), no new row is written. Both return values
+// point at the same prior memory — callers detect "unchanged" via pointer
+// or ID equality.
 func writeExec(exec dbExec, projectID, keypath, content, source string, tombstone bool) (*Memory, *Memory, error) {
 	prev, err := getLatestExec(exec, projectID, keypath)
 	if err != nil {
 		return nil, nil, err
+	}
+	if !tombstone && prev != nil && !prev.Tombstone && prev.Content == content {
+		return prev, prev, nil
 	}
 	nextVer := 1
 	var parent sql.NullInt64

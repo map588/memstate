@@ -298,8 +298,10 @@ const TOOLS: ToolDef[] = [
     description:
       "Store a markdown summary. If keypath is provided, writes to it directly. " +
       "If keypath is omitted, the server extracts one keypath per ## heading " +
-      "(deeper headings nest as dot segments) and writes each section as its own " +
-      "versioned memory. Returns { method, items: [...] }.",
+      "(deeper headings nest as dot segments) and writes each section as its " +
+      "own versioned memory. Pre-heading prose is captured under a 'preamble' " +
+      "sub-keypath. Identical content to the current version is skipped " +
+      '(action: "unchanged"). Returns { method, items: [...] }.',
     inputSchema: {
       type: "object",
       properties: {
@@ -312,7 +314,9 @@ const TOOLS: ToolDef[] = [
         source: { type: "string" },
         root: {
           type: "string",
-          description: "optional prefix applied to every extracted keypath",
+          description:
+            "prefix for extracted keypaths. Omit to default to project_id; pass " +
+            '"" to disable prefixing',
         },
       },
       required: ["project_id", "content"],
