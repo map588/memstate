@@ -139,6 +139,63 @@ func TestStoreGetByID(t *testing.T) {
 	}
 }
 
+func TestStoreWriteBatch(t *testing.T) {
+	s := newTestStore(t)
+	// Pre-existing row to force a superseded result for one section.
+	_, _, _ = s.Write("p", "auth", "v1", "agent", false)
+
+	secs := []Section{
+		{Keypath: "auth", Content: "v2"},
+		{Keypath: "db.engine", Content: "pg"},
+		{Keypath: "cache", Content: "redis"},
+	}
+	items, err := s.WriteBatch("p", secs, "agent")
+	if err != nil {
+		t.Fatalf("batch: %v", err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("want 3 items, got %d", len(items))
+	}
+	if items[0].Superseded == nil || items[0].Superseded.Version != 1 || items[0].Stored.Version != 2 {
+		t.Fatalf("auth supersede wrong: %+v", items[0])
+	}
+	if items[1].Superseded != nil || items[1].Stored.Version != 1 {
+		t.Fatalf("db.engine expected fresh v1: %+v", items[1])
+	}
+	if items[2].Superseded != nil || items[2].Stored.Content != "redis" {
+		t.Fatalf("cache wrong: %+v", items[2])
+	}
+	// All rows visible post-commit.
+	list, _ := s.List("p", "")
+	if len(list) != 3 {
+		t.Fatalf("want 3 live memories, got %d: %+v", len(list), list)
+	}
+}
+
+func TestStoreWriteBatchSameKeypath(t *testing.T) {
+	s := newTestStore(t)
+	// Same keypath twice in one batch must chain: v1 then v2, both visible
+	// via History (latest wins in List).
+	secs := []Section{
+		{Keypath: "same", Content: "first"},
+		{Keypath: "same", Content: "second"},
+	}
+	items, err := s.WriteBatch("p", secs, "")
+	if err != nil {
+		t.Fatalf("batch: %v", err)
+	}
+	if items[0].Stored.Version != 1 || items[0].Superseded != nil {
+		t.Fatalf("first write wrong: %+v", items[0])
+	}
+	if items[1].Stored.Version != 2 || items[1].Superseded == nil || items[1].Superseded.Version != 1 {
+		t.Fatalf("second write did not chain: %+v", items[1])
+	}
+	hist, _ := s.History("p", "same")
+	if len(hist) != 2 {
+		t.Fatalf("history: want 2 versions, got %d", len(hist))
+	}
+}
+
 func TestProjectDeletedSemantics(t *testing.T) {
 	s := newTestStore(t)
 	deleted, err := s.ProjectDeleted("never-existed")

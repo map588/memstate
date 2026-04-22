@@ -155,10 +155,28 @@ func handleStore(store *Store) http.HandlerFunc {
 
 type rememberReq struct {
 	ProjectID string `json:"project_id"`
-	Keypath   string `json:"keypath"`
+	Keypath   string `json:"keypath,omitempty"` // optional — extraction runs when empty
 	Content   string `json:"content"`
 	Source    string `json:"source,omitempty"`
+	Root      string `json:"root,omitempty"`    // prefix applied to extracted keypaths
 	Context   string `json:"context,omitempty"` // accepted but not used
+}
+
+// extractedItem is one entry in a batch remember response.
+type extractedItem struct {
+	Keypath    string  `json:"keypath"`
+	Action     string  `json:"action"` // "created" | "superseded"
+	Stored     *Memory `json:"stored"`
+	Superseded *Memory `json:"superseded,omitempty"`
+}
+
+// rememberResp is returned from /memories/remember regardless of whether the
+// caller supplied an explicit keypath or relied on heading extraction. The
+// single-keypath path returns a one-element Items array so callers have one
+// shape to parse.
+type rememberResp struct {
+	Method string          `json:"method"` // "explicit" | "headings"
+	Items  []extractedItem `json:"items"`
 }
 
 func handleRemember(store *Store) http.HandlerFunc {
@@ -172,26 +190,45 @@ func handleRemember(store *Store) http.HandlerFunc {
 			writeErr(w, http.StatusBadRequest, "project_id and content are required")
 			return
 		}
-		if in.Keypath == "" {
-			writeErr(w, http.StatusBadRequest,
-				"keypath is required in local mode (auto-extraction not supported)")
-			return
-		}
 		if err := checkProjectLive(store, in.ProjectID); err != nil {
 			writeErr(w, http.StatusConflict, err.Error())
 			return
 		}
-		kp := NormalizeKeypath(in.Keypath)
-		stored, prev, err := store.Write(in.ProjectID, kp, in.Content, in.Source, false)
+
+		var sections []Section
+		method := "explicit"
+		if in.Keypath != "" {
+			sections = []Section{{Keypath: NormalizeKeypath(in.Keypath), Content: in.Content}}
+		} else {
+			sections = ExtractHeadings(in.Content, NormalizeKeypath(in.Root))
+			method = "headings"
+			if len(sections) == 0 {
+				writeErr(w, http.StatusBadRequest,
+					"no keypath provided and no ## headings found in content; "+
+						"either pass an explicit keypath or include h2+ headings")
+				return
+			}
+		}
+
+		batch, err := store.WriteBatch(in.ProjectID, sections, in.Source)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		action := "created"
-		if prev != nil {
-			action = "superseded"
+		out := rememberResp{Method: method, Items: make([]extractedItem, len(batch))}
+		for i, it := range batch {
+			action := "created"
+			if it.Superseded != nil {
+				action = "superseded"
+			}
+			out.Items[i] = extractedItem{
+				Keypath:    it.Keypath,
+				Action:     action,
+				Stored:     it.Stored,
+				Superseded: it.Superseded,
+			}
 		}
-		writeJSON(w, http.StatusOK, writeResp{Action: action, Stored: stored, Superseded: prev})
+		writeJSON(w, http.StatusOK, out)
 	}
 }
 

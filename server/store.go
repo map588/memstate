@@ -136,10 +136,21 @@ func scanMemory(scan func(dest ...any) error) (*Memory, error) {
 // has a keypath column) without provoking "ambiguous column" errors.
 const memoryCols = `m.id, m.project_id, m.keypath, m.content, m.source, m.version, m.parent_id, m.tombstone, m.created_at`
 
+// dbExec abstracts the subset of *sql.DB / *sql.Tx used by write helpers,
+// so the same code path can run inside a batch transaction or stand-alone.
+type dbExec interface {
+	Exec(query string, args ...any) (sql.Result, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
+
 // GetLatest returns the current (highest version) memory at keypath, or nil if absent.
 // A tombstoned latest is returned so callers can distinguish deleted from never-set.
 func (s *Store) GetLatest(projectID, keypath string) (*Memory, error) {
-	row := s.db.QueryRow(
+	return getLatestExec(s.db, projectID, keypath)
+}
+
+func getLatestExec(exec dbExec, projectID, keypath string) (*Memory, error) {
+	row := exec.QueryRow(
 		`SELECT `+memoryCols+` FROM memories m
 		 WHERE m.project_id=? AND m.keypath=?
 		 ORDER BY m.version DESC LIMIT 1`,
@@ -158,7 +169,13 @@ func (s *Store) Write(projectID, keypath, content, source string, tombstone bool
 	if err := s.ensureProject(projectID); err != nil {
 		return nil, nil, err
 	}
-	prev, err := s.GetLatest(projectID, keypath)
+	return writeExec(s.db, projectID, keypath, content, source, tombstone)
+}
+
+// writeExec is the tx-capable core of Write. Caller is responsible for
+// ensureProject; within a batch tx we hoist that call outside the loop.
+func writeExec(exec dbExec, projectID, keypath, content, source string, tombstone bool) (*Memory, *Memory, error) {
+	prev, err := getLatestExec(exec, projectID, keypath)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -177,7 +194,7 @@ func (s *Store) Write(projectID, keypath, content, source string, tombstone bool
 	if source != "" {
 		srcArg = source
 	}
-	res, err := s.db.Exec(
+	res, err := exec.Exec(
 		`INSERT INTO memories(project_id, keypath, content, source, version, parent_id, tombstone, created_at)
 		 VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
 		projectID, keypath, content, srcArg, nextVer, parent, tombVal, now,
@@ -187,7 +204,7 @@ func (s *Store) Write(projectID, keypath, content, source string, tombstone bool
 	}
 	id, _ := res.LastInsertId()
 	if !tombstone {
-		if _, err := s.db.Exec(
+		if _, err := exec.Exec(
 			`INSERT INTO memories_fts(rowid, content, keypath) VALUES(?, ?, ?)`,
 			id, content, keypath,
 		); err != nil {
@@ -203,6 +220,50 @@ func (s *Store) Write(projectID, keypath, content, source string, tombstone bool
 		m.ParentID = &pid
 	}
 	return m, prev, nil
+}
+
+// BatchItem reports the outcome of one section in a WriteBatch call.
+type BatchItem struct {
+	Keypath    string
+	Stored     *Memory
+	Superseded *Memory
+}
+
+// WriteBatch writes all sections under a single transaction. On any per-row
+// error the whole batch is rolled back — callers see no partial state.
+// Source applies to every row. Sections are processed in order, so a later
+// section can observe a prior section's write via parent_id chain.
+func (s *Store) WriteBatch(projectID string, sections []Section, source string) ([]BatchItem, error) {
+	if len(sections) == 0 {
+		return nil, nil
+	}
+	if err := s.ensureProject(projectID); err != nil {
+		return nil, err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	out := make([]BatchItem, 0, len(sections))
+	for _, sec := range sections {
+		kp := NormalizeKeypath(sec.Keypath)
+		stored, prev, err := writeExec(tx, projectID, kp, sec.Content, source, false)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, BatchItem{Keypath: kp, Stored: stored, Superseded: prev})
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	committed = true
+	return out, nil
 }
 
 // List returns current-version, non-tombstoned memories matching keypath.

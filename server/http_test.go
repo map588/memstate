@@ -177,12 +177,71 @@ func TestHTTPRejectMissingFields(t *testing.T) {
 	}
 }
 
-func TestHTTPRejectRemoteWithoutKeypath(t *testing.T) {
+func TestHTTPRememberExplicitKeypath(t *testing.T) {
 	ts := newTestServer(t)
 	code, body := postJSON(t, ts.URL+"/api/v1/memories/remember", map[string]any{
-		"project_id": "p", "content": "markdown body",
+		"project_id": "p", "keypath": "auth.provider", "content": "jwt",
 	})
-	if code != 400 || !strings.Contains(body["error"].(string), "keypath") {
-		t.Fatalf("expected keypath-required error: %d %+v", code, body)
+	if code != 200 || body["method"] != "explicit" {
+		t.Fatalf("explicit: %d %+v", code, body)
+	}
+	items := body["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("want 1 item, got %+v", items)
+	}
+	it := items[0].(map[string]any)
+	if it["action"] != "created" || it["keypath"] != "auth.provider" {
+		t.Fatalf("item wrong: %+v", it)
+	}
+}
+
+func TestHTTPRememberExtractHeadings(t *testing.T) {
+	ts := newTestServer(t)
+	md := "## Auth\n\nSuperTokens.\n\n## Database\n\nPostgres 15.\n"
+	code, body := postJSON(t, ts.URL+"/api/v1/memories/remember", map[string]any{
+		"project_id": "p", "content": md,
+	})
+	if code != 200 || body["method"] != "headings" {
+		t.Fatalf("headings: %d %+v", code, body)
+	}
+	items := body["items"].([]any)
+	if len(items) != 2 {
+		t.Fatalf("want 2 items, got %+v", items)
+	}
+	keypaths := map[string]bool{}
+	for _, raw := range items {
+		it := raw.(map[string]any)
+		keypaths[it["keypath"].(string)] = true
+		if it["action"] != "created" {
+			t.Fatalf("want created, got %+v", it)
+		}
+	}
+	if !keypaths["auth"] || !keypaths["database"] {
+		t.Fatalf("missing expected keypaths: %+v", keypaths)
+	}
+}
+
+func TestHTTPRememberRejectsUnstructuredProse(t *testing.T) {
+	ts := newTestServer(t)
+	code, body := postJSON(t, ts.URL+"/api/v1/memories/remember", map[string]any{
+		"project_id": "p", "content": "Just prose with no headings.",
+	})
+	if code != 400 || !strings.Contains(body["error"].(string), "heading") {
+		t.Fatalf("expected headings-required error: %d %+v", code, body)
+	}
+}
+
+func TestHTTPRememberSupersedesAcrossCalls(t *testing.T) {
+	ts := newTestServer(t)
+	postJSON(t, ts.URL+"/api/v1/memories/remember", map[string]any{
+		"project_id": "p", "content": "## Auth\n\nv1 body.\n",
+	})
+	_, body := postJSON(t, ts.URL+"/api/v1/memories/remember", map[string]any{
+		"project_id": "p", "content": "## Auth\n\nv2 body.\n",
+	})
+	items := body["items"].([]any)
+	it := items[0].(map[string]any)
+	if it["action"] != "superseded" || it["superseded"] == nil {
+		t.Fatalf("want superseded on second call: %+v", it)
 	}
 }

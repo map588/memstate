@@ -296,16 +296,26 @@ const TOOLS: ToolDef[] = [
   {
     name: "memstate_remember",
     description:
-      "Store a markdown summary at an explicit keypath. Requires keypath — auto-extraction is not supported in local mode.",
+      "Store a markdown summary. If keypath is provided, writes to it directly. " +
+      "If keypath is omitted, the server extracts one keypath per ## heading " +
+      "(deeper headings nest as dot segments) and writes each section as its own " +
+      "versioned memory. Returns { method, items: [...] }.",
     inputSchema: {
       type: "object",
       properties: {
         project_id: { type: "string" },
-        keypath: { type: "string" },
+        keypath: {
+          type: "string",
+          description: "optional — omit to extract keypaths from markdown headings",
+        },
         content: { type: "string" },
         source: { type: "string" },
+        root: {
+          type: "string",
+          description: "optional prefix applied to every extracted keypath",
+        },
       },
-      required: ["project_id", "keypath", "content"],
+      required: ["project_id", "content"],
     },
     handler: (a) => postJSON("/memories/remember", a),
   },
@@ -399,8 +409,9 @@ Tool summary:
 - memstate_history: see how a keypath changed over time
 - memstate_delete / memstate_delete_project: tombstone a keypath or whole project
 
-Keypaths are explicit (dot-separated). No auto-extraction.
-Writes return { action: "superseded", superseded: <prior> } when overwriting.`;
+Keypaths are dot-separated. memstate_remember accepts an explicit keypath OR
+extracts one keypath per ## heading from markdown; either way returns
+{ method, items: [{keypath, action, stored, superseded?}] }.`;
 
 // ---------- main ----------
 

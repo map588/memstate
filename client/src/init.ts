@@ -23,7 +23,9 @@ memstate_get(project_id="<your_project>")
 
 ## Required at end of every task
 
-Save a summary of what you did:
+Save a summary of what you did. Two shapes:
+
+**Explicit keypath** — one memory at the path you pick:
 \`\`\`
 memstate_remember(
   project_id="<your_project>",
@@ -33,8 +35,17 @@ memstate_remember(
 )
 \`\`\`
 
-Keypaths are **explicit** in local mode — no auto-extraction. Pick a
-descriptive dot-notation path.
+**Heading extraction** — omit keypath; each \`##\` becomes its own memory,
+nested sub-headings become dot segments:
+\`\`\`
+memstate_remember(
+  project_id="<your_project>",
+  content="## Auth\\n\\nSuperTokens.\\n\\n## Database\\n\\nPostgres 15.\\n",
+  source="agent"
+)
+\`\`\`
+Response: \`{ method: "headings", items: [{ keypath, action, stored, superseded? }] }\`.
+Use \`root="task.2026-04-21"\` (or similar) to prefix every extracted keypath.
 
 ## Tool reference
 
