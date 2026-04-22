@@ -1,108 +1,194 @@
 # memstate-local
 
-Local-only fork of [memstate-mcp](https://github.com/memstate-ai/memstate-mcp).
-Everything runs on your machine — no hosted service, no API key.
+A local memory server for AI agents. Stores facts, notes, and decisions
+in a versioned, hierarchical SQLite database that your agent reads
+before tasks and writes to after them — and that nothing else on the
+internet ever sees.
 
-```
-Claude Code ──stdio──> client/   (TS MCP proxy) ──HTTP loopback──> server/   (Go daemon) ──> SQLite
-                                                                        ▲
-Python CLI scripts ──── same HTTP ─────────────────────────────────────┘
-```
+Speaks MCP to Claude Code, Cursor, or any MCP-capable client. The
+backing store is a single SQLite file on your machine. No API keys.
+No hosted service. No daemon to babysit — it starts when your agent
+does and stops when your agent does.
 
-## Layout
-
-| Dir | What it is |
-|---|---|
-| `server/` | Go daemon. Owns the SQLite file, exposes a REST API, no MCP knowledge. |
-| `client/` | TypeScript MCP stdio proxy + Python CLI scripts (for the `memstate-local` skill). Both translate to HTTP calls on the daemon. |
-
-## Build
+## Install
 
 ```bash
-# Go daemon
-cd server && go build -o memstated .
+git clone <this repo>
+cd memstate-local
 
-# MCP proxy
+cd server && go build -o memstated .
 cd ../client && npm install && npm run build
 ```
 
-Verify:
-```bash
-node client/dist/index.js --test
-```
+You need Go 1.22+ and Node 18+. That's the whole toolchain.
 
-Expected output (with no daemon running): proxy spawns a child on a random
-port, lists the 7 tools, then exits — taking the child with it.
+## Wire it into your agent
 
-## Process model
-
-The proxy and the daemon have two lifetimes depending on how they're started.
-
-| Mode | How | Daemon lifetime | Use when |
-|---|---|---|---|
-| **Child** (default) | MCP proxy or Python script spawns `memstated` as a non-detached child with `--owner-pid=$$` | Dies with the spawner (via SIGTERM on clean exit, owner-pid watchdog on SIGKILL) | Single Claude Code session, or one-off Python calls. Nothing leftover. |
-| **Attach** | `MEMSTATE_ADDR=host:port` set; the daemon was started separately (`memstated --addr 127.0.0.1:8765`) | Survives proxy exits; stopped manually | Sharing one daemon across multiple Claude Code sessions and/or Python scripts. |
-
-Multiple Claude Code sessions with no `MEMSTATE_ADDR` each get their own
-daemon on their own random port. They all read and write the same SQLite
-file — SQLite WAL mode handles concurrency.
-
-### Stopping a shared daemon
+**Claude Code** (one command):
 
 ```bash
-server/memstated stop --addr 127.0.0.1:8765     # POST /admin/shutdown
-server/memstated status --addr 127.0.0.1:8765   # GET /health
+claude mcp add --scope user -- memstate-local \
+  node /abs/path/to/memstate-local/client/dist/index.js
 ```
 
-### Guards against runaway spawning
-
-- Go daemon on `--addr` EADDRINUSE: probes `/health`. If the occupant is one
-  of ours, it exits 0. If it's alien, it exits 2 loudly — the proxy does not
-  try to respawn.
-- Go daemon polls `--owner-pid` via `kill(pid, 0)` every 2s; on ESRCH it
-  shuts down. Orphans can't linger.
-- Proxy has no respawn logic at all — if the child crashes, the proxy dies
-  with it and the MCP session reports the failure.
-
-## Env vars
-
-| Var | Effect |
-|---|---|
-| `MEMSTATE_ADDR` | `host:port` to attach to instead of spawning. Disables child mode. |
-| `MEMSTATE_BIN` | Path to the `memstated` binary. Defaults to `server/memstated` (sibling), then PATH. |
-| `MEMSTATE_DB` | SQLite file. Default `~/.memstate/memstate.db`. `~/` is expanded. **Ignored in attach mode** — the already-running daemon picked its DB when it started; the proxy warns if you set both. |
-| `MEMSTATE_LOCAL_URL` | Full base URL override, e.g. `http://127.0.0.1:9000/api/v1`. Takes precedence over `MEMSTATE_ADDR`. |
-
-Claude Code MCP configs pass env explicitly. If you want a per-project DB,
-put it in the `env:` block when registering the server:
+**Anything else that reads an MCP JSON config** (Cursor, Windsurf,
+Claude Desktop, …):
 
 ```json
 {
   "mcpServers": {
     "memstate-local": {
       "command": "node",
-      "args": ["/abs/path/to/client/dist/index.js"],
-      "env": {
-        "MEMSTATE_DB": "/abs/path/to/project.db"
-      }
+      "args": ["/abs/path/to/memstate-local/client/dist/index.js"]
     }
   }
 }
 ```
 
-## Test suite
+Restart the agent. Done. The first tool call launches the storage
+daemon on a random loopback port; the daemon exits when the agent does.
+
+### Verify
 
 ```bash
-cd server && go test ./...           # 22 tests: store, HTTP, lifecycle
-cd ../client && npx tsc              # TS build
+node client/dist/index.js --test
 ```
 
-## Not implemented (yet)
+Expected: proxy spawns a daemon, prints its address plus the seven tool
+names, exits cleanly.
 
-- Semantic search via Ollama (`embeddings` table exists, logic doesn't).
-- `--category`, `--topics`, and `--at-revision` are accepted by the REST
-  layer for compat with the hosted-API Python scripts, but are ignored.
+## The seven tools
+
+All scoped by `project_id`. Keypaths are explicit dot-notation
+(`auth.provider`, `task.summary.2026-04-21`). No LLM-based extraction.
+
+| Tool | Purpose |
+|---|---|
+| `memstate_set` | Write a short value at a keypath (`config.port = "8080"`). |
+| `memstate_remember` | Write a markdown summary at a keypath. |
+| `memstate_get` | Read a keypath, browse a subtree, or return the whole project tree. |
+| `memstate_search` | Full-text (SQLite FTS5) search across current memories. |
+| `memstate_history` | Every version of a keypath, newest first — including tombstones. |
+| `memstate_delete` | Tombstone a keypath. History is preserved. |
+| `memstate_delete_project` | Soft-delete a project. |
+
+A useful agent loop:
+
+- **At task start** → `memstate_get(project_id=<project>)` to load context
+- **At task end** → `memstate_remember(project_id=<project>, keypath="task.summary.<date>", content="## Summary ...")`
+
+`node client/dist/index.js init` writes rule files for several agents
+(`CLAUDE.md`, `AGENTS.md`, `.cursor/rules/`, etc.) that encode this loop.
+
+## How storage works
+
+Data is a versioned keypath tree, per project:
+
+```
+project_id = "my_app"
+├── auth.provider        v1: "JWT"              v2: "SuperTokens"   v3: tombstone
+├── db.engine            v1: "Postgres 16"
+└── task.summary.2026-04-21  v1: "## Refactor auth middleware …"
+```
+
+Each write appends a new version. If a prior version existed, the
+response includes it as `superseded` so the agent sees the conflict
+rather than silently overwriting. `memstate_history` walks the full
+chain. `memstate_delete` appends a tombstone row: the data is still
+there in history, but no longer surfaces in reads or search.
+
+Search is SQLite FTS5 — fast, lexical, works offline. Semantic search
+(via Ollama) is on the roadmap and has an empty embeddings table
+waiting for it.
+
+## Where your data lives
+
+| Thing | Path |
+|---|---|
+| SQLite DB | `~/.memstate/memstate.db` (override with `MEMSTATE_DB`; `~/` is expanded) |
+| Daemon log | `~/.memstate/memstated.log` |
+| Network egress | None. The daemon binds `127.0.0.1` only. |
+
+For a per-project DB, put it in the MCP config's `env:` block:
+
+```json
+{
+  "memstate-local": {
+    "command": "node",
+    "args": ["/abs/path/to/client/dist/index.js"],
+    "env": { "MEMSTATE_DB": "/abs/path/to/my_project.db" }
+  }
+}
+```
+
+## Sharing one daemon across agents (optional)
+
+The default is one daemon per agent session: simple, clean, nothing to
+garbage-collect. If you instead want one long-lived daemon that several
+MCP clients and CLI scripts share, run it yourself and point callers at
+it:
+
+```bash
+./server/memstated --addr 127.0.0.1:8765    # foreground; use nohup or a service manager if you want it detached
+export MEMSTATE_ADDR=127.0.0.1:8765         # any MCP proxy / CLI seeing this will attach, not spawn
+```
+
+Stop / inspect:
+
+```bash
+./server/memstated stop   --addr 127.0.0.1:8765    # POST /admin/shutdown
+./server/memstated status --addr 127.0.0.1:8765    # GET /health
+```
+
+Concurrent writers to the same DB file are fine — SQLite WAL serializes
+them.
+
+## Python CLI (for skills, hooks, scripts)
+
+`client/skill/scripts/` has a Python CLI for each tool, using the same
+child-vs-attach model as the MCP proxy. Each invocation with no
+`MEMSTATE_ADDR` set spawns its own short-lived daemon and kills it on
+exit.
+
+```bash
+python3 client/skill/scripts/memstate_remember.py \
+  --project my_app \
+  --keypath task.summary.2026-04-21 \
+  --content "## Auth migration done"
+```
+
+See `client/skill/SKILL.md` for the skill-style usage contract.
+
+## How the pieces fit
+
+```
+Claude Code ──stdio──> client/dist/index.js ──HTTP loopback──> server/memstated ──> SQLite
+               (MCP)        (thin TS proxy)                       (Go daemon)
+```
+
+The TypeScript proxy exists only to speak MCP — every tool call becomes
+one HTTP POST. All logic (keypath versioning, FTS, conflict detection,
+tombstones) lives in the Go daemon.
+
+Lifetime:
+
+- Daemon listens on `127.0.0.1:0` by default (OS-picked port) and
+  prints `MEMSTATE_READY addr=127.0.0.1:<port>` on stderr.
+- Proxy reads the banner, passes its own PID via `--owner-pid`.
+- On clean exit the proxy SIGTERMs the daemon. On SIGKILL, the daemon's
+  `kill(owner_pid, 0)` poll notices within ~2 s and exits on its own.
+
+This is the child mode. The `--addr` flag (above) is the only other
+mode.
+
+## Not done yet
+
+- Semantic search via Ollama. Empty `embeddings` table in the schema.
+- Time-travel reads (`at_revision` is accepted but ignored).
+- Category / topic facets (same).
 
 ## License
 
-MIT, inherited from upstream.
+MIT. Originally derived from
+[memstate-ai/memstate-mcp](https://github.com/memstate-ai/memstate-mcp);
+the storage engine, lifecycle model, and wire shape are all new.
