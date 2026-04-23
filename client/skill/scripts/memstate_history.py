@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Show the version chain for a keypath (local memstated)."""
+"""Show the version chain for a keypath (memstated)."""
 import argparse
 import sys
 

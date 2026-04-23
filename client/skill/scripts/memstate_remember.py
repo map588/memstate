@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Store a markdown summary (local memstated).
+"""Store a markdown summary (memstated).
 
 Two modes:
 - explicit: pass --keypath to write the whole content at that path.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Browse and retrieve memories from the local memstated daemon.
+"""Browse and retrieve memories from the memstated daemon.
 
 Usage:
   memstate_get.py                                    # List all projects
@@ -16,12 +16,12 @@ from _client import get, post
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Browse and retrieve memories (local)")
+    ap = argparse.ArgumentParser(description="Browse and retrieve memories (server)")
     ap.add_argument("--project")
     ap.add_argument("--keypath")
     ap.add_argument("--memory-id", type=int)
     ap.add_argument("--include-content", action="store_true")
-    # accepted for compatibility; at-revision time-travel is not yet implemented locally
+    # accepted for compatibility; at-revision time-travel is not yet implemented
     ap.add_argument("--at-revision", type=int)
     args = ap.parse_args()
 

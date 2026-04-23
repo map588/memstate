@@ -1,21 +1,21 @@
 #!/usr/bin/env node
 /**
- * @memstate/local-mcp
+ * @memstate/mcp
  *
- * MCP (stdio) front-end for a LOCAL memstate daemon.
+ * MCP (stdio) front-end for the memstate daemon.
  *
  * Two modes:
  *  - "child" (default): spawn memstated as a non-detached child, read the
  *    address it prints on stderr, send SIGTERM when we exit. The child
  *    also watches our PID and shuts itself down if we vanish without
  *    clean signalling (e.g. SIGKILL).
- *  - "attach" (MEMSTATE_ADDR set): talk to a daemon someone else started.
- *    We never spawn in this mode; if the addr is down or hostile, we throw.
+ *  - "attach" (MEMSTATE_ADDR set): talk to a daemon someone else started,
+ *    or lazy-spawn a detached daemon on that addr if nothing is listening.
  *
  * Environment:
- *   MEMSTATE_ADDR    — attach to this host:port instead of spawning a child
- *   MEMSTATE_BIN     — path to memstated (default: sibling build / PATH)
- *   MEMSTATE_LOCAL_URL — full base URL override
+ *   MEMSTATE_ADDR        attach to this host:port; spawn detached if empty
+ *   MEMSTATE_BIN         path to memstated (default: sibling build / PATH)
+ *   MEMSTATE_LOCAL_URL   full base URL override
  */
 import { spawn, ChildProcess } from "child_process";
 import * as fs from "fs";
@@ -49,59 +49,31 @@ function resolveDaemonBin(): string {
   return "memstated"; // fall through to PATH
 }
 
-/**
- * Probe an existing daemon. Returns true iff /health reports service=memstate.
- * Non-memstate 200s, timeouts, or connection refusals all return false.
- */
-async function probeOurs(addr: string): Promise<boolean> {
+type HealthProbe = "ours" | "alien" | "empty";
+
+async function probeHealth(addr: string): Promise<HealthProbe> {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 500);
     const res = await fetch(`http://${addr}/health`, { signal: controller.signal });
     clearTimeout(timer);
-    if (!res.ok) return false;
-    const json = (await res.json()) as { service?: string };
-    return json.service === "memstate";
+    if (!res.ok) return "alien";
+    try {
+      const json = (await res.json()) as { service?: string };
+      return json.service === "memstate" ? "ours" : "alien";
+    } catch {
+      return "alien";
+    }
   } catch {
-    return false;
+    return "empty";
   }
 }
 
-/**
- * Attach mode: we did not spawn anything. If the addr is live and ours, good.
- * Anything else is a user error we surface, not something we try to recover.
- */
-async function attach(addr: string): Promise<void> {
-  if (!(await probeOurs(addr))) {
-    throw new Error(
-      `MEMSTATE_ADDR=${addr} is not reachable or not a memstate daemon. ` +
-        `Start one with \`memstated --addr ${addr}\` or unset MEMSTATE_ADDR to spawn a child.`
-    );
-  }
-  // A running daemon already decided which file backs it; MEMSTATE_DB set by
-  // our caller is silently ignored in attach mode, which is a common foot-gun.
-  if (process.env.MEMSTATE_DB) {
-    process.stderr.write(
-      `memstate-local: warning — MEMSTATE_DB is ignored in attach mode ` +
-        `(the daemon at ${addr} picked its DB when it started).\n`
-    );
-  }
-  daemonAddr = addr;
-  baseURL = process.env.MEMSTATE_LOCAL_URL ?? `http://${addr}/api/v1`;
-}
-
-/**
- * Child mode: spawn memstated, read its READY banner from stderr, and wire
- * up cleanup so the child dies with us.
- */
-async function spawnChild(): Promise<void> {
-  const bin = resolveDaemonBin();
+function openDaemonLog(): { logFD: number | null; logPath: string } {
   const logDir = path.join(process.env.HOME ?? "/tmp", ".memstate");
   try {
     fs.mkdirSync(logDir, { recursive: true });
-  } catch {
-    /* best effort */
-  }
+  } catch {}
   const logPath = path.join(logDir, "memstated.log");
   let logFD: number | null = null;
   try {
@@ -109,78 +81,141 @@ async function spawnChild(): Promise<void> {
   } catch {
     logFD = null;
   }
+  return { logFD, logPath };
+}
 
-  const child = spawn(
-    bin,
-    ["--owner-pid", String(process.pid)],
-    {
-      // NOT detached — we want the child in our process group so a terminal
-      // SIGINT reaches it, and so .kill() is authoritative.
-      detached: false,
-      // stdin ignored, stdout to log (daemon normally silent there), stderr
-      // to a pipe so we can read the banner + tee the rest into the log.
-      stdio: ["ignore", logFD ?? "ignore", "pipe"],
+// awaitBanner tees child.stderr to logFD line-by-line and resolves when the
+// READY banner appears (yielding the parsed addr) or via the optional onExit
+// shortcut. Rejects on unhandled exit or 5s timeout.
+type ExitOutcome = { addr: string } | Error | null;
+function awaitBanner(
+  child: ChildProcess,
+  logFD: number | null,
+  logPath: string,
+  onExit: (code: number | null) => ExitOutcome = () => null
+): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    let buf = "";
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        reject(new Error(`memstated did not print ready banner within 5s`));
+      }
+    }, 5000);
+    const settle = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+    child.stderr?.on("data", (chunk: Buffer) => {
+      buf += chunk.toString("utf-8");
+      let nl = buf.indexOf("\n");
+      while (nl !== -1) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        if (logFD !== null) {
+          try {
+            fs.writeSync(logFD, line + "\n");
+          } catch {}
+        }
+        const idx = line.indexOf(READY_BANNER);
+        if (idx !== -1) {
+          const token = line.slice(idx + READY_BANNER.length).trim().split(/\s+/)[0] ?? "";
+          if (token) {
+            settle(() => resolve(token));
+            return;
+          }
+        }
+        nl = buf.indexOf("\n");
+      }
+    });
+    child.once("exit", (code) => {
+      const outcome = onExit(code);
+      if (outcome && "addr" in outcome) {
+        settle(() => resolve(outcome.addr));
+        return;
+      }
+      if (outcome instanceof Error) {
+        settle(() => reject(outcome));
+        return;
+      }
+      settle(() =>
+        reject(new Error(`memstated exited before ready (code=${code}). See ${logPath}.`))
+      );
+    });
+  });
+}
+
+async function attach(addr: string): Promise<void> {
+  const probe = await probeHealth(addr);
+  if (probe === "alien") {
+    throw new Error(
+      `MEMSTATE_ADDR=${addr} is occupied by a non-memstate process; refusing to start.`
+    );
+  }
+  if (probe === "empty") {
+    await spawnDetached(addr);
+  } else if (process.env.MEMSTATE_DB) {
+    // A daemon we just spawned inherited our env; warn only when attaching
+    // to one we didn't start, since its MEMSTATE_DB was decided earlier.
+    process.stderr.write(
+      `memstate: warning — MEMSTATE_DB is ignored when attaching to an ` +
+        `already-running daemon at ${addr}.\n`
+    );
+  }
+  daemonAddr = addr;
+  baseURL = process.env.MEMSTATE_LOCAL_URL ?? `http://${addr}/api/v1`;
+}
+
+async function spawnDetached(addr: string): Promise<void> {
+  const bin = resolveDaemonBin();
+  const { logFD, logPath } = openDaemonLog();
+
+  const child = spawn(bin, ["--addr", addr], {
+    detached: true,
+    stdio: ["ignore", logFD ?? "ignore", "pipe"],
+  });
+  if (!child.pid) {
+    throw new Error(`memstated: spawn failed (bin=${bin})`);
+  }
+
+  await awaitBanner(child, logFD, logPath, (code) => {
+    // Exit 0 with --addr means the daemon found /health already = us; racing
+    // double-start. Exit 2 means the port is occupied by an alien process.
+    if (code === 0) return { addr };
+    if (code === 2) {
+      return new Error(
+        `port ${addr} is occupied by a non-memstate process; refusing to start.`
+      );
     }
-  );
+    return null;
+  });
 
+  try {
+    child.stderr?.removeAllListeners("data");
+    child.stderr?.destroy();
+    child.unref();
+  } catch {}
+}
+
+async function spawnChild(): Promise<void> {
+  const bin = resolveDaemonBin();
+  const { logFD, logPath } = openDaemonLog();
+
+  const child = spawn(bin, ["--owner-pid", String(process.pid)], {
+    // Not detached: keeps the child in our process group so a terminal SIGINT
+    // reaches it and .kill() is authoritative.
+    detached: false,
+    stdio: ["ignore", logFD ?? "ignore", "pipe"],
+  });
   if (!child.pid) {
     throw new Error(`memstated: spawn failed (bin=${bin})`);
   }
   managedChild = child;
 
-  // Read stderr line-by-line, copying to the log file as we go. Resolve as
-  // soon as we see the READY banner. Reject if the child exits before then.
-  const addr = await new Promise<string>((resolve, reject) => {
-    let buf = "";
-    let resolved = false;
-    const onData = (chunk: Buffer) => {
-      buf += chunk.toString("utf-8");
-      let newline = buf.indexOf("\n");
-      while (newline !== -1) {
-        const line = buf.slice(0, newline);
-        buf = buf.slice(newline + 1);
-        if (logFD !== null) {
-          try {
-            fs.writeSync(logFD, line + "\n");
-          } catch {
-            /* ignore */
-          }
-        }
-        if (!resolved) {
-          const idx = line.indexOf(READY_BANNER);
-          if (idx !== -1) {
-            const rest = line.slice(idx + READY_BANNER.length).trim();
-            const addrToken = rest.split(/\s+/)[0] ?? "";
-            if (addrToken) {
-              resolved = true;
-              resolve(addrToken);
-              return;
-            }
-          }
-        }
-        newline = buf.indexOf("\n");
-      }
-    };
-    child.stderr?.on("data", onData);
-    child.once("exit", (code, signal) => {
-      if (!resolved) {
-        reject(
-          new Error(
-            `memstated child exited before becoming ready ` +
-              `(code=${code}, signal=${signal}). See ${logPath}.`
-          )
-        );
-      }
-    });
-    // Reasonable upper bound — Go process startup + SQLite init on any
-    // realistic machine completes well under this.
-    setTimeout(() => {
-      if (!resolved) {
-        reject(new Error(`memstated child did not print ready banner within 5s`));
-      }
-    }, 5000);
-  });
-
+  const addr = await awaitBanner(child, logFD, logPath);
   daemonAddr = addr;
   baseURL = process.env.MEMSTATE_LOCAL_URL ?? `http://${addr}/api/v1`;
 
@@ -210,7 +245,7 @@ async function spawnChild(): Promise<void> {
   child.once("exit", (code, signal) => {
     if (managedChild === child) {
       process.stderr.write(
-        `memstate-local: memstated child exited (code=${code}, signal=${signal})\n`
+        `memstate: memstated child exited (code=${code}, signal=${signal})\n`
       );
       process.exit(1);
     }
@@ -274,7 +309,8 @@ const TOOLS: ToolDef[] = [
   {
     name: "memstate_set",
     description:
-      "Store a short value at an explicit keypath. Creates a new version; prior value is returned as 'superseded' so conflicts are visible.",
+      "Save a single short fact at a keypath (e.g. `config.port` = `8080`). " +
+      "If a prior value existed, it is returned so you can see what changed.",
     inputSchema: {
       type: "object",
       properties: {
@@ -296,27 +332,24 @@ const TOOLS: ToolDef[] = [
   {
     name: "memstate_remember",
     description:
-      "Store a markdown summary. If keypath is provided, writes to it directly. " +
-      "If keypath is omitted, the server extracts one keypath per ## heading " +
-      "(deeper headings nest as dot segments) and writes each section as its " +
-      "own versioned memory. Pre-heading prose is captured under a 'preamble' " +
-      "sub-keypath. Identical content to the current version is skipped " +
-      '(action: "unchanged"). Returns { method, items: [...] }.',
+      "Save a markdown summary. Use at end-of-task for decisions, progress " +
+      "notes, and multi-fact summaries. Pass `keypath` to write one memory " +
+      "there; omit it to auto-split the markdown by `##` headings into one " +
+      "memory per section (deeper headings nest as dot segments).",
     inputSchema: {
       type: "object",
       properties: {
         project_id: { type: "string" },
         keypath: {
           type: "string",
-          description: "optional — omit to extract keypaths from markdown headings",
+          description: "optional — omit to split by ## headings",
         },
         content: { type: "string" },
         source: { type: "string" },
         root: {
           type: "string",
           description:
-            "prefix for extracted keypaths. Omit to default to project_id; pass " +
-            '"" to disable prefixing',
+            "prefix for extracted keypaths (defaults to project_id; pass `\"\"` to disable)",
         },
       },
       required: ["project_id", "content"],
@@ -326,7 +359,9 @@ const TOOLS: ToolDef[] = [
   {
     name: "memstate_get",
     description:
-      "Fetch a keypath or browse a subtree. Omit keypath to return the whole project tree.",
+      "Read memories for a project. Omit `keypath` to see the whole project " +
+      "tree; pass one to drill into a subtree. Call at task start to load " +
+      "prior context.",
     inputSchema: {
       type: "object",
       properties: {
@@ -352,11 +387,9 @@ const TOOLS: ToolDef[] = [
   {
     name: "memstate_search",
     description:
-      "Find memories when the exact keypath is unknown. Two modes:\n" +
-      '- mode="fts" (default): SQLite FTS5 keyword match on content + keypath.\n' +
-      '- mode="semantic": cosine similarity between the query and the stored ' +
-      "keypath embeddings (nomic-embed-text via local Ollama). Returns only " +
-      "matches above `threshold` (default 0.5), sorted by score.",
+      "Find memories when you don't know the exact keypath. " +
+      "`mode=\"fts\"` (default) matches keywords; `mode=\"semantic\"` matches " +
+      "by meaning and needs semantic search enabled on the server.",
     inputSchema: {
       type: "object",
       properties: {
@@ -371,8 +404,7 @@ const TOOLS: ToolDef[] = [
         threshold: {
           type: "number",
           description:
-            "Semantic mode only. Cosine floor for hits (default 0.5). Raise " +
-            "to tighten, lower to widen.",
+            "Semantic mode only. Similarity floor (default 0.5) — raise to tighten, lower to widen.",
         },
       },
       required: ["query"],
@@ -381,7 +413,8 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: "memstate_history",
-    description: "Full version chain for a keypath (newest first), including tombstones.",
+    description:
+      "All prior versions of a keypath, newest first. Use when you need to see what a fact was before a change.",
     inputSchema: {
       type: "object",
       properties: {
@@ -394,7 +427,9 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: "memstate_delete",
-    description: "Tombstone a keypath. Set recursive=true to tombstone the whole subtree.",
+    description:
+      "Remove a keypath (or the whole subtree with `recursive=true`). Prior " +
+      "versions remain reachable via `memstate_history`.",
     inputSchema: {
       type: "object",
       properties: {
@@ -409,7 +444,7 @@ const TOOLS: ToolDef[] = [
   {
     name: "memstate_delete_project",
     description:
-      "Soft-delete a project. Reads and writes are rejected until a new write revives it.",
+      "Remove an entire project. Reads/writes fail until you write again, which restores it.",
     inputSchema: {
       type: "object",
       properties: { project_id: { type: "string" } },
@@ -419,19 +454,17 @@ const TOOLS: ToolDef[] = [
   },
 ];
 
-const INSTRUCTIONS = `Local memstate memory store (SQLite-backed).
+const INSTRUCTIONS = `memstate — persistent memory across sessions, scoped per project.
 
-Tool summary:
-- memstate_get: browse before starting a task
-- memstate_set: store a short fact at a keypath
-- memstate_remember: store a markdown summary at a keypath
-- memstate_search: full-text find when keypath is unknown
-- memstate_history: see how a keypath changed over time
-- memstate_delete / memstate_delete_project: tombstone a keypath or whole project
+When to use:
+- Task start: memstate_get(project_id=...) to load prior context.
+- Task end: memstate_remember to save decisions, progress, and key facts.
+- Mid-task: memstate_search when you suspect prior context exists but don't
+  know the keypath; memstate_set for single-fact updates (config, status).
 
-Keypaths are dot-separated. memstate_remember accepts an explicit keypath OR
-extracts one keypath per ## heading from markdown; either way returns
-{ method, items: [{keypath, action, stored, superseded?}] }.`;
+Keypaths are dot-separated (e.g. "auth.provider", "task.summary.2026-04-23").
+Writes are versioned — a prior value at the same keypath is preserved and
+returned to you, so you can see what changed. Deletes keep history.`;
 
 // ---------- main ----------
 
@@ -440,7 +473,7 @@ async function main(): Promise<void> {
     await ensureDaemon();
   } catch (err) {
     process.stderr.write(
-      `memstate-local: ${err instanceof Error ? err.message : String(err)}\n`
+      `memstate: ${err instanceof Error ? err.message : String(err)}\n`
     );
     process.exit(1);
   }
@@ -460,7 +493,7 @@ async function main(): Promise<void> {
   }
 
   const server = new Server(
-    { name: "memstate-local", version: VERSION },
+    { name: "memstate", version: VERSION },
     { capabilities: { tools: {} }, instructions: INSTRUCTIONS }
   );
 
@@ -499,7 +532,7 @@ async function main(): Promise<void> {
   await server.connect(stdio);
   const mode = ATTACH_ADDR ? "attach" : "child";
   process.stderr.write(
-    `memstate-local MCP ready (mode=${mode}, daemon @ http://${daemonAddr})\n`
+    `memstate MCP ready (mode=${mode}, daemon @ http://${daemonAddr})\n`
   );
 }
 

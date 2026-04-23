@@ -68,16 +68,10 @@ func newRouter(store *Store, shutdown func(), embedder *Embedder) http.Handler {
 	mux.HandleFunc("GET /api/v1/projects", handleProjects(store))
 	mux.HandleFunc("GET /api/v1/memories/{id}", handleMemoryByID(store))
 
-	return logging(mux)
+	return mux
 }
 
 // ---------- helpers ----------
-
-func logging(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w, r)
-	})
-}
 
 func writeJSON(w http.ResponseWriter, code int, body any) {
 	w.Header().Set("Content-Type", "application/json")

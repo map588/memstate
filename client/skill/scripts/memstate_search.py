@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Search memories (local memstated).
+"""Search memories (memstated).
 
 Two modes:
 - fts (default): SQLite FTS5 keyword match on content + keypath.

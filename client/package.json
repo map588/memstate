@@ -1,12 +1,12 @@
 {
-  "name": "@memstate/local-mcp",
+  "name": "@memstate/mcp",
   "version": "0.1.0",
-  "description": "Local-only memstate — MCP stdio front-end for a self-hosted Go daemon with versioned SQLite memory.",
+  "description": "memstate — MCP stdio front-end for a self-hosted Go daemon with versioned SQLite memory.",
   "private": true,
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "memstate-local-mcp": "dist/index.js"
+    "memstate-mcp": "dist/index.js"
   },
   "scripts": {
     "build": "tsc",
@@ -25,7 +25,6 @@
     "agent-memory",
     "versioned-memory",
     "keypath",
-    "local",
     "self-hosted",
     "sqlite"
   ],

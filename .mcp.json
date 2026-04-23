@@ -1,0 +1,7 @@
+{
+    "mcpServers": {
+        "gopls-lsp": {
+            "command": "gopls-mcp"
+        }
+    }
+}

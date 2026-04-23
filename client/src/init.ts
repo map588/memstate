@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
- * memstate-local init — write agent instruction files for local memstate use.
+ * memstate init — write agent instruction files for memstate use.
  *
  * Unlike the hosted version, this does not fetch anything from the network.
- * The instructions are bundled and describe the local tool surface.
+ * The instructions are bundled and describe the tool surface.
  */
 
 import * as fs from "fs";
@@ -11,58 +11,69 @@ import * as path from "path";
 
 const INSTRUCTIONS = `# Memstate — memory usage
 
-This project uses a memstated daemon for persistent, versioned
-memory across sessions.
+Persistent, versioned memory across sessions, scoped per project. Use it
+to carry facts, decisions, and task summaries forward so you don't
+rediscover the same context on every run.
 
-## Required at start of every task
+## At the start of every task
 
-Load existing context before acting:
+Load what you already know about this project:
+
 \`\`\`
 memstate_get(project_id="<your_project>")
 \`\`\`
 
-## Required at end of every task
+If the tree is big, drill into a subtree with \`keypath="..."\`, or use
+\`memstate_search\` when you suspect something is stored but don't know
+where.
 
-Save a summary of what you did. Two shapes:
+## At the end of every task
 
-**Explicit keypath** — one memory at the path you pick:
+Save what you decided, what you changed, and anything worth knowing next
+session. Two shapes:
+
+**One memory at a path you pick:**
+
 \`\`\`
 memstate_remember(
   project_id="<your_project>",
   keypath="task.summary.<YYYY-MM-DD>",
   content="## Task Summary\\n- What was done\\n- Key decisions\\n- Files touched",
-  source="agent"
 )
 \`\`\`
 
-**Heading extraction** — omit keypath; each \`##\` becomes its own memory,
-nested sub-headings become dot segments:
+**Auto-split by markdown headings** — each \`##\` becomes its own memory;
+sub-\`###\` nest as dot segments:
+
 \`\`\`
 memstate_remember(
   project_id="<your_project>",
   content="## Auth\\n\\nSuperTokens.\\n\\n## Database\\n\\nPostgres 15.\\n",
-  source="agent"
 )
 \`\`\`
-Response: \`{ method: "headings", items: [{ keypath, action, stored, superseded? }] }\`.
-Use \`root="task.2026-04-21"\` (or similar) to prefix every extracted keypath.
 
-## Tool reference
+## Tools
 
-| Tool | Purpose |
-|------|---------|
-| memstate_get | Browse project tree or fetch one keypath |
-| memstate_remember | Store a markdown summary at a keypath |
-| memstate_set | Store a short value at a keypath |
-| memstate_search | Full-text find (FTS5) when keypath is unknown |
-| memstate_history | See how a keypath changed over time |
-| memstate_delete | Tombstone a keypath (history preserved) |
-| memstate_delete_project | Soft-delete an entire project |
+| Tool | When to use |
+|------|-------------|
+| memstate_get | Load a project tree or drill into a subtree. Start of task. |
+| memstate_remember | Save a markdown summary. End of task. |
+| memstate_set | Save a single short fact (config, status, version). |
+| memstate_search | Find a memory when you don't know its keypath. |
+| memstate_history | See prior versions of a keypath. |
+| memstate_delete | Remove a keypath; history stays reachable. |
+| memstate_delete_project | Remove an entire project. |
 
 ## Project naming
 
 Short snake_case that matches your repo or topic (e.g. \`my_app\`,
 \`api_service\`). All related memories share the same project_id.
+
+## Keypaths
+
+Dot-separated hierarchical paths (\`auth.provider\`, \`db.engine\`,
+\`task.summary.2026-04-23\`). Writes at an existing keypath return the
+prior value so conflicts are visible.
 `;
 
 type RuleTarget = {
@@ -92,7 +103,7 @@ function writeRuleFile(cwd: string, target: RuleTarget): "wrote" | "kept" | "fai
 
 export async function main(): Promise<void> {
   const cwd = process.cwd();
-  console.log(`memstate-local init — writing agent rule files in ${cwd}\n`);
+  console.log(`memstate init — writing agent rule files in ${cwd}\n`);
   for (const target of RULE_TARGETS) {
     const status = writeRuleFile(cwd, target);
     const badge =

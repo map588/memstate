@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * memstate-local CLI — setup and init subcommands.
+ * memstate CLI — setup and init subcommands.
  *
  * Usage:
- *   memstate-local-mcp setup   — write Claude Code / Cursor / etc config
- *   memstate-local-mcp init    — write agent instruction files in cwd
+ *   memstate-mcp setup   — write Claude Code / Cursor / etc config
+ *   memstate-mcp init    — write agent instruction files in cwd
  */
 
 const command = process.argv[2];
@@ -24,11 +24,11 @@ async function main(): Promise<void> {
     default: {
       console.log(
         `
-memstate-local-mcp CLI
+memstate-mcp CLI
 
 Usage:
-  memstate-local-mcp setup   Write MCP config into detected AI agents
-  memstate-local-mcp init    Write agent instruction files in the current project
+  memstate-mcp setup   Write MCP config into detected AI agents
+  memstate-mcp init    Write agent instruction files in the current project
 
 When no subcommand is given, stdin/stdout are used as an MCP server.
       `.trim()

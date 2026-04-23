@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Soft-delete an entire project (local memstated)."""
+"""Soft-delete an entire project (memstated)."""
 import argparse
 import sys
 

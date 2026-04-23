@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * memstate-local setup — write MCP server config into detected AI agents.
+ * memstate setup — write MCP server config into detected AI agents.
  *
- * No API key involved — the MCP proxy spawns its own local daemon.
+ * No API key involved — the MCP proxy spawns its own daemon.
  * Generates a config entry that runs this package via node+dist, pointing at
  * the Go daemon under ../server/memstated (or $MEMSTATE_BIN).
  */
@@ -14,7 +14,7 @@ import * as readline from "readline";
 import { execSync } from "child_process";
 
 /**
- * The config entry written into each agent. Runs the local MCP proxy.
+ * The config entry written into each agent. Runs the MCP proxy.
  * The proxy resolves the Go binary at runtime via MEMSTATE_BIN or the
  * sibling `server/memstated` path, so this config is machine-agnostic.
  */
@@ -53,11 +53,11 @@ function claudeCliAvailable(): boolean {
 function installViaClaudeCli(entryPath: string): { success: boolean; message: string } {
   try {
     try {
-      execSync("claude mcp remove memstate-local --scope user", { stdio: "ignore" });
+      execSync("claude mcp remove memstate --scope user", { stdio: "ignore" });
     } catch {
       // not present, fine
     }
-    execSync(`claude mcp add --scope user -- memstate-local node ${entryPath}`, {
+    execSync(`claude mcp add --scope user -- memstate node ${entryPath}`, {
       stdio: "pipe",
     });
     return { success: true, message: "✓ Configured via `claude mcp add` (user scope)" };
@@ -150,7 +150,7 @@ function configureAgent(
   try {
     const config = readJsonConfig(expandedPath);
     const mcpServers = (config[agent.configKey] as Record<string, unknown>) || {};
-    mcpServers["memstate-local"] = mcpConfigTemplate(entryPath);
+    mcpServers["memstate"] = mcpConfigTemplate(entryPath);
     config[agent.configKey] = mcpServers;
     writeJsonConfig(expandedPath, config);
     return { success: true, path: expandedPath, message: "✓ Configured" };
@@ -174,12 +174,12 @@ export async function main(): Promise<void> {
   // agent config doesn't depend on npx or PATH.
   const entryPath = path.resolve(__dirname, "index.js");
   if (!fs.existsSync(entryPath)) {
-    console.error(`memstate-local: expected dist/index.js at ${entryPath} — did you run \`npm run build\`?`);
+    console.error(`memstate: expected dist/index.js at ${entryPath} — did you run \`npm run build\`?`);
     rl.close();
     process.exit(1);
   }
 
-  console.log("\nmemstate-local setup");
+  console.log("\nmemstate setup");
   console.log("────────────────────");
   console.log("Writing MCP config that points each agent at this package's dist/index.js.\n");
 
@@ -188,7 +188,7 @@ export async function main(): Promise<void> {
 
   if (detected.length === 0) {
     console.log("No agents auto-detected. Add an entry like this to your agent's MCP config:\n");
-    console.log(JSON.stringify({ "memstate-local": mcpConfigTemplate(entryPath) }, null, 2));
+    console.log(JSON.stringify({ "memstate": mcpConfigTemplate(entryPath) }, null, 2));
     rl.close();
     return;
   }

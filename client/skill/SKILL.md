@@ -1,7 +1,7 @@
 ---
-name: memstate-local
+name: memstate
 description: >
-  Persistent, versioned memory via a LOCAL memstated daemon. Data lives in a
+  Persistent, versioned memory via the memstated daemon. Data lives in a
   single SQLite file on your machine; no cloud, no API key. Use for storing
   facts, recalling memory, managing projects, and full-text search of agent
   summaries. Supports Markdown and direct keypath = value assignment.
@@ -12,12 +12,11 @@ tags:
   - memstate
   - versioned-memory
   - keypath
-  - local
 ---
 
-# Memstate (local) Memory Management
+# Memstate Memory Management
 
-This skill talks to a **local** memstated daemon running on loopback (default
+This skill talks to a memstated daemon running on loopback (default
 `127.0.0.1:8765`). The daemon is a single Go binary; data is stored in a
 SQLite file at `$MEMSTATE_DB` (default `~/.memstate/memstate.db`). No API key
 is needed. If the daemon is not running, the TS MCP proxy auto-starts it;
@@ -260,13 +259,14 @@ memstated
 The daemon probes `:8765` on start; if something else is already there, it
 exits loudly instead of fighting for the port.
 
-## Local mode caveats vs the hosted skill
+## Caveats vs the hosted skill
 
-- `memstate_remember` REQUIRES `--keypath` — the local daemon does not run the
-  keypath-extraction model. Pick an explicit keypath (`task.summary.auth`,
-  `decisions.2026-04-deploy`, etc.).
-- `memstate_search` uses SQLite FTS5 (substring / phrase / boolean), not
-  embeddings. Semantic search via Ollama is planned.
+- `memstate_remember` without `--keypath` extracts one keypath per `##`
+  heading (no LLM call). Sub-`###` headings nest as dot segments; pre-heading
+  prose lands under `<root>.preamble`.
+- `memstate_search` supports `--mode fts` (SQLite FTS5, default) and
+  `--mode semantic` (cosine similarity against keypath embeddings via a
+  loopback Ollama). Semantic mode returns 503 if Ollama is unreachable.
 - `--category` and `--topics` are accepted for compatibility but not yet
   queried. `--at-revision` is accepted but not yet implemented.
 - Memory IDs are integers (not UUIDs).

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Store a single fact at a keypath (local memstated)."""
+"""Store a single fact at a keypath (memstated)."""
 import argparse
 import sys
 
@@ -12,7 +12,7 @@ def main() -> int:
     ap.add_argument("--keypath", required=True)
     ap.add_argument("--value", required=True)
     ap.add_argument("--source", default=None)
-    # accepted for compatibility with the old cloud skill; not used by local server
+    # accepted for compatibility with the old cloud skill; not used by this server
     ap.add_argument("--category", default=None)
     ap.add_argument("--topics", default=None)
     args = ap.parse_args()

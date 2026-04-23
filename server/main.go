@@ -1,4 +1,4 @@
-// Command memstated is a local HTTP backend for versioned agent memory.
+// Command memstated is the HTTP backend for versioned agent memory.
 //
 // It speaks REST — NOT MCP. The MCP surface lives in the TypeScript proxy
 // under ../client/, which spawns this binary as a child and forwards MCP
@@ -34,6 +34,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -95,8 +96,22 @@ func main() {
 			"Set explicitly (e.g. 127.0.0.1:8765) for shared-daemon mode.")
 	ownerPIDFlag := fs.Int("owner-pid", 0,
 		"parent PID to monitor — daemon exits when the PID disappears (0 = disabled)")
+	idleTimeoutFlag := fs.Duration("idle-timeout", 0,
+		"shut down after this duration with no HTTP requests (0 = disabled). "+
+			"Ignored when --owner-pid is set. Env: MEMSTATE_IDLE_TIMEOUT.")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
+	}
+
+	idleTimeout := *idleTimeoutFlag
+	if idleTimeout == 0 {
+		if v := os.Getenv("MEMSTATE_IDLE_TIMEOUT"); v != "" {
+			d, err := time.ParseDuration(v)
+			if err != nil {
+				log.Fatalf("memstated: bad MEMSTATE_IDLE_TIMEOUT %q: %v", v, err)
+			}
+			idleTimeout = d
+		}
 	}
 
 	resolved := *addrFlag
@@ -140,8 +155,18 @@ func main() {
 
 	embedder := NewEmbedder()
 
+	handler := newRouter(store, shutdownFn, embedder)
+	// Idle-exit is only meaningful for long-lived detached daemons; when
+	// --owner-pid is set the parent already owns our lifetime.
+	if idleTimeout > 0 && *ownerPIDFlag == 0 {
+		var lastActivity atomic.Int64
+		lastActivity.Store(time.Now().UnixNano())
+		handler = activityMiddleware(handler, &lastActivity)
+		go watchIdle(ctx, &lastActivity, idleTimeout, shutdownFn)
+	}
+
 	srv := &http.Server{
-		Handler:           newRouter(store, shutdownFn, embedder),
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -208,6 +233,45 @@ func looksLikeOurDaemon(addr string) bool {
 	return h.Service == healthServiceName
 }
 
+// activityMiddleware stamps lastActivity on every incoming request so the
+// idle watchdog can tell whether anyone is still using us.
+func activityMiddleware(next http.Handler, lastActivity *atomic.Int64) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lastActivity.Store(time.Now().UnixNano())
+		next.ServeHTTP(w, r)
+	})
+}
+
+// watchIdle polls lastActivity and triggers shutdown once no request has
+// arrived for `timeout`. The check interval is timeout/4 bounded to [5s, 60s]
+// so short timeouts stay responsive without burning wakeups on long ones.
+func watchIdle(ctx context.Context, lastActivity *atomic.Int64, timeout time.Duration, shutdown func()) {
+	interval := timeout / 4
+	if interval < 5*time.Second {
+		interval = 5 * time.Second
+	}
+	if interval > 60*time.Second {
+		interval = 60 * time.Second
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			last := time.Unix(0, lastActivity.Load())
+			if time.Since(last) >= timeout {
+				fmt.Fprintf(os.Stderr,
+					"memstated: idle for %v (limit %v) — shutting down\n",
+					time.Since(last).Round(time.Second), timeout)
+				shutdown()
+				return
+			}
+		}
+	}
+}
+
 // watchOwner polls the parent PID and triggers shutdown when it vanishes.
 // Signal 0 is the canonical Unix "does this pid exist AND can I signal it"
 // probe; ESRCH means the owner is gone.
@@ -235,12 +299,14 @@ func printUsage() {
   memstated                        run the daemon (random port by default)
   memstated --addr HOST:PORT       run on an explicit address (shared mode)
   memstated --owner-pid N          shut down when process N disappears
+  memstated --idle-timeout 30m     shut down after N of no-request idleness
   memstated stop   [--addr HOST:PORT]   send a shutdown request to a running daemon
   memstated status [--addr HOST:PORT]   query /health
 
 Environment:
-  MEMSTATE_ADDR   default for --addr
-  MEMSTATE_DB     SQLite file path (default ~/.memstate/memstate.db)
+  MEMSTATE_ADDR           default for --addr
+  MEMSTATE_DB             SQLite file path (default ~/.memstate/memstate.db)
+  MEMSTATE_IDLE_TIMEOUT   default for --idle-timeout (e.g. 30m)
 `)
 }
 

@@ -1,12 +1,12 @@
-# @memstate/local-mcp
+# @memstate/mcp
 
-MCP stdio front-end for the **local** memstate daemon. Data stays on your
+MCP stdio front-end for the memstate daemon. Data stays on your
 machine in a single SQLite file. No hosted service, no API key.
 
 This package is one half of a two-process architecture:
 
 ```
-Claude Code ──stdio──> @memstate/local-mcp ──HTTP loopback──> memstated (Go) ──> ~/.memstate/memstate.db
+Claude Code ──stdio──> @memstate/mcp ──HTTP loopback──> memstated (Go) ──> ~/.memstate/memstate.db
 ```
 
 The Go daemon source and binary live under `../server/` in this repo.
@@ -49,8 +49,9 @@ To stop a shared daemon: `../server/memstated stop`.
 Seven tools matching the original memstate shape: `memstate_set`,
 `memstate_remember`, `memstate_get`, `memstate_search`, `memstate_history`,
 `memstate_delete`, `memstate_delete_project`. See the daemon's REST routes
-for exact semantics. In local mode, `memstate_remember` requires an
-explicit `keypath` — no LLM-based auto-extraction.
+for exact semantics. `memstate_remember` without an explicit `keypath`
+extracts one keypath per markdown `##` heading; see the SKILL doc for
+the full contract.
 
 ## Build
 

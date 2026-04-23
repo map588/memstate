@@ -1,6 +1,6 @@
-# memstate-local
+# memstate
 
-A local memory server for AI agents. Stores facts, notes, and decisions
+A memory server for AI agents. Stores facts, notes, and decisions
 in a versioned, hierarchical SQLite database that your agent reads
 before tasks and writes to after them — and that nothing else on the
 internet ever sees.
@@ -12,17 +12,8 @@ does and stops when your agent does.
 
 ## Install
 
-```bash
-git clone git@github.com:map588/memstate.git
-cd memstate
-
-cd server && go build -o memstated .
-cd ../client && npm install && npm run build
-```
-
-You need Go 1.25+ and Node 18+. That's the whole toolchain. Semantic
-search additionally wants a local [Ollama](https://ollama.com) with an
-embedding model pulled:
+Requires Go 1.26+ and Node 18+. Semantic search additionally wants a
+local [Ollama](https://ollama.com) with an embedding model pulled:
 
 ```bash
 ollama pull nomic-embed-text
@@ -31,13 +22,35 @@ ollama pull nomic-embed-text
 If Ollama isn't running, memstate still works — writes and FTS search
 are unaffected; semantic search returns 503 until the embedder is up.
 
+```bash
+git clone git@github.com:map588/memstate.git
+cd memstate
+make install
+```
+
+That puts two things on your PATH:
+
+- `memstated` — the Go daemon, installed to `$(go env GOPATH)/bin` (or `$GOBIN` if set)
+- `memstate-mcp` — the MCP stdio proxy, `npm link`'d from `client/`
+
+`make uninstall` reverses both. `make build` compiles in-place without
+touching PATH. `make test` runs Go tests + the end-to-end smoke.
+
+### Claude Code skill + hook (optional)
+
+If you use Claude Code, `make install-skill` also installs the bundled
+skill under `~/.claude/skills/memstate/` and adds a UserPromptSubmit
+hook that nudges toward `memstate_remember` after ≥3 file edits since
+your last persist. `make uninstall-skill` removes both. Idempotent —
+safe to re-run; existing memstate entries in `settings.json` are
+replaced, not duplicated.
+
 ## Wire it into your agent
 
 **Claude Code** (one command):
 
 ```bash
-claude mcp add --scope user -- memstate-local \
-  node /abs/path/to/memstate-local/client/dist/index.js
+claude mcp add --scope user -- memstate memstate-mcp
 ```
 
 **Anything else that reads an MCP JSON config** (Cursor, Windsurf,
@@ -46,9 +59,8 @@ Claude Desktop, …):
 ```json
 {
   "mcpServers": {
-    "memstate-local": {
-      "command": "node",
-      "args": ["/abs/path/to/memstate-local/client/dist/index.js"]
+    "memstate": {
+      "command": "memstate-mcp"
     }
   }
 }
@@ -56,6 +68,22 @@ Claude Desktop, …):
 
 Restart the agent. Done. The first tool call launches the storage
 daemon on a random loopback port; the daemon exits when the agent does.
+
+### Without a global install
+
+If you'd rather not touch PATH, skip `make install` and use `make
+build`, then point the MCP config at the built script directly:
+
+```json
+{
+  "mcpServers": {
+    "memstate": {
+      "command": "node",
+      "args": ["/abs/path/to/memstate-mcp/client/dist/index.js"]
+    }
+  }
+}
+```
 
 ### Verify
 
@@ -147,9 +175,8 @@ For a per-project DB, put it in the MCP config's `env:` block:
 
 ```json
 {
-  "memstate-local": {
-    "command": "node",
-    "args": ["/abs/path/to/client/dist/index.js"],
+  "memstate": {
+    "command": "memstate-mcp",
     "env": { "MEMSTATE_DB": "/abs/path/to/my_project.db" }
   }
 }
@@ -159,19 +186,25 @@ For a per-project DB, put it in the MCP config's `env:` block:
 
 The default is one daemon per agent session: simple, clean, nothing to
 garbage-collect. If you instead want one long-lived daemon that several
-MCP clients and CLI scripts share, run it yourself and point callers at
-it:
+MCP clients and CLI scripts share, set `MEMSTATE_ADDR` and the proxy
+will **lazy-spawn** a detached daemon on first use:
 
 ```bash
-./server/memstated --addr 127.0.0.1:8765    # foreground; use nohup or a service manager if you want it detached
-export MEMSTATE_ADDR=127.0.0.1:8765         # any MCP proxy / CLI seeing this will attach, not spawn
+export MEMSTATE_ADDR=127.0.0.1:8765
+export MEMSTATE_IDLE_TIMEOUT=30m    # optional: daemon self-exits after 30m idle
 ```
 
-Stop / inspect:
+Any MCP proxy or CLI script with those vars set will attach to a running
+daemon on `8765`, or spawn one detached if nobody's there. The daemon
+outlives the proxy; with `MEMSTATE_IDLE_TIMEOUT` it also cleans up after
+itself when nothing's been using it.
+
+Start / stop / inspect manually:
 
 ```bash
-./server/memstated stop   --addr 127.0.0.1:8765    # POST /admin/shutdown
-./server/memstated status --addr 127.0.0.1:8765    # GET /health
+memstated --addr 127.0.0.1:8765 --idle-timeout 30m   # foreground
+memstated stop   --addr 127.0.0.1:8765               # POST /admin/shutdown
+memstated status --addr 127.0.0.1:8765               # GET /health
 ```
 
 Concurrent writers to the same DB file are fine — SQLite WAL serializes

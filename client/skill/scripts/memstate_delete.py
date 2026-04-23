@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tombstone a keypath (local memstated)."""
+"""Tombstone a keypath (memstated)."""
 import argparse
 import sys
 
