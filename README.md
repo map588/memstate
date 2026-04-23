@@ -2,8 +2,7 @@
 
 A memory server for AI agents. Stores facts, notes, and decisions
 in a versioned, hierarchical SQLite database that your agent reads
-before tasks and writes to after them — and that nothing else on the
-internet ever sees.
+before tasks and writes to after them.
 
 Speaks MCP to Claude Code, Cursor, or any MCP-capable client. The
 backing store is a single SQLite file on your machine. No API keys.
