@@ -157,7 +157,7 @@ func cosine(a, b []float32) float32 {
 // defaultThreshold is the cosine-similarity floor below which semantic hits
 // are discarded. Tuned loosely for nomic-embed-text; callers can override
 // per-request or globally via MEMSTATE_SEMANTIC_THRESHOLD.
-const defaultThreshold = 0.5
+const defaultThreshold = 0.6
 
 // envThreshold returns the threshold override from MEMSTATE_SEMANTIC_THRESHOLD
 // (parsed as float), or defaultThreshold if unset or unparseable.

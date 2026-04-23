@@ -9,10 +9,10 @@
 import * as fs from "fs";
 import * as path from "path";
 
-const INSTRUCTIONS = `# Memstate (local) — memory usage
+const INSTRUCTIONS = `# Memstate — memory usage
 
-This project uses a **local** memstated daemon for persistent, versioned
-memory across sessions. Data lives on this machine only (SQLite).
+This project uses a memstated daemon for persistent, versioned
+memory across sessions.
 
 ## Required at start of every task
 
