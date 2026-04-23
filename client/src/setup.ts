@@ -214,7 +214,9 @@ export async function main(): Promise<void> {
       "Next steps:\n" +
       "  1. Restart your agent so it picks up the new MCP server.\n" +
       "  2. Build the Go daemon: cd ../server && go build -o memstated .\n" +
-      "  3. First tool call auto-spawns the daemon; logs at ~/.memstate/memstated.log.\n"
+      "  3. First tool call auto-spawns the daemon; logs at ~/.memstate/memstated.log.\n\n" +
+      "Convention: use snake_case for project_id and keypath segments\n" +
+      "(e.g. `memstate_mcp`, not `memstate-mcp` or `MemstateMCP`).\n"
   );
   rl.close();
 }

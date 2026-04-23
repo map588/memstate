@@ -464,7 +464,11 @@ When to use:
 
 Keypaths are dot-separated (e.g. "auth.provider", "task.summary.2026-04-23").
 Writes are versioned — a prior value at the same keypath is preserved and
-returned to you, so you can see what changed. Deletes keep history.`;
+returned to you, so you can see what changed. Deletes keep history.
+
+Naming: use snake_case for project_id and each keypath segment
+(e.g. "memstate_mcp", "task.summary.daily_report"). Avoid kebab-case,
+spaces, or mixed case — they fragment memories across near-duplicate ids.`;
 
 // ---------- main ----------
 
