@@ -15,3 +15,4 @@ __pycache__/
 # Local scratch
 /tmp/
 .cache/
+.DS_Store

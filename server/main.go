@@ -154,6 +154,9 @@ func main() {
 	shutdownFn := func() { stop() }
 
 	embedder := NewEmbedder()
+	// Eagerly repair any missing vectors (post-migration wipe, model switch,
+	// writes made while Ollama was down). Non-blocking; failures just log.
+	embedder.BackfillEmbeddings(store)
 
 	handler := newRouter(store, shutdownFn, embedder)
 	// Idle-exit is only meaningful for long-lived detached daemons; when
@@ -246,13 +249,7 @@ func activityMiddleware(next http.Handler, lastActivity *atomic.Int64) http.Hand
 // arrived for `timeout`. The check interval is timeout/4 bounded to [5s, 60s]
 // so short timeouts stay responsive without burning wakeups on long ones.
 func watchIdle(ctx context.Context, lastActivity *atomic.Int64, timeout time.Duration, shutdown func()) {
-	interval := timeout / 4
-	if interval < 5*time.Second {
-		interval = 5 * time.Second
-	}
-	if interval > 60*time.Second {
-		interval = 60 * time.Second
-	}
+	interval := min(max(timeout/4, 5*time.Second), 60*time.Second)
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {

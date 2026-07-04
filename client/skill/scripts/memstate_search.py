@@ -3,9 +3,10 @@
 
 Two modes:
 - fts (default): SQLite FTS5 keyword match on content + keypath.
-- semantic:      cosine similarity between the query and stored keypath
-                 embeddings. Requires Ollama running locally with the
-                 configured embed model (default nomic-embed-text).
+- semantic:      cosine similarity between the query and embeddings of
+                 the current content at each keypath. Requires Ollama
+                 running locally with the configured embed model
+                 (default nomic-embed-text).
 """
 import argparse
 import sys
@@ -21,6 +22,12 @@ def main() -> int:
     ap.add_argument("--mode", choices=("fts", "semantic"), default="fts")
     ap.add_argument("--threshold", type=float, default=None,
                     help="semantic only: cosine floor for hits (default 0.5)")
+    ap.add_argument("--category", default=None,
+                    help="only return memories with this category")
+    ap.add_argument("--topics", default=None,
+                    help="comma-separated: match memories tagged with any of these")
+    ap.add_argument("--keypath-prefix", default=None,
+                    help="only memories at this keypath or below, e.g. branches.feature_x")
     args = ap.parse_args()
 
     body = {"query": args.query, "limit": args.limit, "mode": args.mode}
@@ -28,6 +35,12 @@ def main() -> int:
         body["project_id"] = args.project
     if args.threshold is not None:
         body["threshold"] = args.threshold
+    if args.category:
+        body["category"] = args.category
+    if args.topics:
+        body["topics"] = args.topics.split(",")
+    if args.keypath_prefix:
+        body["keypath_prefix"] = args.keypath_prefix
     return post("/memories/search", body)
 
 

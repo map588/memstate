@@ -24,7 +24,10 @@ def main() -> int:
     ap.add_argument("--source", default=None)
     ap.add_argument("--root", default=None,
                     help="optional prefix applied to every extracted keypath")
-    ap.add_argument("--context", default=None)
+    ap.add_argument("--category", default=None,
+                    help="optional label applied to every written section")
+    ap.add_argument("--topics", default=None,
+                    help="comma-separated tags applied to every written section")
     args = ap.parse_args()
 
     body = {
@@ -37,8 +40,10 @@ def main() -> int:
         body["source"] = args.source
     if args.root:
         body["root"] = args.root
-    if args.context:
-        body["context"] = args.context
+    if args.category:
+        body["category"] = args.category
+    if args.topics:
+        body["topics"] = args.topics.split(",")
     return post("/memories/remember", body)
 
 

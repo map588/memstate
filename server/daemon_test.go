@@ -30,6 +30,20 @@ func buildDaemon(t *testing.T) string {
 	return bin
 }
 
+// cleanEnv is os.Environ() with all MEMSTATE_* vars stripped, so a developer
+// shell that talks to a shared daemon (MEMSTATE_ADDR set) cannot leak that
+// config into the hermetic test daemons.
+func cleanEnv() []string {
+	env := os.Environ()
+	out := env[:0]
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, "MEMSTATE_") {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
 // runDaemon spawns memstated with the given args + env. Returns the process,
 // a reader for everything the daemon emits on stderr (after the banner), and
 // the address parsed from the banner. The caller must eventually kill or
@@ -39,7 +53,7 @@ func runDaemon(
 ) (*exec.Cmd, *bufio.Scanner, string) {
 	t.Helper()
 	cmd := exec.Command(bin, args...)
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(cleanEnv(),
 		"MEMSTATE_DB="+filepath.Join(t.TempDir(), "t.db"),
 	)
 	for k, v := range extraEnv {
@@ -240,7 +254,7 @@ func TestExplicitAddrDoubleStart(t *testing.T) {
 	})
 
 	second := exec.Command(bin, "--addr", addr)
-	second.Env = append(os.Environ(), "MEMSTATE_DB="+filepath.Join(t.TempDir(), "x.db"))
+	second.Env = append(cleanEnv(), "MEMSTATE_DB="+filepath.Join(t.TempDir(), "x.db"))
 	out, err := second.CombinedOutput()
 	if err != nil {
 		t.Fatalf("second --addr start should exit 0, got %v\n%s", err, out)
@@ -262,7 +276,7 @@ func TestExplicitAddrAlien(t *testing.T) {
 	addr := strings.TrimPrefix(alien.URL, "http://")
 
 	cmd := exec.Command(bin, "--addr", addr)
-	cmd.Env = append(os.Environ(), "MEMSTATE_DB="+filepath.Join(t.TempDir(), "x.db"))
+	cmd.Env = append(cleanEnv(), "MEMSTATE_DB="+filepath.Join(t.TempDir(), "x.db"))
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatalf("expected non-zero exit, got 0.\n%s", out)

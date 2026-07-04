@@ -21,8 +21,6 @@ def main() -> int:
     ap.add_argument("--keypath")
     ap.add_argument("--memory-id", type=int)
     ap.add_argument("--include-content", action="store_true")
-    # accepted for compatibility; at-revision time-travel is not yet implemented
-    ap.add_argument("--at-revision", type=int)
     args = ap.parse_args()
 
     if args.memory_id is not None:
@@ -35,8 +33,6 @@ def main() -> int:
             "recursive": True,
             "include_content": args.include_content,
         }
-        if args.at_revision:
-            body["at_revision"] = args.at_revision
         return post("/keypaths", body)
 
     if args.project:

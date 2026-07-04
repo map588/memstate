@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -133,14 +135,14 @@ func TestHTTPEmbedOnWriteAndSemanticSearch(t *testing.T) {
 	// Deterministic: block until all fire-and-forget goroutines finish.
 	embedder.WaitForPending()
 
-	// Query == an existing keypath → identical mock-vector → cosine==1,
-	// i.e. the top hit MUST be that keypath. This tests the "query finds
-	// its matching keypath" property without depending on the mock's
-	// arithmetic for similar strings.
-	target := "my_app.database_engine"
+	// Vectors are computed from CONTENT. Query == an existing section's
+	// content → identical mock-vector → cosine==1, i.e. the top hit MUST be
+	// the keypath holding that content. This tests the "query finds its
+	// matching content" property without depending on the mock's arithmetic
+	// for similar strings.
 	_, body := postJSON(t, ts.URL+"/api/v1/memories/search", map[string]any{
 		"project_id": "my_app",
-		"query":      target,
+		"query":      "Postgres 15.",
 		"mode":       "semantic",
 		"threshold":  0.0,
 		"limit":      10,
@@ -153,12 +155,148 @@ func TestHTTPEmbedOnWriteAndSemanticSearch(t *testing.T) {
 		t.Fatalf("want 3 embedded keypaths in hits, got %d: %+v", len(results), results)
 	}
 	top := results[0].(map[string]any)
-	if top["keypath"] != target {
-		t.Fatalf("identical-string query must rank %s first, got %v: %+v",
-			target, top["keypath"], top)
+	if top["keypath"] != "my_app.database_engine" {
+		t.Fatalf("identical-content query must rank my_app.database_engine first, got %v: %+v",
+			top["keypath"], top)
 	}
 	if top["score"].(float64) < 0.999 {
-		t.Fatalf("identical-string similarity should be ~1.0, got %v", top["score"])
+		t.Fatalf("identical-content similarity should be ~1.0, got %v", top["score"])
+	}
+}
+
+func TestEmbedContentReEmbedOnChangeAndDeleteOnTombstone(t *testing.T) {
+	ollama := mockOllama(t)
+	defer ollama.Close()
+	embedder := newTestEmbedder(t, ollama)
+	store := newTestStore(t)
+	ts := httptest.NewServer(newRouter(store, nil, embedder))
+	t.Cleanup(ts.Close)
+
+	write := func(content string) {
+		code, body := postJSON(t, ts.URL+"/api/v1/memories/store", map[string]any{
+			"project_id": "p", "keypath": "k", "content": content,
+		})
+		if code != 200 {
+			t.Fatalf("store: %d %+v", code, body)
+		}
+		embedder.WaitForPending()
+	}
+
+	vector := func() []byte {
+		var blob []byte
+		err := store.db.QueryRow(
+			`SELECT vector FROM keypath_embeddings WHERE project_id='p' AND keypath='k'`,
+		).Scan(&blob)
+		if err != nil {
+			t.Fatalf("read vector: %v", err)
+		}
+		return blob
+	}
+
+	write("first content")
+	v1 := vector()
+
+	// Superseding write must re-embed from the new content.
+	write("second content entirely different")
+	v2 := vector()
+	if bytes.Equal(v1, v2) {
+		t.Fatal("vector not recomputed after content change")
+	}
+
+	// Tombstone must remove the embedding row entirely.
+	postJSON(t, ts.URL+"/api/v1/memories/delete", map[string]any{
+		"project_id": "p", "keypath": "k",
+	})
+	has, err := store.HasKeypathEmbedding("p", "k", "mock")
+	if err != nil {
+		t.Fatalf("has: %v", err)
+	}
+	if has {
+		t.Fatal("embedding row should be deleted on tombstone")
+	}
+}
+
+func TestEmbedHealsMissingVectorOnUnchangedWrite(t *testing.T) {
+	ollama := mockOllama(t)
+	defer ollama.Close()
+	embedder := newTestEmbedder(t, ollama)
+
+	// First write goes through a server whose embedder is unreachable, so no
+	// vector lands.
+	deadEmbedder := &Embedder{
+		URL:          "http://127.0.0.1:1",
+		Model:        "mock",
+		Client:       &http.Client{Timeout: 50 * time.Millisecond},
+		errorLogCool: time.Hour,
+	}
+	store := newTestStore(t)
+	tsDead := httptest.NewServer(newRouter(store, nil, deadEmbedder))
+	postJSON(t, tsDead.URL+"/api/v1/memories/store", map[string]any{
+		"project_id": "p", "keypath": "k", "content": "v",
+	})
+	deadEmbedder.WaitForPending()
+	tsDead.Close()
+
+	// Same store, healthy embedder, identical content: action=unchanged but
+	// the missing vector must be healed.
+	ts := httptest.NewServer(newRouter(store, nil, embedder))
+	t.Cleanup(ts.Close)
+	code, body := postJSON(t, ts.URL+"/api/v1/memories/store", map[string]any{
+		"project_id": "p", "keypath": "k", "content": "v",
+	})
+	if code != 200 || body["action"] != "unchanged" {
+		t.Fatalf("expected unchanged rewrite: %d %+v", code, body)
+	}
+	embedder.WaitForPending()
+
+	has, err := store.HasKeypathEmbedding("p", "k", "mock")
+	if err != nil || !has {
+		t.Fatalf("unchanged write should heal missing embedding: has=%v err=%v", has, err)
+	}
+}
+
+func TestEmbedderTaskPrefixes(t *testing.T) {
+	nomic := &Embedder{Model: "nomic-embed-text"}
+	if got := nomic.taskPrefix("search_query"); got != "search_query: " {
+		t.Fatalf("nomic prefix: %q", got)
+	}
+	other := &Embedder{Model: "mxbai-embed-large"}
+	if got := other.taskPrefix("search_query"); got != "" {
+		t.Fatalf("non-nomic models must get no prefix: %q", got)
+	}
+}
+
+func TestMigrationWipesForeignEmbedSource(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := dir + "/m.db"
+	s, err := OpenStore(dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := s.UpsertKeypathEmbedding("p", "k", "mock", 2, packVector([]float32{1, 0})); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	// Simulate a DB written under a different embedding scheme.
+	if _, err := s.db.Exec(`UPDATE meta SET value='keypath' WHERE key='embed_source'`); err != nil {
+		t.Fatalf("update meta: %v", err)
+	}
+	s.Close()
+
+	s2, err := OpenStore(dbPath)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer s2.Close()
+	has, err := s2.HasKeypathEmbedding("p", "k", "mock")
+	if err != nil {
+		t.Fatalf("has: %v", err)
+	}
+	if has {
+		t.Fatal("vectors from a different embed_source must be wiped on open")
+	}
+	var src string
+	if err := s2.db.QueryRow(`SELECT value FROM meta WHERE key='embed_source'`).Scan(&src); err != nil || src != embedSource {
+		t.Fatalf("embed_source not stamped: %q err=%v", src, err)
 	}
 }
 
@@ -198,5 +336,98 @@ func TestHTTPOllamaDownStillWrites(t *testing.T) {
 	})
 	if int(fts["total_found"].(float64)) != 1 {
 		t.Fatalf("fts should find the row: %+v", fts)
+	}
+}
+
+func TestBackfillEmbeddings(t *testing.T) {
+	ollama := mockOllama(t)
+	defer ollama.Close()
+	store := newTestStore(t)
+
+	// Rows written with no embedder: no vectors exist yet.
+	_, _, _ = store.Write("p", "a", "alpha content", WriteMeta{}, false)
+	_, _, _ = store.Write("p", "b", "bravo content", WriteMeta{}, false)
+	_, _, _ = store.Write("p", "dead", "tombstoned content", WriteMeta{}, false)
+	_, _, _ = store.Delete("p", "dead")
+	_, _, _ = store.Write("gone", "k", "deleted project content", WriteMeta{}, false)
+	_ = store.DeleteProject("gone")
+
+	missing, err := store.ListMissingEmbeddings("mock")
+	if err != nil {
+		t.Fatalf("list missing: %v", err)
+	}
+	if len(missing) != 2 {
+		t.Fatalf("want 2 missing (tombstone + deleted project excluded), got %d: %+v",
+			len(missing), missing)
+	}
+
+	embedder := newTestEmbedder(t, ollama)
+	embedder.BackfillEmbeddings(store)
+	embedder.WaitForPending()
+
+	for _, kp := range []string{"a", "b"} {
+		has, err := store.HasKeypathEmbedding("p", kp, "mock")
+		if err != nil || !has {
+			t.Fatalf("backfill missed p/%s: has=%v err=%v", kp, has, err)
+		}
+	}
+	if has, _ := store.HasKeypathEmbedding("p", "dead", "mock"); has {
+		t.Fatal("backfill must skip tombstoned keypaths")
+	}
+	if has, _ := store.HasKeypathEmbedding("gone", "k", "mock"); has {
+		t.Fatal("backfill must skip soft-deleted projects")
+	}
+	if left, _ := store.ListMissingEmbeddings("mock"); len(left) != 0 {
+		t.Fatalf("nothing should remain missing: %+v", left)
+	}
+
+	// Second run is a no-op (nothing missing) and must not error or hang.
+	embedder.BackfillEmbeddings(store)
+	embedder.WaitForPending()
+}
+
+func TestBackfillAbortsWhenOllamaDown(t *testing.T) {
+	store := newTestStore(t)
+	_, _, _ = store.Write("p", "a", "content", WriteMeta{}, false)
+
+	dead := &Embedder{
+		URL:          "http://127.0.0.1:1",
+		Model:        "mock",
+		Client:       &http.Client{Timeout: 50 * time.Millisecond},
+		errorLogCool: time.Hour,
+	}
+	dead.BackfillEmbeddings(store)
+	dead.WaitForPending() // must return promptly, not spin through timeouts
+
+	if has, _ := store.HasKeypathEmbedding("p", "a", "mock"); has {
+		t.Fatal("no vector should exist after failed backfill")
+	}
+}
+
+func TestEmbedDocumentHalvesOnContextOverflow(t *testing.T) {
+	// Mock rejects prompts over 1000 bytes with Ollama's context-length
+	// error; EmbedDocument must halve and retry until accepted.
+	var accepted string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var in struct{ Model, Prompt string }
+		_ = json.NewDecoder(r.Body).Decode(&in)
+		if len(in.Prompt) > 1000 {
+			w.WriteHeader(500)
+			_, _ = w.Write([]byte(`{"error":"the input length exceeds the context length"}`))
+			return
+		}
+		accepted = in.Prompt
+		_ = json.NewEncoder(w).Encode(map[string]any{"embedding": []float32{1, 0}})
+	}))
+	defer srv.Close()
+
+	e := &Embedder{URL: srv.URL, Model: "mock", Client: &http.Client{Timeout: 2 * time.Second}}
+	big := strings.Repeat("dense-token-text ", 500) // 8500 bytes
+	vec, err := e.EmbedDocument(context.Background(), big)
+	if err != nil || len(vec) != 2 {
+		t.Fatalf("embed should succeed after halving: vec=%v err=%v", vec, err)
+	}
+	if len(accepted) == 0 || len(accepted) > 1000 {
+		t.Fatalf("accepted prompt should be halved under the limit, got %d bytes", len(accepted))
 	}
 }

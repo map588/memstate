@@ -380,3 +380,91 @@ func TestHTTPRememberSupersedesAcrossCalls(t *testing.T) {
 		t.Fatalf("want superseded on second call: %+v", it)
 	}
 }
+
+func TestHTTPWriteRevivesSoftDeletedProject(t *testing.T) {
+	ts := newTestServer(t)
+	postJSON(t, ts.URL+"/api/v1/memories/store", map[string]any{
+		"project_id": "p", "keypath": "k", "content": "v",
+	})
+	postJSON(t, ts.URL+"/api/v1/projects/delete", map[string]any{"project_id": "p"})
+
+	// A write to a soft-deleted project must succeed and revive it.
+	code, body := postJSON(t, ts.URL+"/api/v1/memories/store", map[string]any{
+		"project_id": "p", "keypath": "k2", "content": "v2",
+	})
+	if code != 200 {
+		t.Fatalf("write should revive soft-deleted project: %d %+v", code, body)
+	}
+
+	// Reads work again after the revive.
+	code, body = postJSON(t, ts.URL+"/api/v1/memories/search", map[string]any{
+		"project_id": "p", "query": "v2",
+	})
+	if code != 200 || int(body["total_found"].(float64)) != 1 {
+		t.Fatalf("revived project should be readable: %d %+v", code, body)
+	}
+}
+
+func TestHTTPCategoryTopicsRoundtripAndFilter(t *testing.T) {
+	ts := newTestServer(t)
+	code, body := postJSON(t, ts.URL+"/api/v1/memories/store", map[string]any{
+		"project_id": "p", "keypath": "k", "content": "jwt everywhere",
+		"category": "decision", "topics": []string{"auth"},
+	})
+	if code != 200 {
+		t.Fatalf("store: %d %+v", code, body)
+	}
+	stored := body["stored"].(map[string]any)
+	if stored["category"] != "decision" {
+		t.Fatalf("category not stored: %+v", stored)
+	}
+
+	code, body = postJSON(t, ts.URL+"/api/v1/memories/search", map[string]any{
+		"project_id": "p", "query": "jwt", "category": "decision", "topics": []string{"auth"},
+	})
+	if code != 200 || int(body["total_found"].(float64)) != 1 {
+		t.Fatalf("filtered search: %d %+v", code, body)
+	}
+	code, body = postJSON(t, ts.URL+"/api/v1/memories/search", map[string]any{
+		"project_id": "p", "query": "jwt", "category": "note",
+	})
+	if code != 200 || int(body["total_found"].(float64)) != 0 {
+		t.Fatalf("non-matching category must filter out: %d %+v", code, body)
+	}
+}
+
+func TestHTTPRememberAppliesCategoryToAllSections(t *testing.T) {
+	ts := newTestServer(t)
+	md := "## Auth\n\na\n\n## Database\n\nb\n"
+	code, body := postJSON(t, ts.URL+"/api/v1/memories/remember", map[string]any{
+		"project_id": "p", "content": md,
+		"category": "summary", "topics": []string{"sprint"},
+	})
+	if code != 200 {
+		t.Fatalf("remember: %d %+v", code, body)
+	}
+	for _, raw := range body["items"].([]any) {
+		stored := raw.(map[string]any)["stored"].(map[string]any)
+		if stored["category"] != "summary" {
+			t.Fatalf("section missing category: %+v", stored)
+		}
+	}
+}
+
+func TestHTTPRejectsDroppedFields(t *testing.T) {
+	ts := newTestServer(t)
+	// "context" (remember) and "at_revision" (keypaths) were accepted-but-
+	// ignored; they are now rejected loudly by DisallowUnknownFields.
+	code, _ := postJSON(t, ts.URL+"/api/v1/memories/remember", map[string]any{
+		"project_id": "p", "keypath": "k", "content": "v", "context": "x",
+	})
+	if code != 400 {
+		t.Fatalf("context field should be rejected, got %d", code)
+	}
+	code, _ = postJSON(t, ts.URL+"/api/v1/keypaths", map[string]any{
+		"project_id": "p", "at_revision": 3,
+	})
+	if code != 400 {
+		t.Fatalf("at_revision field should be rejected, got %d", code)
+	}
+}

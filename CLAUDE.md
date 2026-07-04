@@ -65,10 +65,12 @@ A manually-started `--addr` daemon that finds the port busy probes `/health` its
 ### Versioned keypath store (`server/store.go`)
 
 - Data model: per-project dot-notation keypath tree. Each write appends a new row to `memories` (never updates). Prior version is returned as `superseded` so the caller sees the conflict.
-- Identical content to current version is a no-op → `action: "unchanged"`, no new row.
-- `Delete` appends a tombstone row; history is preserved. `ProjectDeleted` check gates reads/writes on soft-deleted projects.
-- FTS5 virtual table `memories_fts` is the default search; semantic search uses a separate `keypath_embeddings` table (one row per `(project, keypath, model)` — keypaths are stable across versions, so embeddings are not recomputed on every write).
-- Storage runs on a single pooled connection (SQLite WAL + tuned pragmas); concurrent writers to the same DB file serialize safely.
+- Identical content AND metadata (category/topics) to current version is a no-op → `action: "unchanged"`, no new row. Same content with different metadata DOES version.
+- `Delete` appends a tombstone row; history is preserved. `ProjectDeleted` gates reads and deletes only — **any write revives a soft-deleted project** (`ensureProject`'s `ON CONFLICT ... SET deleted_at = NULL`).
+- FTS5 virtual table `memories_fts` is the default search; only the current version is indexed (the superseded version's FTS row is deleted on write). Free-text queries are token-quoted (`ftsQuote`) so punctuation can't hit FTS5 operator syntax.
+- Semantic search uses `keypath_embeddings` (one row per `(project, keypath, model)`), where the vector is computed from the **current content** at that keypath — recomputed on content change, deleted on tombstone, healed on an unchanged write if the row is missing (e.g. Ollama was down). The `meta` table's `embed_source` row wipes all vectors on startup when the embedding scheme changes.
+- `category` (string) and `topics` (JSON array in TEXT) are per-version columns; `/memories/search` filters on them (topics = match-any, via `json_each`).
+- Storage runs on a single pooled connection (SQLite WAL + tuned pragmas); `Write` wraps read-latest + insert in a transaction so concurrent same-keypath writers can't collide on the version unique index.
 
 ### Heading extraction (`server/extract.go`)
 
@@ -76,15 +78,15 @@ A manually-started `--addr` daemon that finds the port busy probes `/health` its
 
 ### Embeddings (`server/embed.go`)
 
-Ollama-backed keypath embeddings are fire-and-forget from the write path via `maybeEmbedKeypath` → `embedder.inFlight`. Writes succeed even if Ollama is down; errors are throttled to one log per model per hour. Semantic search returns 503 when the embedder is disabled. Tests use `Embedder.WaitForPending()` for determinism — production never waits.
+Ollama-backed content embeddings are fire-and-forget from the write path via `maybeEmbedContent` → `embedder.inFlight`. Writes succeed even if Ollama is down; errors are throttled to one log per model per hour. Semantic search returns 503 when the embedder is disabled. nomic-embed models get `search_document:` / `search_query:` task prefixes (`EmbedDocument` / `EmbedQuery`); other models get raw text. On startup `BackfillEmbeddings` eagerly embeds every current keypath missing a vector for the configured model (sequential, aborts on first error — the next startup or per-write heal retries). Tests use `Embedder.WaitForPending()` for determinism — production never waits.
 
 ## Conventions (non-obvious)
 
 - **No co-authoring on commits.** Do not add `Co-Authored-By:` trailers.
 - New tool → edit three places in lockstep: `server/http.go` (route + handler), `client/src/index.ts` (`TOOLS` entry), `client/skill/scripts/` (Python CLI). The skill scripts are a supported interface, not a legacy artifact.
-- `SKILL.md` in `client/skill/` describes the *hosted* skill and mentions async keypath extraction, UUID memory IDs, and `--category`/`--topics` filtering. **The daemon does not implement any of that.** Integer IDs, synchronous writes, headings-only extraction, categories/topics accepted but ignored. Do not copy its claims into these docs.
+- `SKILL.md` in `client/skill/` now describes THIS daemon accurately (integer IDs, synchronous writes, headings-only extraction, category/topics filterable) and is the canonical statement of naming conventions (snake_case ids/segments, YYYY_MM_DD dates, `branches.<slug>.*` for branch-scoped state). Keep it, the MCP `INSTRUCTIONS`/tool descriptions in `client/src/index.ts`, and the Python `--help` strings in agreement when conventions change.
 - `.claude/hooks/memstate-persist-reminder.sh` runs on `UserPromptSubmit` and nudges toward `memstate_remember` after ≥3 file edits since the last persist. If you want to silence it for a session, touch a trivial `memstate_set` or `memstate_remember` call.
-- Unimplemented accepted-but-ignored fields: `at_revision`, `category`, `topics`. Keep them accepted (for shape parity) but do not wire them until the corresponding storage columns exist.
+- Formerly accepted-but-ignored fields: `category`/`topics` are now stored and filterable; `at_revision` and `context` were dropped and are rejected by `DisallowUnknownFields`. Do not add silently-ignored request fields — accept a field only when it does something.
 
 ## Where data lives
 

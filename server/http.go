@@ -89,41 +89,45 @@ func decodeJSON(r *http.Request, dst any) error {
 	return dec.Decode(dst)
 }
 
-// checkProjectLive rejects soft-deleted projects on reads and writes.
-// A project that does not yet exist is NOT deleted; writes are allowed
-// (and will create it). Only a row with deleted_at set triggers rejection.
+// checkProjectLive rejects soft-deleted projects on reads and deletes.
+// Write handlers do NOT call this: any write revives a soft-deleted project
+// (via ensureProject). A project that does not yet exist is NOT deleted.
 func checkProjectLive(store *Store, projectID string) error {
 	deleted, err := store.ProjectDeleted(projectID)
 	if err != nil {
 		return err
 	}
 	if deleted {
-		return fmt.Errorf("project %q is soft-deleted; write again to revive it", projectID)
+		return fmt.Errorf("project %q is soft-deleted; any write revives it", projectID)
 	}
 	return nil
 }
 
-// maybeEmbedKeypath fires a fire-and-forget goroutine that embeds the given
-// keypath with the configured model and upserts into keypath_embeddings.
-// No-op if the embedder is nil or the row already exists. Errors are logged
-// (throttled) and do not surface to the caller — writes succeed regardless.
-func maybeEmbedKeypath(store *Store, embedder *Embedder, projectID, keypath string) {
+// maybeEmbedContent fires a fire-and-forget goroutine that embeds the current
+// content at keypath and upserts into keypath_embeddings. When the write
+// changed content (changed=true) the vector is always recomputed; otherwise
+// it is only computed if the row is missing — this heals keypaths whose
+// embed failed earlier (e.g. Ollama was down). No-op if the embedder is nil.
+// Errors are logged (throttled) and never surface — writes succeed regardless.
+func maybeEmbedContent(store *Store, embedder *Embedder, projectID, keypath, content string, changed bool) {
 	if embedder == nil {
 		return
 	}
 	embedder.inFlight.Go(func() {
-		has, err := store.HasKeypathEmbedding(projectID, keypath, embedder.Model)
-		if err != nil {
-			embedder.maybeLog(fmt.Sprintf("has-embedding check failed for %s/%s: %v",
-				projectID, keypath, err))
-			return
-		}
-		if has {
-			return
+		if !changed {
+			has, err := store.HasKeypathEmbedding(projectID, keypath, embedder.Model)
+			if err != nil {
+				embedder.maybeLog(fmt.Sprintf("has-embedding check failed for %s/%s: %v",
+					projectID, keypath, err))
+				return
+			}
+			if has {
+				return
+			}
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		vec, err := embedder.Embed(ctx, keypath)
+		vec, err := embedder.EmbedDocument(ctx, content)
 		if err != nil {
 			embedder.maybeLog(fmt.Sprintf("embed failed for %s/%s: %v",
 				projectID, keypath, err))
@@ -144,12 +148,12 @@ type storeReq struct {
 	Keypath   string   `json:"keypath"`
 	Content   string   `json:"content"`
 	Source    string   `json:"source,omitempty"`
-	Category  string   `json:"category,omitempty"` // accepted but not yet stored
-	Topics    []string `json:"topics,omitempty"`   // accepted but not yet stored
+	Category  string   `json:"category,omitempty"`
+	Topics    []string `json:"topics,omitempty"`
 }
 
 type writeResp struct {
-	Action     string  `json:"action"` // "created" | "superseded"
+	Action     string  `json:"action"` // "created" | "superseded" | "unchanged"
 	Stored     *Memory `json:"stored"`
 	Superseded *Memory `json:"superseded,omitempty"`
 }
@@ -165,19 +169,17 @@ func handleStore(store *Store, embedder *Embedder) http.HandlerFunc {
 			writeErr(w, http.StatusBadRequest, "project_id, keypath, content are required")
 			return
 		}
-		if err := checkProjectLive(store, in.ProjectID); err != nil {
-			writeErr(w, http.StatusConflict, err.Error())
-			return
-		}
 		kp := NormalizeKeypath(in.Keypath)
-		stored, prev, err := store.Write(in.ProjectID, kp, in.Content, in.Source, false)
+		meta := WriteMeta{Source: in.Source, Category: in.Category, Topics: in.Topics}
+		stored, prev, err := store.Write(in.ProjectID, kp, in.Content, meta, false)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		maybeEmbedKeypath(store, embedder, in.ProjectID, kp)
+		action := classifyWrite(stored, prev)
+		maybeEmbedContent(store, embedder, in.ProjectID, kp, stored.Content, action != "unchanged")
 		writeJSON(w, http.StatusOK, writeResp{
-			Action:     classifyWrite(stored, prev),
+			Action:     action,
 			Stored:     stored,
 			Superseded: prev,
 		})
@@ -185,15 +187,16 @@ func handleStore(store *Store, embedder *Embedder) http.HandlerFunc {
 }
 
 type rememberReq struct {
-	ProjectID string  `json:"project_id"`
-	Keypath   string  `json:"keypath,omitempty"` // optional — extraction runs when empty
-	Content   string  `json:"content"`
-	Source    string  `json:"source,omitempty"`
+	ProjectID string   `json:"project_id"`
+	Keypath   string   `json:"keypath,omitempty"` // optional — extraction runs when empty
+	Content   string   `json:"content"`
+	Source    string   `json:"source,omitempty"`
+	Category  string   `json:"category,omitempty"` // applies to every written section
+	Topics    []string `json:"topics,omitempty"`   // applies to every written section
 	// Root is the prefix applied to every extracted keypath. Absent (nil)
 	// means "default to <project_id>". An explicit "" disables the prefix.
 	// Any explicit value is used as-is after keypath normalization.
-	Root    *string `json:"root,omitempty"`
-	Context string  `json:"context,omitempty"` // accepted but not used
+	Root *string `json:"root,omitempty"`
 }
 
 // extractedItem is one entry in a batch remember response.
@@ -224,10 +227,6 @@ func handleRemember(store *Store, embedder *Embedder) http.HandlerFunc {
 			writeErr(w, http.StatusBadRequest, "project_id and content are required")
 			return
 		}
-		if err := checkProjectLive(store, in.ProjectID); err != nil {
-			writeErr(w, http.StatusConflict, err.Error())
-			return
-		}
 
 		var sections []Section
 		method := "explicit"
@@ -248,20 +247,23 @@ func handleRemember(store *Store, embedder *Embedder) http.HandlerFunc {
 			}
 		}
 
-		batch, err := store.WriteBatch(in.ProjectID, sections, in.Source)
+		meta := WriteMeta{Source: in.Source, Category: in.Category, Topics: in.Topics}
+		batch, err := store.WriteBatch(in.ProjectID, sections, meta)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		out := rememberResp{Method: method, Items: make([]extractedItem, len(batch))}
 		for i, it := range batch {
+			action := classifyWrite(it.Stored, it.Superseded)
 			out.Items[i] = extractedItem{
 				Keypath:    it.Keypath,
-				Action:     classifyWrite(it.Stored, it.Superseded),
+				Action:     action,
 				Stored:     it.Stored,
 				Superseded: it.Superseded,
 			}
-			maybeEmbedKeypath(store, embedder, in.ProjectID, it.Keypath)
+			maybeEmbedContent(store, embedder, in.ProjectID, it.Keypath,
+				it.Stored.Content, action != "unchanged")
 		}
 		writeJSON(w, http.StatusOK, out)
 	}
@@ -362,10 +364,16 @@ func handleDeleteProject(store *Store) http.HandlerFunc {
 // ---------- read handlers ----------
 
 type searchReq struct {
-	Query     string `json:"query"`
-	ProjectID string `json:"project_id,omitempty"`
-	Limit     int    `json:"limit,omitempty"`
-	Mode      string `json:"mode,omitempty"` // "fts" (default) | "semantic"
+	Query     string   `json:"query"`
+	ProjectID string   `json:"project_id,omitempty"`
+	Limit     int      `json:"limit,omitempty"`
+	Mode      string   `json:"mode,omitempty"`     // "fts" (default) | "semantic"
+	Category  string   `json:"category,omitempty"` // exact-match filter
+	Topics    []string `json:"topics,omitempty"`   // match-any filter
+	// KeypathPrefix restricts hits to this keypath or its descendants
+	// (dot-boundary). Used to scope a search to one subtree, e.g. a
+	// branches.<slug> area.
+	KeypathPrefix string `json:"keypath_prefix,omitempty"`
 	// Threshold is semantic-only. nil (absent) → MEMSTATE_SEMANTIC_THRESHOLD
 	// env / defaultThreshold. An explicit value (including 0 or negative) is
 	// honoured as-is so callers can accept-all with threshold=0.
@@ -394,9 +402,14 @@ func handleSearch(store *Store, embedder *Embedder) http.HandlerFunc {
 		if mode == "" {
 			mode = "fts"
 		}
+		filter := SearchFilter{
+			Category:      in.Category,
+			Topics:        in.Topics,
+			KeypathPrefix: NormalizeKeypath(in.KeypathPrefix),
+		}
 		switch mode {
 		case "fts":
-			hits, err := store.Search(in.ProjectID, in.Query, in.Limit)
+			hits, err := store.Search(in.ProjectID, in.Query, filter, in.Limit)
 			if err != nil {
 				writeErr(w, http.StatusBadRequest, err.Error())
 				return
@@ -415,7 +428,7 @@ func handleSearch(store *Store, embedder *Embedder) http.HandlerFunc {
 			}
 			ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 			defer cancel()
-			qvec, err := embedder.Embed(ctx, in.Query)
+			qvec, err := embedder.EmbedQuery(ctx, in.Query)
 			if err != nil {
 				writeErr(w, http.StatusBadGateway,
 					fmt.Sprintf("embed query: %v", err))
@@ -427,7 +440,7 @@ func handleSearch(store *Store, embedder *Embedder) http.HandlerFunc {
 			} else {
 				threshold = envThreshold()
 			}
-			hits, err := store.SemanticSearch(in.ProjectID, qvec, embedder.Model, threshold, in.Limit)
+			hits, err := store.SemanticSearch(in.ProjectID, qvec, embedder.Model, threshold, filter, in.Limit)
 			if err != nil {
 				writeErr(w, http.StatusInternalServerError, err.Error())
 				return
@@ -503,7 +516,6 @@ type keypathsReq struct {
 	Keypath        string `json:"keypath,omitempty"`
 	Recursive      bool   `json:"recursive,omitempty"`
 	IncludeContent bool   `json:"include_content,omitempty"`
-	AtRevision     int    `json:"at_revision,omitempty"` // accepted, not implemented
 }
 
 func handleKeypaths(store *Store) http.HandlerFunc {

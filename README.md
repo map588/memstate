@@ -103,7 +103,7 @@ are dot-notation.
 | `memstate_set` | Write a short value at a keypath (`config.port = "8080"`). |
 | `memstate_remember` | Write a markdown summary. Explicit keypath writes there; omit the keypath and each `## heading` becomes its own versioned memory nested by `###` depth. |
 | `memstate_get` | Read a keypath, browse a subtree, or return the whole project tree. |
-| `memstate_search` | Search current memories. `mode="fts"` (default) uses SQLite FTS5; `mode="semantic"` embeds the query via Ollama and cosine-ranks against stored keypath vectors. |
+| `memstate_search` | Search current memories. `mode="fts"` (default) uses SQLite FTS5; `mode="semantic"` embeds the query via Ollama and cosine-ranks against embeddings of each keypath's current content. Both modes accept `category` / `topics` filters. |
 | `memstate_history` | Every version of a keypath, newest first — including tombstones. |
 | `memstate_delete` | Tombstone a keypath. History is preserved. |
 | `memstate_delete_project` | Soft-delete a project. |
@@ -130,11 +130,13 @@ for both explicit-keypath and heading-extract modes.
 ### `memstate_search` — semantic mode
 
 Under `mode="semantic"` the daemon embeds the query via Ollama, cosine-
-ranks against stored **keypath** embeddings (one row per unique
-`(project, keypath, model)` — keypaths are stable across versions), and
-filters by `threshold` (default 0.5). Tune via the request field or
-`MEMSTATE_SEMANTIC_THRESHOLD`. Each result pairs the keypath with the
-current non-tombstoned memory at that keypath and the similarity score.
+ranks against embeddings of the **current content** at each keypath
+(one row per unique `(project, keypath, model)`, recomputed whenever the
+content changes), and filters by `threshold` (default 0.5). Tune via the
+request field or `MEMSTATE_SEMANTIC_THRESHOLD`. Each result pairs the
+keypath with the current non-tombstoned memory and the similarity score.
+With nomic-embed models, queries and documents get the model's
+`search_query:` / `search_document:` task prefixes automatically.
 
 ## How storage works
 
@@ -154,10 +156,19 @@ chain. `memstate_delete` appends a tombstone row: the data is still
 there in history, but no longer surfaces in reads or search.
 
 Two search paths: SQLite FTS5 (fast, lexical, works offline) and
-semantic keypath search via Ollama embeddings. Embeddings are fire-and-
+semantic content search via Ollama embeddings. Embeddings are fire-and-
 forget on write — the HTTP write returns immediately and a goroutine
-embeds the new keypath in the background. If Ollama is unreachable the
-daemon logs once per hour and moves on; FTS search is unaffected.
+embeds the new content in the background. If Ollama is unreachable the
+daemon logs once per hour and moves on; FTS search is unaffected, and
+the missing vector is healed the next time the same content is written.
+
+On every startup the daemon backfills missing vectors in the background
+(sequentially, one Ollama call at a time), so an embed-model switch or a
+stretch of Ollama downtime heals itself on the next start.
+
+Soft-deleting a project blocks reads until any write to it, which
+revives it. Deleting a keypath removes its embedding row and drops it
+from search, but the full version history remains readable.
 
 ## Where your data lives
 
@@ -260,9 +271,7 @@ mode.
 ## Not done yet
 
 - LLM fallback for keypath extraction when headings are absent (currently such content lands under `<root>.preamble`).
-- Time-travel reads (`at_revision` is accepted but ignored).
-- Category / topic facets (same).
-- `reindex-embeddings` subcommand for when `MEMSTATE_EMBED_MODEL` changes — existing embeddings get silently ignored on search until their keypaths are written again.
+- Time-travel reads (an `at_revision` request field is now rejected rather than silently ignored).
 
 ## License
 

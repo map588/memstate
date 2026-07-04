@@ -2,8 +2,11 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -23,6 +26,8 @@ CREATE TABLE IF NOT EXISTS memories (
   keypath    TEXT    NOT NULL,
   content    TEXT    NOT NULL,
   source     TEXT,
+  category   TEXT,
+  topics     TEXT,
   version    INTEGER NOT NULL,
   parent_id  INTEGER REFERENCES memories(id),
   tombstone  INTEGER NOT NULL DEFAULT 0,
@@ -32,25 +37,15 @@ CREATE TABLE IF NOT EXISTS memories (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mem_pkv
   ON memories(project_id, keypath, version);
 
-CREATE INDEX IF NOT EXISTS idx_mem_pk
-  ON memories(project_id, keypath);
+-- idx_mem_pk was a prefix of the unique index above; dropped as redundant.
+DROP INDEX IF EXISTS idx_mem_pk;
 
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
   content, keypath, tokenize = 'porter unicode61'
 );
 
--- Stub kept for historical compatibility; current semantic-search code uses
--- keypath_embeddings (one row per keypath, not per memory version).
-CREATE TABLE IF NOT EXISTS embeddings (
-  memory_id INTEGER PRIMARY KEY REFERENCES memories(id),
-  model     TEXT    NOT NULL,
-  dim       INTEGER NOT NULL,
-  vector    BLOB    NOT NULL
-);
-
--- Semantic search embeds the keypath string (not content). Keypaths are
--- stable across versions, so one row per (project, keypath, model) is both
--- cheaper and avoids re-embedding on every remember-at-same-keypath.
+-- Semantic search embeds the CONTENT of the current version at each keypath;
+-- one row per (project, keypath, model), upserted whenever content changes.
 CREATE TABLE IF NOT EXISTS keypath_embeddings (
   project_id TEXT    NOT NULL,
   keypath    TEXT    NOT NULL,
@@ -60,19 +55,40 @@ CREATE TABLE IF NOT EXISTS keypath_embeddings (
   created_at INTEGER NOT NULL,
   PRIMARY KEY (project_id, keypath, model)
 );
+
+CREATE TABLE IF NOT EXISTS meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 `
+
+// embedSource names what the stored vectors were computed from. Bumping this
+// value wipes keypath_embeddings on startup so stale vectors (e.g. from the
+// earlier keypath-string scheme) never mix with the current one; vectors
+// rebuild lazily via the heal path in maybeEmbedContent.
+const embedSource = "content"
 
 // Memory is one row in the version chain for a (project_id, keypath).
 type Memory struct {
-	ID        int64  `json:"id"`
-	ProjectID string `json:"project_id"`
-	Keypath   string `json:"keypath"`
-	Content   string `json:"content"`
-	Source    string `json:"source,omitempty"`
-	Version   int    `json:"version"`
-	ParentID  *int64 `json:"parent_id,omitempty"`
-	Tombstone bool   `json:"tombstone,omitempty"`
-	CreatedAt int64  `json:"created_at"`
+	ID        int64    `json:"id"`
+	ProjectID string   `json:"project_id"`
+	Keypath   string   `json:"keypath"`
+	Content   string   `json:"content"`
+	Source    string   `json:"source,omitempty"`
+	Category  string   `json:"category,omitempty"`
+	Topics    []string `json:"topics,omitempty"`
+	Version   int      `json:"version"`
+	ParentID  *int64   `json:"parent_id,omitempty"`
+	Tombstone bool     `json:"tombstone,omitempty"`
+	CreatedAt int64    `json:"created_at"`
+}
+
+// WriteMeta carries the per-version metadata of a write. The zero value is
+// valid (no source, no category, no topics).
+type WriteMeta struct {
+	Source   string
+	Category string
+	Topics   []string
 }
 
 type Store struct {
@@ -128,7 +144,48 @@ func OpenStore(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
+	if err := migrate(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
 	return &Store{db: db}, nil
+}
+
+// migrate converges DBs created under older schemas. CREATE TABLE IF NOT
+// EXISTS never adds columns to an existing table, so column additions live
+// here; the embed_source check wipes vectors computed under a different
+// embedding scheme (they rebuild lazily on the next write per keypath).
+func migrate(db *sql.DB) error {
+	for _, col := range []string{"category", "topics"} {
+		var n int
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name=?`, col,
+		).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			if _, err := db.Exec(`ALTER TABLE memories ADD COLUMN ` + col + ` TEXT`); err != nil {
+				return err
+			}
+		}
+	}
+	var src string
+	err := db.QueryRow(`SELECT value FROM meta WHERE key='embed_source'`).Scan(&src)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if src != embedSource {
+		if _, err := db.Exec(`DELETE FROM keypath_embeddings`); err != nil {
+			return err
+		}
+		if _, err := db.Exec(
+			`INSERT INTO meta(key, value) VALUES('embed_source', ?)
+			 ON CONFLICT(key) DO UPDATE SET value=excluded.value`, embedSource,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -155,8 +212,10 @@ func (s *Store) ProjectDeleted(id string) (bool, error) {
 	return deletedAt.Valid, nil
 }
 
-func (s *Store) ensureProject(id string) error {
-	_, err := s.db.Exec(
+// ensureProject creates the project row, or revives it if soft-deleted.
+// Any write to a project therefore un-deletes it.
+func ensureProject(exec dbExec, id string) error {
+	_, err := exec.Exec(
 		`INSERT INTO projects(id, created_at) VALUES(?, ?)
 		 ON CONFLICT(id) DO UPDATE SET deleted_at = NULL`,
 		id, time.Now().Unix(),
@@ -166,15 +225,23 @@ func (s *Store) ensureProject(id string) error {
 
 func scanMemory(scan func(dest ...any) error) (*Memory, error) {
 	m := &Memory{}
-	var src sql.NullString
+	var src, cat, topics sql.NullString
 	var parent sql.NullInt64
 	var tomb int
-	if err := scan(&m.ID, &m.ProjectID, &m.Keypath, &m.Content, &src,
+	if err := scan(&m.ID, &m.ProjectID, &m.Keypath, &m.Content, &src, &cat, &topics,
 		&m.Version, &parent, &tomb, &m.CreatedAt); err != nil {
 		return nil, err
 	}
 	if src.Valid {
 		m.Source = src.String
+	}
+	if cat.Valid {
+		m.Category = cat.String
+	}
+	if topics.Valid {
+		if err := json.Unmarshal([]byte(topics.String), &m.Topics); err != nil {
+			return nil, fmt.Errorf("decode topics for memory %d: %w", m.ID, err)
+		}
 	}
 	if parent.Valid {
 		m.ParentID = &parent.Int64
@@ -185,7 +252,7 @@ func scanMemory(scan func(dest ...any) error) (*Memory, error) {
 
 // memoryCols is always qualified so queries can safely join FTS5 (which also
 // has a keypath column) without provoking "ambiguous column" errors.
-const memoryCols = `m.id, m.project_id, m.keypath, m.content, m.source, m.version, m.parent_id, m.tombstone, m.created_at`
+const memoryCols = `m.id, m.project_id, m.keypath, m.content, m.source, m.category, m.topics, m.version, m.parent_id, m.tombstone, m.created_at`
 
 // dbExec abstracts the subset of *sql.DB / *sql.Tx used by write helpers,
 // so the same code path can run inside a batch transaction or stand-alone.
@@ -215,27 +282,49 @@ func getLatestExec(exec dbExec, projectID, keypath string) (*Memory, error) {
 }
 
 // Write appends a new version at keypath. Returns the new memory and the
-// superseded previous (nil if none).
-func (s *Store) Write(projectID, keypath, content, source string, tombstone bool) (*Memory, *Memory, error) {
-	if err := s.ensureProject(projectID); err != nil {
+// superseded previous (nil if none). The whole read-latest + insert runs in
+// one transaction so concurrent writers to the same keypath cannot collide
+// on the (project_id, keypath, version) unique index.
+func (s *Store) Write(projectID, keypath, content string, meta WriteMeta, tombstone bool) (*Memory, *Memory, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
 		return nil, nil, err
 	}
-	return writeExec(s.db, projectID, keypath, content, source, tombstone)
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	if err := ensureProject(tx, projectID); err != nil {
+		return nil, nil, err
+	}
+	stored, prev, err := writeExec(tx, projectID, keypath, content, meta, tombstone)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, err
+	}
+	committed = true
+	return stored, prev, nil
 }
 
 // writeExec is the tx-capable core of Write. Caller is responsible for
 // ensureProject; within a batch tx we hoist that call outside the loop.
 //
-// Idempotency: if the prior live version has identical content (and this
-// call is not a tombstone), no new row is written. Both return values
-// point at the same prior memory — callers detect "unchanged" via pointer
-// or ID equality.
-func writeExec(exec dbExec, projectID, keypath, content, source string, tombstone bool) (*Memory, *Memory, error) {
+// Idempotency: if the prior live version has identical content and metadata
+// (and this call is not a tombstone), no new row is written. Both return
+// values point at the same prior memory — callers detect "unchanged" via
+// pointer or ID equality.
+func writeExec(exec dbExec, projectID, keypath, content string, meta WriteMeta, tombstone bool) (*Memory, *Memory, error) {
 	prev, err := getLatestExec(exec, projectID, keypath)
 	if err != nil {
 		return nil, nil, err
 	}
-	if !tombstone && prev != nil && !prev.Tombstone && prev.Content == content {
+	if !tombstone && prev != nil && !prev.Tombstone &&
+		prev.Content == content && prev.Category == meta.Category &&
+		slices.Equal(prev.Topics, meta.Topics) {
 		return prev, prev, nil
 	}
 	nextVer := 1
@@ -249,20 +338,47 @@ func writeExec(exec dbExec, projectID, keypath, content, source string, tombston
 	if tombstone {
 		tombVal = 1
 	}
-	var srcArg any
-	if source != "" {
-		srcArg = source
+	var srcArg, catArg, topicsArg any
+	if meta.Source != "" {
+		srcArg = meta.Source
+	}
+	if meta.Category != "" {
+		catArg = meta.Category
+	}
+	if len(meta.Topics) > 0 {
+		b, err := json.Marshal(meta.Topics)
+		if err != nil {
+			return nil, nil, err
+		}
+		topicsArg = string(b)
 	}
 	res, err := exec.Exec(
-		`INSERT INTO memories(project_id, keypath, content, source, version, parent_id, tombstone, created_at)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
-		projectID, keypath, content, srcArg, nextVer, parent, tombVal, now,
+		`INSERT INTO memories(project_id, keypath, content, source, category, topics, version, parent_id, tombstone, created_at)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		projectID, keypath, content, srcArg, catArg, topicsArg, nextVer, parent, tombVal, now,
 	)
 	if err != nil {
 		return nil, nil, err
 	}
 	id, _ := res.LastInsertId()
-	if !tombstone {
+	// Only the current version is searchable: drop the superseded version's
+	// FTS row so the index doesn't grow with (and rank against) dead text.
+	if prev != nil && !prev.Tombstone {
+		if _, err := exec.Exec(
+			`DELETE FROM memories_fts WHERE rowid=?`, prev.ID,
+		); err != nil {
+			return nil, nil, err
+		}
+	}
+	if tombstone {
+		// A dead keypath must also stop participating in semantic search.
+		if _, err := exec.Exec(
+			`DELETE FROM keypath_embeddings WHERE project_id=? AND keypath=?`,
+			projectID, keypath,
+		); err != nil {
+			return nil, nil, err
+		}
+	} else {
 		if _, err := exec.Exec(
 			`INSERT INTO memories_fts(rowid, content, keypath) VALUES(?, ?, ?)`,
 			id, content, keypath,
@@ -272,7 +388,8 @@ func writeExec(exec dbExec, projectID, keypath, content, source string, tombston
 	}
 	m := &Memory{
 		ID: id, ProjectID: projectID, Keypath: keypath, Content: content,
-		Source: source, Version: nextVer, Tombstone: tombstone, CreatedAt: now,
+		Source: meta.Source, Category: meta.Category, Topics: meta.Topics,
+		Version: nextVer, Tombstone: tombstone, CreatedAt: now,
 	}
 	if parent.Valid {
 		pid := parent.Int64
@@ -309,6 +426,48 @@ func (s *Store) UpsertKeypathEmbedding(projectID, keypath, model string, dim int
 	return err
 }
 
+// MissingEmbedding is a current, non-tombstoned memory in a live project
+// that has no embedding row for the given model. Input to the startup
+// backfill.
+type MissingEmbedding struct {
+	ProjectID string
+	Keypath   string
+	Content   string
+}
+
+// ListMissingEmbeddings returns every current, non-tombstoned keypath in a
+// live project whose (project, keypath, model) embedding row is absent.
+func (s *Store) ListMissingEmbeddings(model string) ([]MissingEmbedding, error) {
+	rows, err := s.db.Query(`
+		SELECT m.project_id, m.keypath, m.content FROM memories m
+		JOIN projects p ON p.id = m.project_id AND p.deleted_at IS NULL
+		WHERE m.tombstone = 0
+		  AND m.version = (
+		    SELECT MAX(version) FROM memories m2
+		    WHERE m2.project_id = m.project_id AND m2.keypath = m.keypath
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM keypath_embeddings ke
+		    WHERE ke.project_id = m.project_id
+		      AND ke.keypath = m.keypath
+		      AND ke.model = ?
+		  )
+		ORDER BY m.project_id, m.keypath`, model)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []MissingEmbedding
+	for rows.Next() {
+		var me MissingEmbedding
+		if err := rows.Scan(&me.ProjectID, &me.Keypath, &me.Content); err != nil {
+			return nil, err
+		}
+		out = append(out, me)
+	}
+	return out, rows.Err()
+}
+
 // KeypathEmbedding is a row from keypath_embeddings, exposed to the search
 // path after the vector is unpacked.
 type KeypathEmbedding struct {
@@ -318,13 +477,16 @@ type KeypathEmbedding struct {
 }
 
 // ListKeypathEmbeddings returns every (project, keypath, vector) row for a
-// given model, optionally scoped to a single project. Vectors are unpacked
-// from BLOB so the caller can compute cosine in memory.
+// given model, optionally scoped to a single project. Rows from soft-deleted
+// projects are excluded. Vectors are unpacked from BLOB so the caller can
+// compute cosine in memory.
 func (s *Store) ListKeypathEmbeddings(projectID, model string) ([]*KeypathEmbedding, error) {
-	q := `SELECT project_id, keypath, vector FROM keypath_embeddings WHERE model=?`
+	q := `SELECT ke.project_id, ke.keypath, ke.vector FROM keypath_embeddings ke
+	      JOIN projects p ON p.id = ke.project_id AND p.deleted_at IS NULL
+	      WHERE ke.model=?`
 	args := []any{model}
 	if projectID != "" {
-		q += ` AND project_id=?`
+		q += ` AND ke.project_id=?`
 		args = append(args, projectID)
 	}
 	rows, err := s.db.Query(q, args...)
@@ -355,14 +517,14 @@ type SemanticHit struct {
 	Score float32 `json:"score"`
 }
 
-// SemanticSearch ranks keypaths in the given project (or all projects if
-// projectID is empty) by cosine similarity to query. Returns at most limit
-// hits whose similarity is >= threshold, paired with the current non-
-// tombstoned memory at that keypath.
+// SemanticSearch ranks keypaths in the given project (or all live projects
+// if projectID is empty) by cosine similarity to query. Returns at most
+// limit hits whose similarity is >= threshold and whose current memory
+// passes the filter, paired with that memory.
 //
 // Callers that want to skip the embedding lookup (e.g. because they already
 // have a vector) can pass the pre-embedded query directly.
-func (s *Store) SemanticSearch(projectID string, query []float32, model string, threshold float32, limit int) ([]*SemanticHit, error) {
+func (s *Store) SemanticSearch(projectID string, query []float32, model string, threshold float32, filter SearchFilter, limit int) ([]*SemanticHit, error) {
 	if limit <= 0 {
 		limit = 20
 	}
@@ -381,22 +543,19 @@ func (s *Store) SemanticSearch(projectID string, query []float32, model string, 
 			picks = append(picks, ranked{r.ProjectID, r.Keypath, sc})
 		}
 	}
-	// Sort descending by score (simple insertion sort, N is small).
-	for i := 1; i < len(picks); i++ {
-		for j := i; j > 0 && picks[j].score > picks[j-1].score; j-- {
-			picks[j], picks[j-1] = picks[j-1], picks[j]
-		}
-	}
-	if len(picks) > limit {
-		picks = picks[:limit]
-	}
-	out := make([]*SemanticHit, 0, len(picks))
+	sort.Slice(picks, func(i, j int) bool { return picks[i].score > picks[j].score })
+	// Truncate to limit AFTER the tombstone/filter checks below, so filtered
+	// rows don't consume result slots.
+	out := make([]*SemanticHit, 0, min(len(picks), limit))
 	for _, p := range picks {
+		if len(out) == limit {
+			break
+		}
 		m, err := s.GetLatest(p.pid, p.kp)
 		if err != nil {
 			return nil, err
 		}
-		if m == nil || m.Tombstone {
+		if m == nil || m.Tombstone || !filter.Matches(m) {
 			continue
 		}
 		out = append(out, &SemanticHit{Memory: m, Score: p.score})
@@ -413,14 +572,11 @@ type BatchItem struct {
 
 // WriteBatch writes all sections under a single transaction. On any per-row
 // error the whole batch is rolled back — callers see no partial state.
-// Source applies to every row. Sections are processed in order, so a later
+// Meta applies to every row. Sections are processed in order, so a later
 // section can observe a prior section's write via parent_id chain.
-func (s *Store) WriteBatch(projectID string, sections []Section, source string) ([]BatchItem, error) {
+func (s *Store) WriteBatch(projectID string, sections []Section, meta WriteMeta) ([]BatchItem, error) {
 	if len(sections) == 0 {
 		return nil, nil
-	}
-	if err := s.ensureProject(projectID); err != nil {
-		return nil, err
 	}
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -432,10 +588,13 @@ func (s *Store) WriteBatch(projectID string, sections []Section, source string) 
 			_ = tx.Rollback()
 		}
 	}()
+	if err := ensureProject(tx, projectID); err != nil {
+		return nil, err
+	}
 	out := make([]BatchItem, 0, len(sections))
 	for _, sec := range sections {
 		kp := NormalizeKeypath(sec.Keypath)
-		stored, prev, err := writeExec(tx, projectID, kp, sec.Content, source, false)
+		stored, prev, err := writeExec(tx, projectID, kp, sec.Content, meta, false)
 		if err != nil {
 			return nil, err
 		}
@@ -446,6 +605,12 @@ func (s *Store) WriteBatch(projectID string, sections []Section, source string) 
 	}
 	committed = true
 	return out, nil
+}
+
+// escapeLike backslash-escapes LIKE wildcards. Snake_case keypaths contain
+// `_` (the single-char wildcard), so unescaped prefixes silently over-match.
+func escapeLike(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
 }
 
 // List returns current-version, non-tombstoned memories matching keypath.
@@ -463,8 +628,8 @@ func (s *Store) List(projectID, keypath string) ([]*Memory, error) {
 	`
 	args := []any{projectID}
 	if keypath != "" {
-		q += ` AND (m.keypath = ? OR m.keypath LIKE ?)`
-		args = append(args, keypath, keypath+".%")
+		q += ` AND (m.keypath = ? OR m.keypath LIKE ? ESCAPE '\')`
+		args = append(args, keypath, escapeLike(keypath)+".%")
 	}
 	q += ` ORDER BY m.keypath`
 	return s.queryMemories(q, args...)
@@ -480,14 +645,57 @@ func (s *Store) History(projectID, keypath string) ([]*Memory, error) {
 	)
 }
 
-// Search does an FTS5 match on content+keypath, restricted to current non-tombstoned versions.
-func (s *Store) Search(projectID, query string, limit int) ([]*Memory, error) {
+// SearchFilter narrows search results by per-version metadata and keypath
+// location. Zero value means no filtering. Topics is match-any: a memory
+// qualifies if it carries at least one of the listed topics. KeypathPrefix
+// restricts hits to that exact keypath or its descendants (dot-boundary,
+// e.g. "branches.feature_x" matches "branches.feature_x.todo" but not
+// "branches.feature_x2").
+type SearchFilter struct {
+	Category      string
+	Topics        []string
+	KeypathPrefix string
+}
+
+// Matches reports whether a memory passes the filter. Used by the semantic
+// path, which filters in Go; the FTS path expresses the same predicate in SQL.
+func (f SearchFilter) Matches(m *Memory) bool {
+	if f.Category != "" && m.Category != f.Category {
+		return false
+	}
+	if len(f.Topics) > 0 && !slices.ContainsFunc(f.Topics, func(t string) bool {
+		return slices.Contains(m.Topics, t)
+	}) {
+		return false
+	}
+	if f.KeypathPrefix != "" && m.Keypath != f.KeypathPrefix &&
+		!strings.HasPrefix(m.Keypath, f.KeypathPrefix+".") {
+		return false
+	}
+	return true
+}
+
+// ftsQuote turns free text into a safe FTS5 query: each whitespace-separated
+// token becomes a quoted string (implicit AND). Punctuation like apostrophes
+// or hyphens would otherwise be parsed as FTS5 operator syntax and error out.
+func ftsQuote(q string) string {
+	fields := strings.Fields(q)
+	for i, f := range fields {
+		fields[i] = `"` + strings.ReplaceAll(f, `"`, `""`) + `"`
+	}
+	return strings.Join(fields, " ")
+}
+
+// Search does an FTS5 match on content+keypath, restricted to current
+// non-tombstoned versions in live (non-deleted) projects.
+func (s *Store) Search(projectID, query string, filter SearchFilter, limit int) ([]*Memory, error) {
 	if limit <= 0 {
 		limit = 20
 	}
 	q := `
 		SELECT ` + memoryCols + ` FROM memories m
 		JOIN memories_fts fts ON fts.rowid = m.id
+		JOIN projects p ON p.id = m.project_id AND p.deleted_at IS NULL
 		WHERE memories_fts MATCH ?
 		  AND m.tombstone = 0
 		  AND m.version = (
@@ -495,10 +703,26 @@ func (s *Store) Search(projectID, query string, limit int) ([]*Memory, error) {
 		    WHERE m2.project_id = m.project_id AND m2.keypath = m.keypath
 		  )
 	`
-	args := []any{query}
+	args := []any{ftsQuote(query)}
 	if projectID != "" {
 		q += ` AND m.project_id = ?`
 		args = append(args, projectID)
+	}
+	if filter.Category != "" {
+		q += ` AND m.category = ?`
+		args = append(args, filter.Category)
+	}
+	if filter.KeypathPrefix != "" {
+		q += ` AND (m.keypath = ? OR m.keypath LIKE ? ESCAPE '\')`
+		args = append(args, filter.KeypathPrefix, escapeLike(filter.KeypathPrefix)+".%")
+	}
+	if len(filter.Topics) > 0 {
+		q += ` AND m.topics IS NOT NULL AND EXISTS (
+			SELECT 1 FROM json_each(m.topics)
+			WHERE json_each.value IN (?` + strings.Repeat(",?", len(filter.Topics)-1) + `))`
+		for _, t := range filter.Topics {
+			args = append(args, t)
+		}
 	}
 	q += ` ORDER BY fts.rank LIMIT ?`
 	args = append(args, limit)
@@ -534,7 +758,7 @@ func (s *Store) Delete(projectID, keypath string) (*Memory, *Memory, error) {
 	if prev.Tombstone {
 		return prev, prev, nil
 	}
-	return s.Write(projectID, keypath, "", "", true)
+	return s.Write(projectID, keypath, "", WriteMeta{}, true)
 }
 
 // DeleteProject marks the project row deleted_at. Memories remain for history.
@@ -562,7 +786,7 @@ func (s *Store) DeleteSubtree(projectID, prefix string) ([]string, error) {
 	}
 	done := make([]string, 0, len(live))
 	for _, m := range live {
-		if _, _, err := s.Write(projectID, m.Keypath, "", "", true); err != nil {
+		if _, _, err := s.Write(projectID, m.Keypath, "", WriteMeta{}, true); err != nil {
 			return done, err
 		}
 		done = append(done, m.Keypath)

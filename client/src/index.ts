@@ -85,14 +85,13 @@ function openDaemonLog(): { logFD: number | null; logPath: string } {
 }
 
 // awaitBanner tees child.stderr to logFD line-by-line and resolves when the
-// READY banner appears (yielding the parsed addr) or via the optional onExit
-// shortcut. Rejects on unhandled exit or 5s timeout.
-type ExitOutcome = { addr: string } | Error | null;
+// READY banner appears (yielding the parsed addr). Rejects on exit or 5s
+// timeout. Child mode only — the proxy holds the stderr pipe open for the
+// daemon's whole life, so the daemon can always write to it.
 function awaitBanner(
   child: ChildProcess,
   logFD: number | null,
-  logPath: string,
-  onExit: (code: number | null) => ExitOutcome = () => null
+  logPath: string
 ): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     let buf = "";
@@ -132,15 +131,6 @@ function awaitBanner(
       }
     });
     child.once("exit", (code) => {
-      const outcome = onExit(code);
-      if (outcome && "addr" in outcome) {
-        settle(() => resolve(outcome.addr));
-        return;
-      }
-      if (outcome instanceof Error) {
-        settle(() => reject(outcome));
-        return;
-      }
       settle(() =>
         reject(new Error(`memstated exited before ready (code=${code}). See ${logPath}.`))
       );
@@ -169,35 +159,50 @@ async function attach(addr: string): Promise<void> {
   baseURL = process.env.MEMSTATE_LOCAL_URL ?? `http://${addr}/api/v1`;
 }
 
+// spawnDetached starts a daemon that must outlive this proxy, so its stderr
+// goes straight to the log file — NEVER a pipe. A pipe would break once we
+// exit, and Go raises SIGPIPE on EPIPE writes to fd 2, i.e. the daemon would
+// be killed by its own next log line. The addr is known up front, so
+// readiness is a /health poll instead of the banner (which still lands in
+// the log for humans).
 async function spawnDetached(addr: string): Promise<void> {
   const bin = resolveDaemonBin();
   const { logFD, logPath } = openDaemonLog();
 
   const child = spawn(bin, ["--addr", addr], {
     detached: true,
-    stdio: ["ignore", logFD ?? "ignore", "pipe"],
+    stdio: ["ignore", logFD ?? "ignore", logFD ?? "ignore"],
   });
   if (!child.pid) {
     throw new Error(`memstated: spawn failed (bin=${bin})`);
   }
+  let exitCode: number | null | undefined;
+  child.once("exit", (code) => {
+    exitCode = code;
+  });
+  child.unref();
 
-  await awaitBanner(child, logFD, logPath, (code) => {
-    // Exit 0 with --addr means the daemon found /health already = us; racing
-    // double-start. Exit 2 means the port is occupied by an alien process.
-    if (code === 0) return { addr };
-    if (code === 2) {
-      return new Error(
-        `port ${addr} is occupied by a non-memstate process; refusing to start.`
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    if (exitCode !== undefined) {
+      // Exit 0 with --addr means the daemon found /health already = us; a
+      // racing double-start. Exit 2 means the port holds an alien process.
+      if (exitCode === 0) return;
+      if (exitCode === 2) {
+        throw new Error(
+          `port ${addr} is occupied by a non-memstate process; refusing to start.`
+        );
+      }
+      throw new Error(
+        `memstated exited before ready (code=${exitCode}). See ${logPath}.`
       );
     }
-    return null;
-  });
-
-  try {
-    child.stderr?.removeAllListeners("data");
-    child.stderr?.destroy();
-    child.unref();
-  } catch {}
+    if ((await probeHealth(addr)) === "ours") return;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error(
+    `memstated did not become healthy at ${addr} within 5s. See ${logPath}.`
+  );
 }
 
 async function spawnChild(): Promise<void> {
@@ -309,15 +314,52 @@ const TOOLS: ToolDef[] = [
   {
     name: "memstate_set",
     description:
-      "Save a single short fact at a keypath (e.g. `config.port` = `8080`). " +
-      "If a prior value existed, it is returned so you can see what changed.",
+      "Save ONE short fact at ONE keypath (e.g. `config.port` = `8080`). " +
+      "To update a fact, write the SAME keypath with the new value — the " +
+      "old version is preserved and returned as `superseded`. Do not " +
+      "create a new keypath for a new value of the same fact. For " +
+      "multi-fact markdown summaries use memstate_remember instead.",
     inputSchema: {
       type: "object",
       properties: {
-        project_id: { type: "string" },
-        keypath: { type: "string", description: "dot notation, e.g. config.port" },
-        value: { type: "string" },
-        source: { type: "string" },
+        project_id: {
+          type: "string",
+          description:
+            "existing project id, exactly as listed by memstate_get — " +
+            "lowercase snake_case, never a new variant of an existing id",
+        },
+        keypath: {
+          type: "string",
+          description:
+            "dot-joined lowercase snake_case segments, shape " +
+            "<area>.<topic>[.<detail>], e.g. \"config.port\" or " +
+            "\"decisions.auth_provider\". Dates as YYYY_MM_DD. No kebab-case, " +
+            "camelCase, or spaces.",
+        },
+        value: {
+          type: "string",
+          description: "the fact itself, plain text — short and self-contained",
+        },
+        source: {
+          type: "string",
+          description:
+            "provenance of the fact, e.g. \"claude-code session 2026_07_04\" " +
+            "or \"user decision\" — shown in history",
+        },
+        category: {
+          type: "string",
+          description:
+            "kind of memory, ONE lowercase word from: decision, config, " +
+            "status, note, gotcha, reference, learning. Filterable in " +
+            "memstate_search.",
+        },
+        topics: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "subject tags, lowercase snake_case, e.g. [\"auth\", " +
+            "\"embeddings\"]. Search matches ANY listed topic.",
+        },
       },
       required: ["project_id", "keypath", "value"],
     },
@@ -327,29 +369,67 @@ const TOOLS: ToolDef[] = [
         keypath: a.keypath,
         content: a.value,
         source: a.source,
+        category: a.category,
+        topics: a.topics,
       }),
   },
   {
     name: "memstate_remember",
     description:
-      "Save a markdown summary. Use at end-of-task for decisions, progress " +
-      "notes, and multi-fact summaries. Pass `keypath` to write one memory " +
-      "there; omit it to auto-split the markdown by `##` headings into one " +
-      "memory per section (deeper headings nest as dot segments).",
+      "Save a markdown summary at end-of-task (decisions, progress, key " +
+      "facts). Two modes: pass `keypath` to store the whole content as ONE " +
+      "memory there; omit `keypath` to split the markdown by `##` headings " +
+      "into one memory per section. When splitting, each heading becomes a " +
+      "snake_case keypath segment prefixed with `<project_id>.` (so " +
+      "`## Auth` in project my_app is stored at `my_app.auth`; `###` " +
+      "headings nest as a further dot segment; prose before the first " +
+      "heading lands at `<project_id>.preamble`). Heading names TODOs, " +
+      "Decisions, Open Questions, Files, Notes, Gotchas map to the " +
+      "canonical segments todo, decisions, questions, files, notes, gotchas.",
     inputSchema: {
       type: "object",
       properties: {
-        project_id: { type: "string" },
+        project_id: {
+          type: "string",
+          description:
+            "existing project id, exactly as listed by memstate_get — " +
+            "lowercase snake_case, never a new variant of an existing id",
+        },
         keypath: {
           type: "string",
-          description: "optional — omit to split by ## headings",
+          description:
+            "store ALL content as one memory at this exact keypath " +
+            "(lowercase snake_case segments, dates YYYY_MM_DD, e.g. " +
+            "\"task.summary.2026_07_04\"). Omit to split by ## headings " +
+            "instead.",
         },
-        content: { type: "string" },
-        source: { type: "string" },
+        content: { type: "string", description: "markdown (or plain text)" },
+        source: {
+          type: "string",
+          description:
+            "provenance, e.g. \"claude-code session 2026_07_04\" — shown in history",
+        },
+        category: {
+          type: "string",
+          description:
+            "kind of memory applied to EVERY section written by this call, " +
+            "ONE lowercase word from: decision, config, status, note, " +
+            "gotcha, reference, learning",
+        },
+        topics: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "subject tags applied to EVERY section written by this call — " +
+            "lowercase snake_case",
+        },
         root: {
           type: "string",
           description:
-            "prefix for extracted keypaths (defaults to project_id; pass `\"\"` to disable)",
+            "heading-split mode only: replaces the `<project_id>.` prefix " +
+            "on extracted keypaths. Pass \"\" to store sections at the top " +
+            "level (e.g. `## Auth` → `auth`), or e.g. \"notes\" for " +
+            "`notes.auth`.",
         },
       },
       required: ["project_id", "content"],
@@ -359,20 +439,33 @@ const TOOLS: ToolDef[] = [
   {
     name: "memstate_get",
     description:
-      "Read memories for a project. Omit `keypath` to see the whole project " +
-      "tree; pass one to drill into a subtree. Call at task start to load " +
-      "prior context.",
+      "Read memories. Three levels: no arguments → list all project ids " +
+      "(do this before your first write to find the exact existing id); " +
+      "project_id only → that project's keypath tree (NAMES ONLY, no " +
+      "content); project_id + keypath → the memories at that keypath and " +
+      "below, with content. Call at task start to load prior context.",
     inputSchema: {
       type: "object",
       properties: {
-        project_id: { type: "string" },
-        keypath: { type: "string" },
-        recursive: { type: "boolean" },
+        project_id: {
+          type: "string",
+          description: "omit to list all project ids",
+        },
+        keypath: {
+          type: "string",
+          description:
+            "subtree to read, e.g. \"decisions\" or \"task.summary\". " +
+            "Omit to get the tree of keypath names only — you must pass a " +
+            "keypath to read actual content.",
+        },
+        recursive: { type: "boolean", default: true },
         include_content: { type: "boolean", default: true },
       },
-      required: ["project_id"],
     },
     handler: async (a) => {
+      if (!a.project_id) {
+        return getJSON("/projects");
+      }
       if (a.keypath) {
         return postJSON("/keypaths", {
           project_id: a.project_id,
@@ -387,24 +480,57 @@ const TOOLS: ToolDef[] = [
   {
     name: "memstate_search",
     description:
-      "Find memories when you don't know the exact keypath. " +
-      "`mode=\"fts\"` (default) matches keywords; `mode=\"semantic\"` matches " +
-      "by meaning and needs semantic search enabled on the server.",
+      "Find current memories when you don't know the exact keypath. Only " +
+      "the latest version of each keypath is searched; deleted keypaths " +
+      "and deleted projects never match. Omit project_id to search across " +
+      "all projects.",
     inputSchema: {
       type: "object",
       properties: {
-        query: { type: "string" },
-        project_id: { type: "string" },
+        query: {
+          type: "string",
+          description:
+            "plain words — no quoting or boolean operators needed; " +
+            "punctuation is handled",
+        },
+        project_id: {
+          type: "string",
+          description: "restrict to one project; omit to search all projects",
+        },
         limit: { type: "integer", default: 20 },
         mode: {
           type: "string",
           enum: ["fts", "semantic"],
           default: "fts",
+          description:
+            "\"fts\" matches the literal words (stemmed) in content and " +
+            "keypath. \"semantic\" matches by MEANING of the content — use " +
+            "it when the stored wording is probably different from yours; " +
+            "needs Ollama running on the server.",
+        },
+        category: {
+          type: "string",
+          description:
+            "only memories stored with exactly this category (lowercase " +
+            "word, e.g. \"decision\")",
+        },
+        topics: {
+          type: "array",
+          items: { type: "string" },
+          description: "only memories tagged with AT LEAST ONE of these topics",
+        },
+        keypath_prefix: {
+          type: "string",
+          description:
+            "only memories at this keypath or below (dot-boundary), e.g. " +
+            "\"branches.feature_foo_bar\" to search one branch's state, or " +
+            "\"decisions\" to search only decisions",
         },
         threshold: {
           type: "number",
           description:
-            "Semantic mode only. Similarity floor (default 0.5) — raise to tighten, lower to widen.",
+            "semantic mode only: similarity floor 0..1 (default 0.5). " +
+            "Raise to tighten, lower to widen.",
         },
       },
       required: ["query"],
@@ -414,13 +540,20 @@ const TOOLS: ToolDef[] = [
   {
     name: "memstate_history",
     description:
-      "All prior versions of a keypath, newest first. Use when you need to see what a fact was before a change.",
+      "Every stored version of ONE keypath, newest first, including " +
+      "tombstones. Use to see what a fact was before it changed. Identify " +
+      "the keypath either by project_id + keypath, or by the integer `id` " +
+      "of any memory in the chain (from a previous response).",
     inputSchema: {
       type: "object",
       properties: {
-        project_id: { type: "string" },
-        keypath: { type: "string" },
-        memory_id: { type: "integer" },
+        project_id: { type: "string", description: "required unless memory_id is given" },
+        keypath: { type: "string", description: "required unless memory_id is given" },
+        memory_id: {
+          type: "integer",
+          description:
+            "integer `id` from any prior response — alternative to project_id + keypath",
+        },
       },
     },
     handler: (a) => postJSON("/memories/history", a),
@@ -428,14 +561,21 @@ const TOOLS: ToolDef[] = [
   {
     name: "memstate_delete",
     description:
-      "Remove a keypath (or the whole subtree with `recursive=true`). Prior " +
-      "versions remain reachable via `memstate_history`.",
+      "Tombstone a keypath so it stops appearing in reads and search. " +
+      "With recursive=true, also tombstones every keypath below it (e.g. " +
+      "a whole branches.<slug> subtree after a merge). Not destructive: " +
+      "all prior versions remain readable via memstate_history, and " +
+      "writing the keypath again resurrects it.",
     inputSchema: {
       type: "object",
       properties: {
         project_id: { type: "string" },
-        keypath: { type: "string" },
-        recursive: { type: "boolean" },
+        keypath: { type: "string", description: "exact keypath, or subtree root when recursive" },
+        recursive: {
+          type: "boolean",
+          default: false,
+          description: "also delete every keypath under this prefix",
+        },
       },
       required: ["project_id", "keypath"],
     },
@@ -444,7 +584,9 @@ const TOOLS: ToolDef[] = [
   {
     name: "memstate_delete_project",
     description:
-      "Remove an entire project. Reads/writes fail until you write again, which restores it.",
+      "Soft-delete an entire project: reads and searches stop returning " +
+      "it. Any later write to the same project_id revives it with all " +
+      "memories intact. Nothing is destroyed.",
     inputSchema: {
       type: "object",
       properties: { project_id: { type: "string" } },
@@ -462,13 +604,38 @@ When to use:
 - Mid-task: memstate_search when you suspect prior context exists but don't
   know the keypath; memstate_set for single-fact updates (config, status).
 
-Keypaths are dot-separated (e.g. "auth.provider", "task.summary.2026-04-23").
-Writes are versioned — a prior value at the same keypath is preserved and
-returned to you, so you can see what changed. Deletes keep history.
+Writes are versioned: writing an existing keypath supersedes the old value
+and returns it to you, so you see what changed. Deletes keep history.
 
-Naming: use snake_case for project_id and each keypath segment
-(e.g. "memstate_mcp", "task.summary.daily_report"). Avoid kebab-case,
-spaces, or mixed case — they fragment memories across near-duplicate ids.`;
+Conventions — follow these EXACTLY; every deviation fragments the store:
+- project_id: lowercase snake_case, ONE stable id per project (e.g.
+  "my_app"). Before your first write in a session, call memstate_get with
+  NO arguments to list existing project ids and reuse the exact match.
+  NEVER invent a variant: "my-app", "myapp", and "my_app_dev" each create
+  a separate, disconnected project.
+- keypath segments: lowercase snake_case only ([a-z0-9_]), joined by dots.
+  Dates are YYYY_MM_DD inside a segment: "task.summary.2026_07_03" — never
+  "2026-07-03" (kebab) and never camelCase or spaces anywhere.
+- keypath shape: <area>.<topic> or <area>.<topic>.<detail>. Prefer these
+  area segments: decisions, todo, notes, gotchas, questions, files, config,
+  arch, task.summary.<date>.
+- One keypath = one fact. To update a fact, write the SAME keypath with the
+  new value; versioning preserves the old one. Do not create a sibling
+  keypath for a new value of the same fact.
+- Git branches: keypaths describe the MAIN/default branch unless said
+  otherwise. Facts that are only true on an unmerged branch go under
+  branches.<branch_slug>.<area>... with the branch name slugged to
+  snake_case ("feature/foo-bar" → branches.feature_foo_bar.todo). When the
+  branch merges, write the durable outcomes to normal top-level keypaths
+  and memstate_delete the branches.<branch_slug> subtree (recursive=true);
+  if it is abandoned, just delete the subtree. Branch-independent
+  knowledge (decisions taken, gotchas, architecture) always goes at the
+  top level, never under branches. Scope a search to one branch with
+  memstate_search's keypath_prefix="branches.<branch_slug>".
+- Heading extraction (memstate_remember without keypath) prefixes every
+  extracted keypath with "<project_id>." by default — so "## Auth" in
+  project my_app lands at "my_app.auth". Pass root="" to write extracted
+  sections at the top level alongside explicit keypaths instead.`;
 
 // ---------- main ----------
 

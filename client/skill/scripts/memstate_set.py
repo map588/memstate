@@ -12,9 +12,10 @@ def main() -> int:
     ap.add_argument("--keypath", required=True)
     ap.add_argument("--value", required=True)
     ap.add_argument("--source", default=None)
-    # accepted for compatibility with the old cloud skill; not used by this server
-    ap.add_argument("--category", default=None)
-    ap.add_argument("--topics", default=None)
+    ap.add_argument("--category", default=None,
+                    help="optional label, e.g. decision, config")
+    ap.add_argument("--topics", default=None,
+                    help="comma-separated tags for filtered search")
     args = ap.parse_args()
 
     body = {
