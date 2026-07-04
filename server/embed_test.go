@@ -155,8 +155,8 @@ func TestHTTPEmbedOnWriteAndSemanticSearch(t *testing.T) {
 		t.Fatalf("want 3 embedded keypaths in hits, got %d: %+v", len(results), results)
 	}
 	top := results[0].(map[string]any)
-	if top["keypath"] != "my_app.database_engine" {
-		t.Fatalf("identical-content query must rank my_app.database_engine first, got %v: %+v",
+	if top["keypath"] != "database_engine" {
+		t.Fatalf("identical-content query must rank database_engine first, got %v: %+v",
 			top["keypath"], top)
 	}
 	if top["score"].(float64) < 0.999 {

@@ -74,7 +74,7 @@ A manually-started `--addr` daemon that finds the port busy probes `/health` its
 
 ### Heading extraction (`server/extract.go`)
 
-`memstate_remember` without an explicit keypath runs `ExtractHeadings`, which maps each `##`+ heading to a keypath segment (deeper headings nest via dots), prefixes them with the project id (unless `root` is set), and collapses common section names (`## TODOs` → `todo`, `## Files to touch` → `files`, etc.) via `reservedAliases`. Fenced code blocks are ignored when scanning for headings. Pre-heading prose lands under `<root>.preamble`.
+`memstate_remember` without an explicit keypath runs `ExtractHeadings`, which maps each `##`+ heading to a top-level keypath segment (deeper headings nest via dots; optional `root` request field nests everything under a prefix) and collapses common section names (`## TODOs` → `todo`, `## Files to touch` → `files`, etc.) via `reservedAliases`. Fenced code blocks are ignored when scanning for headings. Pre-heading prose lands under `preamble` (or `<root>.preamble`). The TS proxy derives a default `project_id` from the git repo name (cwd basename outside a repo), slugged snake_case, applied whenever a tool call omits project_id; the Python skill scripts share the same rule via `_client.default_project()`.
 
 ### Embeddings (`server/embed.go`)
 

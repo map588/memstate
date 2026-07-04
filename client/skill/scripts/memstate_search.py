@@ -11,13 +11,16 @@ Two modes:
 import argparse
 import sys
 
-from _client import post
+from _client import default_project, post
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Search memories")
     ap.add_argument("--query", required=True)
-    ap.add_argument("--project", default=None)
+    ap.add_argument("--project", default=None,
+                    help="project id (default: derived from repo/dir name)")
+    ap.add_argument("--all-projects", action="store_true",
+                    help="search every project instead of just this repo's")
     ap.add_argument("--limit", type=int, default=20)
     ap.add_argument("--mode", choices=("fts", "semantic"), default="fts")
     ap.add_argument("--threshold", type=float, default=None,
@@ -31,8 +34,8 @@ def main() -> int:
     args = ap.parse_args()
 
     body = {"query": args.query, "limit": args.limit, "mode": args.mode}
-    if args.project:
-        body["project_id"] = args.project
+    if not args.all_projects:
+        body["project_id"] = args.project or default_project()
     if args.threshold is not None:
         body["threshold"] = args.threshold
     if args.category:

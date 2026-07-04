@@ -3,12 +3,13 @@
 import argparse
 import sys
 
-from _client import post
+from _client import default_project, post
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Set a single fact at a keypath")
-    ap.add_argument("--project", required=True)
+    ap.add_argument("--project", default=None,
+                    help="project id (default: derived from repo/dir name)")
     ap.add_argument("--keypath", required=True)
     ap.add_argument("--value", required=True)
     ap.add_argument("--source", default=None)
@@ -19,7 +20,7 @@ def main() -> int:
     args = ap.parse_args()
 
     body = {
-        "project_id": args.project,
+        "project_id": args.project or default_project(),
         "keypath": args.keypath,
         "content": args.value,
     }

@@ -220,18 +220,16 @@ func TestHTTPRememberExtractHeadings(t *testing.T) {
 			t.Fatalf("want created, got %+v", it)
 		}
 	}
-	if !keypaths["my_app.auth"] || !keypaths["my_app.database"] {
-		t.Fatalf("keypaths missing project_id prefix: %+v", keypaths)
+	if !keypaths["auth"] || !keypaths["database"] {
+		t.Fatalf("extracted keypaths should be top-level: %+v", keypaths)
 	}
 }
 
-func TestHTTPRememberRootOverrideEmpty(t *testing.T) {
+func TestHTTPRememberDefaultRootIsTopLevel(t *testing.T) {
 	ts := newTestServer(t)
-	empty := ""
 	code, body := postJSON(t, ts.URL+"/api/v1/memories/remember", map[string]any{
 		"project_id": "my_app",
 		"content":    "## Auth\n\nx\n",
-		"root":       empty, // explicit "" disables the project_id default
 	})
 	if code != 200 {
 		t.Fatalf("code %d %+v", code, body)
@@ -239,7 +237,7 @@ func TestHTTPRememberRootOverrideEmpty(t *testing.T) {
 	items := body["items"].([]any)
 	it := items[0].(map[string]any)
 	if it["keypath"] != "auth" {
-		t.Fatalf("explicit empty root should drop prefix, got %v", it["keypath"])
+		t.Fatalf("default root should be top level, got %v", it["keypath"])
 	}
 }
 
@@ -275,10 +273,10 @@ func TestHTTPRememberPreambleCaptured(t *testing.T) {
 		it := raw.(map[string]any)
 		kps[it["keypath"].(string)] = it["stored"].(map[string]any)["content"].(string)
 	}
-	if _, ok := kps["my_app.preamble"]; !ok {
+	if _, ok := kps["preamble"]; !ok {
 		t.Fatalf("preamble not captured: %+v", kps)
 	}
-	if _, ok := kps["my_app.auth"]; !ok {
+	if _, ok := kps["auth"]; !ok {
 		t.Fatalf("auth missing: %+v", kps)
 	}
 }
@@ -297,7 +295,7 @@ func TestHTTPRememberReservedAliases(t *testing.T) {
 	for _, raw := range items {
 		got[raw.(map[string]any)["keypath"].(string)] = true
 	}
-	for _, want := range []string{"my_app.todo", "my_app.decisions", "my_app.questions"} {
+	for _, want := range []string{"todo", "decisions", "questions"} {
 		if !got[want] {
 			t.Fatalf("want %s in %+v", want, got)
 		}
@@ -351,8 +349,8 @@ func TestHTTPRememberProseBecomesPreamble(t *testing.T) {
 	if len(items) != 1 {
 		t.Fatalf("want 1 item, got %+v", items)
 	}
-	if items[0].(map[string]any)["keypath"] != "my_app.preamble" {
-		t.Fatalf("prose should go to <project>.preamble: %+v", items[0])
+	if items[0].(map[string]any)["keypath"] != "preamble" {
+		t.Fatalf("prose should go to top-level preamble: %+v", items[0])
 	}
 }
 

@@ -95,7 +95,9 @@ names, exits cleanly.
 
 ## The seven tools
 
-All scoped by `project_id` (snake_case, usually the repo name). Keypaths
+All scoped by `project_id`, which the proxy derives from the git repo
+name (directory basename outside a repo), slugged to snake_case — omit
+it in tool calls; pass it only to reach a different project. Keypaths
 are dot-notation.
 
 | Tool | Purpose |
@@ -110,8 +112,8 @@ are dot-notation.
 
 A useful agent loop:
 
-- **At task start** → `memstate_get(project_id=<project>)` to load the tree; `memstate_search(query=..., mode="semantic")` when the exact keypath isn't known.
-- **At task end** → `memstate_remember(project_id=<project>, content="## Summary\n...\n## Decisions\n...")` and let the server extract.
+- **At task start** → `memstate_get()` to load the tree (the proxy derives the project id from the repo name); `memstate_search(query=..., mode="semantic")` when the exact keypath isn't known.
+- **At task end** → `memstate_remember(content="## Summary\n...\n## Decisions\n...")` and let the server extract.
 
 `node client/dist/index.js init` writes rule files for several agents
 (`CLAUDE.md`, `AGENTS.md`, `.cursor/rules/`, etc.) that encode this loop.
@@ -123,9 +125,9 @@ for both explicit-keypath and heading-extract modes.
 
 - `method` is `"explicit"` or `"headings"`.
 - `action` is `"created"`, `"superseded"` (a prior version at that keypath existed), or `"unchanged"` (identical content to current live version — no new row written).
-- When extracting, each `##` becomes a keypath prefixed with `<project_id>.` by default. Pass `root: ""` to disable the prefix, or `root: "<anything>"` to override.
+- When extracting, each `##` becomes a top-level keypath (`## Auth` → `auth`), the same tree explicit writes use. Pass `root: "<prefix>"` to nest all sections under a prefix.
 - Common section names collapse to canonical slugs: `## TODOs → todo`, `## Open Questions → questions`, `## Files to touch → files`, etc.
-- Prose before the first `##` is captured under `<root>.preamble`.
+- Prose before the first `##` is captured under `preamble` (or `<root>.preamble` when a root is given).
 
 ### `memstate_search` — semantic mode
 

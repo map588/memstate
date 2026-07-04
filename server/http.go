@@ -193,10 +193,10 @@ type rememberReq struct {
 	Source    string   `json:"source,omitempty"`
 	Category  string   `json:"category,omitempty"` // applies to every written section
 	Topics    []string `json:"topics,omitempty"`   // applies to every written section
-	// Root is the prefix applied to every extracted keypath. Absent (nil)
-	// means "default to <project_id>". An explicit "" disables the prefix.
-	// Any explicit value is used as-is after keypath normalization.
-	Root *string `json:"root,omitempty"`
+	// Root is an optional prefix applied to every extracted keypath.
+	// Empty (the default) writes sections at the top level, in the same
+	// tree as explicit-keypath writes.
+	Root string `json:"root,omitempty"`
 }
 
 // extractedItem is one entry in a batch remember response.
@@ -233,11 +233,7 @@ func handleRemember(store *Store, embedder *Embedder) http.HandlerFunc {
 		if in.Keypath != "" {
 			sections = []Section{{Keypath: NormalizeKeypath(in.Keypath), Content: in.Content}}
 		} else {
-			root := in.ProjectID
-			if in.Root != nil {
-				root = NormalizeKeypath(*in.Root)
-			}
-			sections = ExtractHeadings(in.Content, root)
+			sections = ExtractHeadings(in.Content, NormalizeKeypath(in.Root))
 			method = "headings"
 			if len(sections) == 0 {
 				writeErr(w, http.StatusBadRequest,

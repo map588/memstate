@@ -192,6 +192,26 @@ def _request(method: str, path: str, body: Optional[dict] = None) -> int:
         return 2
 
 
+def default_project() -> str:
+    """Project id derived from the git repo name (or cwd basename outside a
+    repo), slugged to lowercase snake_case — same rule as the TS proxy, so
+    scripts and MCP sessions land in the same project."""
+    base = ""
+    try:
+        top = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if top.returncode == 0:
+            base = Path(top.stdout.strip()).name
+    except Exception:
+        pass
+    if not base:
+        base = Path.cwd().name
+    slug = re.sub(r"[^a-z0-9]+", "_", base.lower()).strip("_")
+    return slug or "default"
+
+
 def post(path: str, body: dict) -> int:
     return _request("POST", path, body)
 

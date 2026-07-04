@@ -17,7 +17,7 @@
  *   MEMSTATE_BIN         path to memstated (default: sibling build / PATH)
  *   MEMSTATE_LOCAL_URL   full base URL override
  */
-import { spawn, ChildProcess } from "child_process";
+import { spawn, execSync, ChildProcess } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -37,6 +37,33 @@ const READY_BANNER = "MEMSTATE_READY addr=";
 let daemonAddr = ""; // resolved after ensureDaemon()
 let baseURL = "";
 let managedChild: ChildProcess | null = null;
+
+// deriveProjectId computes the session's default project_id from the git
+// repo name (or the working directory's basename outside a repo), slugged
+// to lowercase snake_case. MCP clients spawn this proxy in the project
+// directory, so this pins one stable id per repo and stops callers from
+// inventing near-duplicate ids.
+function deriveProjectId(): string {
+  let base = "";
+  try {
+    const top = execSync("git rev-parse --show-toplevel", {
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+      .toString()
+      .trim();
+    if (top) base = path.basename(top);
+  } catch {
+    /* not a git repo */
+  }
+  if (!base) base = path.basename(process.cwd());
+  const slug = base
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return slug || "default";
+}
+
+const DEFAULT_PROJECT = deriveProjectId();
 
 // ---------- daemon lifecycle ----------
 
@@ -325,8 +352,9 @@ const TOOLS: ToolDef[] = [
         project_id: {
           type: "string",
           description:
-            "existing project id, exactly as listed by memstate_get — " +
-            "lowercase snake_case, never a new variant of an existing id",
+            "OMIT to use this session's default (derived from the repo " +
+            "name). Only pass an id that memstate_get(list_projects=true) " +
+            "lists — never invent a variant.",
         },
         keypath: {
           type: "string",
@@ -361,11 +389,11 @@ const TOOLS: ToolDef[] = [
             "\"embeddings\"]. Search matches ANY listed topic.",
         },
       },
-      required: ["project_id", "keypath", "value"],
+      required: ["keypath", "value"],
     },
     handler: (a) =>
       postJSON("/memories/store", {
-        project_id: a.project_id,
+        project_id: a.project_id || DEFAULT_PROJECT,
         keypath: a.keypath,
         content: a.value,
         source: a.source,
@@ -380,20 +408,20 @@ const TOOLS: ToolDef[] = [
       "facts). Two modes: pass `keypath` to store the whole content as ONE " +
       "memory there; omit `keypath` to split the markdown by `##` headings " +
       "into one memory per section. When splitting, each heading becomes a " +
-      "snake_case keypath segment prefixed with `<project_id>.` (so " +
-      "`## Auth` in project my_app is stored at `my_app.auth`; `###` " +
+      "top-level snake_case keypath (`## Auth` → keypath `auth`; `###` " +
       "headings nest as a further dot segment; prose before the first " +
-      "heading lands at `<project_id>.preamble`). Heading names TODOs, " +
-      "Decisions, Open Questions, Files, Notes, Gotchas map to the " +
-      "canonical segments todo, decisions, questions, files, notes, gotchas.",
+      "heading lands at `preamble`). Heading names TODOs, Decisions, Open " +
+      "Questions, Files, Notes, Gotchas map to the canonical segments " +
+      "todo, decisions, questions, files, notes, gotchas.",
     inputSchema: {
       type: "object",
       properties: {
         project_id: {
           type: "string",
           description:
-            "existing project id, exactly as listed by memstate_get — " +
-            "lowercase snake_case, never a new variant of an existing id",
+            "OMIT to use this session's default (derived from the repo " +
+            "name). Only pass an id that memstate_get(list_projects=true) " +
+            "lists — never invent a variant.",
         },
         keypath: {
           type: "string",
@@ -426,30 +454,33 @@ const TOOLS: ToolDef[] = [
         root: {
           type: "string",
           description:
-            "heading-split mode only: replaces the `<project_id>.` prefix " +
-            "on extracted keypaths. Pass \"\" to store sections at the top " +
-            "level (e.g. `## Auth` → `auth`), or e.g. \"notes\" for " +
-            "`notes.auth`.",
+            "heading-split mode only: optional prefix for extracted " +
+            "keypaths, e.g. \"notes\" stores `## Auth` at `notes.auth`. " +
+            "Default is none — sections are stored at the top level.",
         },
       },
-      required: ["project_id", "content"],
+      required: ["content"],
     },
-    handler: (a) => postJSON("/memories/remember", a),
+    handler: (a) =>
+      postJSON("/memories/remember", {
+        ...a,
+        project_id: a.project_id || DEFAULT_PROJECT,
+      }),
   },
   {
     name: "memstate_get",
     description:
-      "Read memories. Three levels: no arguments → list all project ids " +
-      "(do this before your first write to find the exact existing id); " +
-      "project_id only → that project's keypath tree (NAMES ONLY, no " +
-      "content); project_id + keypath → the memories at that keypath and " +
-      "below, with content. Call at task start to load prior context.",
+      "Read memories. No arguments → this repo's keypath tree (NAMES " +
+      "ONLY, no content); pass `keypath` → the memories at that keypath " +
+      "and below, with content; pass `list_projects: true` → all project " +
+      "ids in the store. Call at task start to load prior context.",
     inputSchema: {
       type: "object",
       properties: {
         project_id: {
           type: "string",
-          description: "omit to list all project ids",
+          description:
+            "OMIT to use this session's default (derived from the repo name)",
         },
         keypath: {
           type: "string",
@@ -458,23 +489,29 @@ const TOOLS: ToolDef[] = [
             "Omit to get the tree of keypath names only — you must pass a " +
             "keypath to read actual content.",
         },
+        list_projects: {
+          type: "boolean",
+          default: false,
+          description: "list every project id in the store instead of reading memories",
+        },
         recursive: { type: "boolean", default: true },
         include_content: { type: "boolean", default: true },
       },
     },
     handler: async (a) => {
-      if (!a.project_id) {
+      if (a.list_projects) {
         return getJSON("/projects");
       }
+      const pid = String(a.project_id || DEFAULT_PROJECT);
       if (a.keypath) {
         return postJSON("/keypaths", {
-          project_id: a.project_id,
+          project_id: pid,
           keypath: a.keypath,
           recursive: a.recursive ?? true,
           include_content: a.include_content ?? true,
         });
       }
-      return getJSON(`/tree?project_id=${encodeURIComponent(String(a.project_id))}`);
+      return getJSON(`/tree?project_id=${encodeURIComponent(pid)}`);
     },
   },
   {
@@ -482,8 +519,8 @@ const TOOLS: ToolDef[] = [
     description:
       "Find current memories when you don't know the exact keypath. Only " +
       "the latest version of each keypath is searched; deleted keypaths " +
-      "and deleted projects never match. Omit project_id to search across " +
-      "all projects.",
+      "and deleted projects never match. Searches this repo's project by " +
+      "default; pass all_projects=true to search the whole store.",
     inputSchema: {
       type: "object",
       properties: {
@@ -495,7 +532,13 @@ const TOOLS: ToolDef[] = [
         },
         project_id: {
           type: "string",
-          description: "restrict to one project; omit to search all projects",
+          description:
+            "OMIT to use this session's default (derived from the repo name)",
+        },
+        all_projects: {
+          type: "boolean",
+          default: false,
+          description: "search every project in the store instead of just this repo's",
         },
         limit: { type: "integer", default: 20 },
         mode: {
@@ -535,28 +578,45 @@ const TOOLS: ToolDef[] = [
       },
       required: ["query"],
     },
-    handler: (a) => postJSON("/memories/search", a),
+    handler: (a) => {
+      const { all_projects, ...body } = a;
+      if (!all_projects && !body.project_id) {
+        body.project_id = DEFAULT_PROJECT;
+      }
+      return postJSON("/memories/search", body);
+    },
   },
   {
     name: "memstate_history",
     description:
       "Every stored version of ONE keypath, newest first, including " +
       "tombstones. Use to see what a fact was before it changed. Identify " +
-      "the keypath either by project_id + keypath, or by the integer `id` " +
-      "of any memory in the chain (from a previous response).",
+      "the keypath either by `keypath` (project_id defaults to this " +
+      "repo's), or by the integer `id` of any memory in the chain (from a " +
+      "previous response).",
     inputSchema: {
       type: "object",
       properties: {
-        project_id: { type: "string", description: "required unless memory_id is given" },
+        project_id: {
+          type: "string",
+          description:
+            "OMIT to use this session's default (derived from the repo name)",
+        },
         keypath: { type: "string", description: "required unless memory_id is given" },
         memory_id: {
           type: "integer",
           description:
-            "integer `id` from any prior response — alternative to project_id + keypath",
+            "integer `id` from any prior response — alternative to keypath",
         },
       },
     },
-    handler: (a) => postJSON("/memories/history", a),
+    handler: (a) => {
+      const body = { ...a };
+      if (body.keypath && !body.project_id) {
+        body.project_id = DEFAULT_PROJECT;
+      }
+      return postJSON("/memories/history", body);
+    },
   },
   {
     name: "memstate_delete",
@@ -569,7 +629,11 @@ const TOOLS: ToolDef[] = [
     inputSchema: {
       type: "object",
       properties: {
-        project_id: { type: "string" },
+        project_id: {
+          type: "string",
+          description:
+            "OMIT to use this session's default (derived from the repo name)",
+        },
         keypath: { type: "string", description: "exact keypath, or subtree root when recursive" },
         recursive: {
           type: "boolean",
@@ -577,9 +641,13 @@ const TOOLS: ToolDef[] = [
           description: "also delete every keypath under this prefix",
         },
       },
-      required: ["project_id", "keypath"],
+      required: ["keypath"],
     },
-    handler: (a) => postJSON("/memories/delete", a),
+    handler: (a) =>
+      postJSON("/memories/delete", {
+        ...a,
+        project_id: a.project_id || DEFAULT_PROJECT,
+      }),
   },
   {
     name: "memstate_delete_project",
@@ -608,11 +676,12 @@ Writes are versioned: writing an existing keypath supersedes the old value
 and returns it to you, so you see what changed. Deletes keep history.
 
 Conventions — follow these EXACTLY; every deviation fragments the store:
-- project_id: lowercase snake_case, ONE stable id per project (e.g.
-  "my_app"). Before your first write in a session, call memstate_get with
-  NO arguments to list existing project ids and reuse the exact match.
-  NEVER invent a variant: "my-app", "myapp", and "my_app_dev" each create
-  a separate, disconnected project.
+- project_id: OMIT it. This session's default is "${DEFAULT_PROJECT}"
+  (derived from the repo/directory name) and is used whenever project_id
+  is absent. Only pass project_id to reach a DIFFERENT project, and then
+  only an id that memstate_get(list_projects=true) actually lists — NEVER
+  invent a variant: "my-app", "myapp", and "my_app_dev" each create a
+  separate, disconnected project.
 - keypath segments: lowercase snake_case only ([a-z0-9_]), joined by dots.
   Dates are YYYY_MM_DD inside a segment: "task.summary.2026_07_03" — never
   "2026-07-03" (kebab) and never camelCase or spaces anywhere.
@@ -632,10 +701,10 @@ Conventions — follow these EXACTLY; every deviation fragments the store:
   knowledge (decisions taken, gotchas, architecture) always goes at the
   top level, never under branches. Scope a search to one branch with
   memstate_search's keypath_prefix="branches.<branch_slug>".
-- Heading extraction (memstate_remember without keypath) prefixes every
-  extracted keypath with "<project_id>." by default — so "## Auth" in
-  project my_app lands at "my_app.auth". Pass root="" to write extracted
-  sections at the top level alongside explicit keypaths instead.`;
+- Heading extraction (memstate_remember without keypath) writes each
+  "## Section" at the top level — "## Auth" lands at keypath "auth",
+  exactly like an explicit write. Pass root="notes" (etc.) only when you
+  deliberately want sections nested under a prefix.`;
 
 // ---------- main ----------
 
