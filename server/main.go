@@ -36,6 +36,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"syscall"
+	"text/tabwriter"
 	"time"
 )
 
@@ -87,6 +88,8 @@ func main() {
 			os.Exit(cmdExport(os.Args[2:]))
 		case "import":
 			os.Exit(cmdImport(os.Args[2:]))
+		case "projects":
+			os.Exit(cmdProjects(os.Args[2:]))
 		case "-h", "--help", "help":
 			printUsage()
 			os.Exit(0)
@@ -304,6 +307,7 @@ func printUsage() {
   memstated stop   [--addr HOST:PORT]   send a shutdown request to a running daemon
   memstated status [--addr HOST:PORT]   query /health
 
+  memstated projects [--db PATH]   list live projects with memory counts
   memstated export --project ID | --all [--out FILE] [--db PATH] [--overwrite]
                                    write project memory (full history) to a JSON file
   memstated import [--project ID] [--db PATH] FILE
@@ -349,6 +353,39 @@ func openStoreCLI(dbFlag string) (*Store, string, error) {
 		return nil, "", err
 	}
 	return s, path, nil
+}
+
+func cmdProjects(args []string) int {
+	fs := flag.NewFlagSet("projects", flag.ExitOnError)
+	db := fs.String("db", "", "SQLite file (default MEMSTATE_DB or ~/.memstate/memstate.db)")
+	_ = fs.Parse(args)
+	store, dbPath, err := openStoreCLI(*db)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "memstated projects: %v\n", err)
+		return 1
+	}
+	defer store.Close()
+	ps, err := store.ListProjects()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "memstated projects: %v\n", err)
+		return 1
+	}
+	if len(ps) == 0 {
+		fmt.Printf("no live projects in %s\n", dbPath)
+		return 0
+	}
+	fmt.Printf("%d live project(s) in %s\n\n", len(ps), dbPath)
+	tw := tabwriter.NewWriter(os.Stdout, 2, 8, 2, ' ', 0)
+	fmt.Fprintln(tw, "PROJECT\tMEMORIES\tLAST UPDATED")
+	for _, p := range ps {
+		last := "-"
+		if p.LastUpdatedAt > 0 {
+			last = time.Unix(p.LastUpdatedAt, 0).Format("2006-01-02 15:04")
+		}
+		fmt.Fprintf(tw, "%s\t%d\t%s\n", p.ID, p.MemoryCount, last)
+	}
+	_ = tw.Flush()
+	return 0
 }
 
 func cmdExport(args []string) int {

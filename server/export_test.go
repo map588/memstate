@@ -279,6 +279,23 @@ func TestExportUnknownOrDeletedProject(t *testing.T) {
 	}
 }
 
+func TestCmdProjects(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "t.db")
+	s, err := OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, _ = s.Write("p1", "k", "v", WriteMeta{}, false)
+	_, _, _ = s.Write("p2", "k", "v", WriteMeta{}, false)
+	if err := s.DeleteProject("p2"); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	if code := cmdProjects([]string{"--db", dbPath}); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+}
+
 func TestCmdExportImport(t *testing.T) {
 	dir := t.TempDir()
 	dbA := filepath.Join(dir, "a.db")

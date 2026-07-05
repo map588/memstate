@@ -35,6 +35,7 @@ Running the daemon directly:
 ./server/memstated --addr 127.0.0.1:8765 --idle-timeout 30m   # long-lived, self-exits when idle
 ./server/memstated status --addr 127.0.0.1:8765
 ./server/memstated stop   --addr 127.0.0.1:8765
+./server/memstated projects                              # list live projects with memory counts
 ./server/memstated export --all                          # full-history JSON to ~/.memstate/exports/
 ./server/memstated import backup.json                    # timestamp-merge into the local DB
 ```
