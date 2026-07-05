@@ -83,6 +83,10 @@ func main() {
 			os.Exit(cmdStop(os.Args[2:]))
 		case "status":
 			os.Exit(cmdStatus(os.Args[2:]))
+		case "export":
+			os.Exit(cmdExport(os.Args[2:]))
+		case "import":
+			os.Exit(cmdImport(os.Args[2:]))
 		case "-h", "--help", "help":
 			printUsage()
 			os.Exit(0)
@@ -300,6 +304,12 @@ func printUsage() {
   memstated stop   [--addr HOST:PORT]   send a shutdown request to a running daemon
   memstated status [--addr HOST:PORT]   query /health
 
+  memstated export --project ID | --all [--out FILE] [--db PATH] [--overwrite]
+                                   write project memory (full history) to a JSON file
+  memstated import [--project ID] [--db PATH] FILE
+                                   timestamp-merge an export file into the local DB
+                                   (newer keys win; new keys keep their history)
+
 Environment:
   MEMSTATE_ADDR           default for --addr
   MEMSTATE_DB             SQLite file path (default ~/.memstate/memstate.db)
@@ -318,6 +328,182 @@ func subAddr(args []string) string {
 		return v
 	}
 	return defaultAddr
+}
+
+// openStoreCLI opens the SQLite store for an offline subcommand:
+// --db flag beats MEMSTATE_DB beats ~/.memstate/memstate.db. Safe to run
+// next to a live daemon — WAL plus busy_timeout serialize the writers, and
+// the daemon reads every query fresh from SQLite.
+func openStoreCLI(dbFlag string) (*Store, string, error) {
+	path := dbFlag
+	if path == "" {
+		path = defaultDBPath()
+	} else {
+		path = expandHome(path)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, "", err
+	}
+	s, err := OpenStore(path)
+	if err != nil {
+		return nil, "", err
+	}
+	return s, path, nil
+}
+
+func cmdExport(args []string) int {
+	fs := flag.NewFlagSet("export", flag.ExitOnError)
+	project := fs.String("project", "", "project id to export")
+	all := fs.Bool("all", false, "export every live project")
+	out := fs.String("out", "",
+		"destination file (default ~/.memstate/exports/<name>_<timestamp>.json)")
+	db := fs.String("db", "", "SQLite file (default MEMSTATE_DB or ~/.memstate/memstate.db)")
+	overwrite := fs.Bool("overwrite", false, "replace the destination file if it exists")
+	_ = fs.Parse(args)
+	if *all == (*project != "") {
+		fmt.Fprintln(os.Stderr, "memstated export: pass exactly one of --project ID or --all")
+		return 2
+	}
+	store, dbPath, err := openStoreCLI(*db)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "memstated export: %v\n", err)
+		return 1
+	}
+	defer store.Close()
+
+	label, ids := *project, []string{*project}
+	if *all {
+		label = "all"
+		ps, err := store.ListProjects()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "memstated export: %v\n", err)
+			return 1
+		}
+		ids = ids[:0]
+		for _, p := range ps {
+			ids = append(ids, p.ID)
+		}
+		if len(ids) == 0 {
+			fmt.Fprintf(os.Stderr, "memstated export: no live projects in %s\n", dbPath)
+			return 1
+		}
+	}
+	data, err := store.Export(ids)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "memstated export: %v\n", err)
+		return 1
+	}
+
+	dest := *out
+	if dest == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "memstated export: no home directory; pass --out")
+			return 1
+		}
+		dest = filepath.Join(home, ".memstate", "exports",
+			fmt.Sprintf("%s_%s.json", safeFilename(label),
+				time.Now().UTC().Format("20060102T150405Z")))
+	} else {
+		dest = expandHome(dest)
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "memstated export: %v\n", err)
+		return 1
+	}
+	blob, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "memstated export: %v\n", err)
+		return 1
+	}
+	blob = append(blob, '\n')
+	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
+	if *overwrite {
+		flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+	}
+	f, err := os.OpenFile(dest, flags, 0o644)
+	if err != nil {
+		if os.IsExist(err) {
+			fmt.Fprintf(os.Stderr,
+				"memstated export: %s already exists; pass --overwrite or a different --out\n", dest)
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "memstated export: %v\n", err)
+		return 1
+	}
+	_, werr := f.Write(blob)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		fmt.Fprintf(os.Stderr, "memstated export: write %s: %v\n", dest, werr)
+		return 1
+	}
+	keypaths, versions := 0, 0
+	for _, pe := range data.Projects {
+		versions += len(pe.Memories)
+		for i := range pe.Memories {
+			if i == 0 || pe.Memories[i-1].Keypath != pe.Memories[i].Keypath {
+				keypaths++
+			}
+		}
+	}
+	fmt.Printf("exported %d project(s), %d keypaths, %d versions (%d bytes)\n",
+		len(data.Projects), keypaths, versions, len(blob))
+	fmt.Printf("from %s\nto   %s\n", dbPath, dest)
+	return 0
+}
+
+func cmdImport(args []string) int {
+	fs := flag.NewFlagSet("import", flag.ExitOnError)
+	project := fs.String("project", "",
+		"import a single-project file under this id instead of the one recorded in the file")
+	db := fs.String("db", "", "SQLite file (default MEMSTATE_DB or ~/.memstate/memstate.db)")
+	_ = fs.Parse(args)
+	if fs.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "usage: memstated import [--project ID] [--db PATH] FILE (flags before FILE)")
+		return 2
+	}
+	src := expandHome(fs.Arg(0))
+	blob, err := os.ReadFile(src)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "memstated import: %v\n", err)
+		return 1
+	}
+	var data ExportData
+	if err := json.Unmarshal(blob, &data); err != nil {
+		fmt.Fprintf(os.Stderr, "memstated import: %s is not a memstate export: %v\n", src, err)
+		return 1
+	}
+	store, dbPath, err := openStoreCLI(*db)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "memstated import: %v\n", err)
+		return 1
+	}
+	defer store.Close()
+
+	stats, err := store.Merge(&data, *project)
+	for _, st := range stats {
+		fmt.Printf("%s: %d restored, %d updated, %d deleted, %d unchanged, %d kept (local newer)\n",
+			st.ProjectID, st.Restored, st.Updated, st.Deleted, st.Unchanged, st.SkippedOlder)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "memstated import: %v\n", err)
+		return 1
+	}
+	if len(stats) == 0 {
+		fmt.Println("nothing to merge: file has no projects")
+		return 0
+	}
+	fmt.Printf("merged into %s\n", dbPath)
+	// Vectors were dropped for changed keys and never existed for restored
+	// ones; rebuild synchronously so semantic search works immediately.
+	// If Ollama is down this logs and moves on — the daemon's startup
+	// backfill is the safety net.
+	emb := NewEmbedder()
+	emb.BackfillEmbeddings(store)
+	emb.WaitForPending()
+	return 0
 }
 
 func cmdStop(args []string) int {

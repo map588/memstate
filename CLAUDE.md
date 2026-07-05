@@ -35,6 +35,8 @@ Running the daemon directly:
 ./server/memstated --addr 127.0.0.1:8765 --idle-timeout 30m   # long-lived, self-exits when idle
 ./server/memstated status --addr 127.0.0.1:8765
 ./server/memstated stop   --addr 127.0.0.1:8765
+./server/memstated export --all                          # full-history JSON to ~/.memstate/exports/
+./server/memstated import backup.json                    # timestamp-merge into the local DB
 ```
 
 ## Architecture
@@ -87,6 +89,7 @@ Ollama-backed content embeddings are fire-and-forget from the write path via `ma
 - `SKILL.md` in `client/skill/` now describes THIS daemon accurately (integer IDs, synchronous writes, headings-only extraction, category/topics filterable) and is the canonical statement of naming conventions (snake_case ids/segments, YYYY_MM_DD dates, `branches.<slug>.*` for branch-scoped state). Keep it, the MCP `INSTRUCTIONS`/tool descriptions in `client/src/index.ts`, and the Python `--help` strings in agreement when conventions change.
 - `.claude/hooks/memstate-persist-reminder.sh` runs on `UserPromptSubmit` and nudges toward `memstate_remember` after ≥3 file edits since the last persist. If you want to silence it for a session, touch a trivial `memstate_set` or `memstate_remember` call.
 - Formerly accepted-but-ignored fields: `category`/`topics` are now stored and filterable; `at_revision` and `context` were dropped and are rejected by `DisallowUnknownFields`. Do not add silently-ignored request fields — accept a field only when it does something.
+- **Export/import is deliberately CLI-only** (`memstated export|import`, direct SQLite access in `server/export.go` + `server/main.go`). It's a human cross-machine workflow; do NOT add an MCP tool or HTTP route for it. Import merges by timestamp: keypaths absent locally get their full version history copied; existing keypaths take the file's latest value only when it is strictly newer (replayed through the normal write path, so dedupe/supersede/tombstone semantics apply and re-imports are no-ops).
 
 ## Where data lives
 
