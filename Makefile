@@ -6,6 +6,7 @@
 #                       proxy as `memstate-mcp` via `npm link`
 #   make uninstall   — reverse of install
 #   make test        — go test + TS smoke test
+#   make release     — static linux/amd64 memstated + tarball under dist/
 #   make clean       — remove build artifacts
 
 GOBIN ?= $(shell go env GOBIN)
@@ -13,12 +14,16 @@ ifeq ($(GOBIN),)
 GOBIN := $(shell go env GOPATH)/bin
 endif
 
+# Single source of truth for the release version is healthVersion in server/main.go.
+VERSION := $(shell sed -n 's/.*healthVersion[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' server/main.go)
+DIST    := dist
+
 SERVER_BIN  := server/memstated
 CLAUDE_HOME := $(HOME)/.claude
 SKILL_DIR   := $(CLAUDE_HOME)/skills/memstate
 HOOK_SCRIPT := $(CLAUDE_HOME)/hooks/memstate-persist-reminder.sh
 
-.PHONY: build install uninstall install-skill uninstall-skill test clean help
+.PHONY: build install uninstall install-skill uninstall-skill test release clean help
 
 help:
 	@awk 'BEGIN{FS=":.*?##"} /^[a-zA-Z_-]+:.*?##/ {printf "  %-14s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -71,6 +76,14 @@ test: build  ## Run Go tests + TS end-to-end smoke
 	cd server && go test ./... && go vet ./...
 	node client/dist/index.js --test
 
+release:  ## Build static linux/amd64 memstated + tarball under dist/
+	rm -rf $(DIST)
+	mkdir -p $(DIST)
+	cd server && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ../$(DIST)/memstated .
+	tar -C $(DIST) -czf $(DIST)/memstate-$(VERSION)-linux-amd64.tar.gz memstated
+	@echo
+	@echo "Release artifact: $(DIST)/memstate-$(VERSION)-linux-amd64.tar.gz"
+
 clean:  ## Remove build artifacts
 	rm -f $(SERVER_BIN)
-	rm -rf client/dist
+	rm -rf client/dist $(DIST)

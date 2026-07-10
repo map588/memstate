@@ -5,6 +5,9 @@ node_modules
 # Go build output
 /server/memstated
 
+# Release artifacts
+/dist/
+
 # TS build output — regenerated via `npm run build`
 /client/dist/
 
