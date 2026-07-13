@@ -90,6 +90,10 @@ func main() {
 			os.Exit(cmdImport(os.Args[2:]))
 		case "projects":
 			os.Exit(cmdProjects(os.Args[2:]))
+		case "dump":
+			os.Exit(cmdDump(os.Args[2:]))
+		case "search":
+			os.Exit(cmdSearch(os.Args[2:]))
 		case "-h", "--help", "help":
 			printUsage()
 			os.Exit(0)
@@ -308,6 +312,12 @@ func printUsage() {
   memstated status [--addr HOST:PORT]   query /health
 
   memstated projects [--db PATH]   list live projects with memory counts
+  memstated dump [--keys] [--db PATH] PROJECT [KEYPATH]
+                                   pretty-print a project's memories (or the
+                                   subtree under KEYPATH); --keys for the
+                                   keypath tree only
+  memstated search [--project ID] [--limit N] [--db PATH] QUERY...
+                                   full-text search across memories
   memstated export --project ID | --all [--out FILE] [--db PATH] [--overwrite]
                                    write project memory (full history) to a JSON file
   memstated import [--project ID] [--db PATH] FILE
