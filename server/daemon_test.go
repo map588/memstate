@@ -55,6 +55,8 @@ func runDaemon(
 	cmd := exec.Command(bin, args...)
 	cmd.Env = append(cleanEnv(),
 		"MEMSTATE_DB="+filepath.Join(t.TempDir(), "t.db"),
+		// Hermetic daemons must never call the GitHub releases API.
+		"MEMSTATE_NO_UPDATE_CHECK=1",
 	)
 	for k, v := range extraEnv {
 		cmd.Env = append(cmd.Env, k+"="+v)

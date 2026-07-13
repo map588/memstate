@@ -76,13 +76,17 @@ test: build  ## Run Go tests + TS end-to-end smoke
 	cd server && go test ./... && go vet ./...
 	node client/dist/index.js --test
 
-release:  ## Build static linux/amd64 memstated + tarball under dist/
+# Asset names must match releaseAssetName() in server/upgrade.go —
+# `memstated upgrade` downloads them by exact name.
+release:  ## Build static memstated for linux/amd64, darwin/arm64, windows/amd64 under dist/
 	rm -rf $(DIST)
 	mkdir -p $(DIST)
-	cd server && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ../$(DIST)/memstated .
-	tar -C $(DIST) -czf $(DIST)/memstate-$(VERSION)-linux-amd64.tar.gz memstated
+	cd server && CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ../$(DIST)/memstated-linux-amd64 .
+	cd server && CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o ../$(DIST)/memstated-darwin-arm64 .
+	cd server && CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ../$(DIST)/memstated-windows-amd64.exe .
 	@echo
-	@echo "Release artifact: $(DIST)/memstate-$(VERSION)-linux-amd64.tar.gz"
+	@echo "Release binaries for v$(VERSION) in $(DIST)/:"
+	@ls -l $(DIST)
 
 clean:  ## Remove build artifacts
 	rm -f $(SERVER_BIN)

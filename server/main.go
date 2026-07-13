@@ -43,7 +43,7 @@ import (
 const (
 	defaultAddr       = "127.0.0.1:8765" // used only in --addr / stop / status
 	healthServiceName = "memstate"
-	healthVersion     = "0.5.0"
+	healthVersion     = "0.5.1"
 	readyBanner       = "MEMSTATE_READY addr="
 )
 
@@ -94,6 +94,8 @@ func main() {
 			os.Exit(cmdDump(os.Args[2:]))
 		case "search":
 			os.Exit(cmdSearch(os.Args[2:]))
+		case "upgrade":
+			os.Exit(cmdUpgrade(os.Args[2:]))
 		case "-h", "--help", "help":
 			printUsage()
 			os.Exit(0)
@@ -198,6 +200,12 @@ func main() {
 		go watchOwner(*ownerPIDFlag, shutdownFn)
 	}
 
+	// Nudge toward `memstated upgrade` when a newer release exists: one
+	// stderr line + latest_available in /health. Never blocks startup.
+	if os.Getenv("MEMSTATE_NO_UPDATE_CHECK") == "" {
+		go watchUpdates(ctx)
+	}
+
 	// Announce our bind address on stderr so the spawning parent can find us.
 	// Print the banner BEFORE Serve blocks so the parent's stderr reader
 	// sees it deterministically.
@@ -280,24 +288,8 @@ func watchIdle(ctx context.Context, lastActivity *atomic.Int64, timeout time.Dur
 	}
 }
 
-// watchOwner polls the parent PID and triggers shutdown when it vanishes.
-// Signal 0 is the canonical Unix "does this pid exist AND can I signal it"
-// probe; ESRCH means the owner is gone.
-func watchOwner(pid int, shutdown func()) {
-	for {
-		time.Sleep(2 * time.Second)
-		if err := syscall.Kill(pid, 0); err != nil {
-			if errors.Is(err, syscall.ESRCH) {
-				fmt.Fprintf(os.Stderr,
-					"memstated: owner pid %d vanished — shutting down\n", pid)
-				shutdown()
-				return
-			}
-			// EPERM ("process exists, you can't signal it") is still alive.
-			// Anything else: be conservative and keep running.
-		}
-	}
-}
+// watchOwner lives in platform_unix.go / platform_windows.go: liveness
+// probing of a foreign PID has no portable primitive.
 
 // ---------- subcommands ----------
 
@@ -318,6 +310,9 @@ func printUsage() {
                                    keypath tree only
   memstated search [--project ID] [--limit N] [--db PATH] QUERY...
                                    full-text search across memories
+  memstated upgrade [--addr HOST:PORT]
+                                   download the latest release binary over this
+                                   one and restart the shared daemon if running
   memstated export --project ID | --all [--out FILE] [--db PATH] [--overwrite]
                                    write project memory (full history) to a JSON file
   memstated import [--project ID] [--db PATH] FILE
@@ -328,6 +323,7 @@ Environment:
   MEMSTATE_ADDR           default for --addr
   MEMSTATE_DB             SQLite file path (default ~/.memstate/memstate.db)
   MEMSTATE_IDLE_TIMEOUT   default for --idle-timeout (e.g. 30m)
+  MEMSTATE_NO_UPDATE_CHECK  set to disable the daemon's daily release check
 `)
 }
 

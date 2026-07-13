@@ -21,10 +21,44 @@ jobs:
       - name: Build and test
         run: make test
 
-      - name: Release artifact
+      - name: Release binaries
         run: make release
 
       - uses: actions/upload-artifact@v4
         with:
-          name: memstate-linux-amd64
-          path: dist/memstate-*-linux-amd64.tar.gz
+          name: memstated-binaries
+          path: dist/*
+
+  # Tag pushes (vX.Y.Z) additionally publish a GitHub Release whose assets
+  # are the raw platform binaries — `memstated upgrade` fetches them by name.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - name: Check tag matches healthVersion
+        run: |
+          V=$(sed -n 's/.*healthVersion[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' server/main.go)
+          if [ "v$V" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match healthVersion v$V in server/main.go" >&2
+            exit 1
+          fi
+
+      - name: Release binaries
+        run: make release
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "$GITHUB_REF_NAME" --generate-notes

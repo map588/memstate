@@ -1,6 +1,6 @@
 {
   "name": "@memstate/mcp",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "memstate — MCP stdio front-end for a self-hosted Go daemon with versioned SQLite memory.",
   "private": true,
   "main": "dist/index.js",

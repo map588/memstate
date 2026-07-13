@@ -17,6 +17,9 @@ import (
 type healthResponse struct {
 	Service string `json:"service"`
 	Version string `json:"version"`
+	// LatestAvailable is set when watchUpdates has seen a newer release —
+	// the "run `memstated upgrade`" nudge, surfaced by `memstated status`.
+	LatestAvailable string `json:"latest_available,omitempty"`
 }
 
 func decodeHealth(r io.Reader) (*healthResponse, error) {
@@ -35,8 +38,9 @@ func newRouter(store *Store, shutdown func(), embedder *Embedder) http.Handler {
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, healthResponse{
-			Service: healthServiceName,
-			Version: healthVersion,
+			Service:         healthServiceName,
+			Version:         healthVersion,
+			LatestAvailable: updateAvailable(),
 		})
 	})
 
