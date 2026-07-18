@@ -124,11 +124,14 @@ type MergeStats struct {
 //
 // Ties keep local, so cross-machine clocks only need to be NTP-close.
 // Re-importing the same file is a no-op, which makes A→B→A ping-pong safe.
+// force disables the timestamp comparison: the file's latest is replayed
+// even when the local version is newer (identical state still dedupes to
+// unchanged, so a forced re-import stays a no-op).
 // Each project entry is one transaction — a failure rolls back that project
 // entirely. Any merge into a soft-deleted local project revives it, like
 // every other write. Vectors for updated keypaths are dropped so the
 // caller's embedding backfill recomputes them.
-func (s *Store) Merge(data *ExportData, overrideProjectID string) ([]MergeStats, error) {
+func (s *Store) Merge(data *ExportData, overrideProjectID string, force bool) ([]MergeStats, error) {
 	if data.Format != exportFormat {
 		return nil, fmt.Errorf("not a memstate export (format %q)", data.Format)
 	}
@@ -149,7 +152,7 @@ func (s *Store) Merge(data *ExportData, overrideProjectID string) ([]MergeStats,
 		if target == "" {
 			return nil, errors.New("export entry has no project_id and none was given")
 		}
-		st, err := s.mergeProject(target, pe.Memories)
+		st, err := s.mergeProject(target, pe.Memories, force)
 		if err != nil {
 			return stats, fmt.Errorf("project %q: %w", target, err)
 		}
@@ -158,7 +161,7 @@ func (s *Store) Merge(data *ExportData, overrideProjectID string) ([]MergeStats,
 	return stats, nil
 }
 
-func (s *Store) mergeProject(target string, memories []ExportMemory) (*MergeStats, error) {
+func (s *Store) mergeProject(target string, memories []ExportMemory, force bool) (*MergeStats, error) {
 	for i, m := range memories {
 		if m.Keypath == "" {
 			return nil, fmt.Errorf("memory %d: empty keypath", i)
@@ -195,7 +198,7 @@ func (s *Store) mergeProject(target string, memories []ExportMemory) (*MergeStat
 		for j < len(mems) && mems[j].Keypath == mems[i].Keypath {
 			j++
 		}
-		if err := mergeKeypath(tx, target, mems[i:j], st); err != nil {
+		if err := mergeKeypath(tx, target, mems[i:j], st, force); err != nil {
 			return nil, fmt.Errorf("keypath %s: %w", mems[i].Keypath, err)
 		}
 		i = j
@@ -209,7 +212,7 @@ func (s *Store) mergeProject(target string, memories []ExportMemory) (*MergeStat
 
 // mergeKeypath applies one keypath's exported version chain (sorted by
 // version ascending) against the local store, inside the caller's tx.
-func mergeKeypath(tx dbExec, target string, chain []ExportMemory, st *MergeStats) error {
+func mergeKeypath(tx dbExec, target string, chain []ExportMemory, st *MergeStats, force bool) error {
 	kp := chain[0].Keypath
 	srcLatest := chain[len(chain)-1]
 	local, err := getLatestExec(tx, target, kp)
@@ -267,7 +270,7 @@ func mergeKeypath(tx dbExec, target string, chain []ExportMemory, st *MergeStats
 		return nil
 	}
 
-	if srcLatest.CreatedAt <= local.CreatedAt {
+	if !force && srcLatest.CreatedAt <= local.CreatedAt {
 		st.SkippedOlder++
 		return nil
 	}

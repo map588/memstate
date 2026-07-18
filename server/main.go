@@ -315,7 +315,7 @@ func printUsage() {
                                    one and restart the shared daemon if running
   memstated export --project ID | --all [--out FILE] [--db PATH] [--overwrite]
                                    write project memory (full history) to a JSON file
-  memstated import [--project ID] [--db PATH] FILE
+  memstated import [--project ID] [--force] [--db PATH] FILE
                                    timestamp-merge an export file into the local DB
                                    (newer keys win; new keys keep their history)
 
@@ -501,10 +501,12 @@ func cmdImport(args []string) int {
 	fs := flag.NewFlagSet("import", flag.ExitOnError)
 	project := fs.String("project", "",
 		"import a single-project file under this id instead of the one recorded in the file")
+	force := fs.Bool("force", false,
+		"take the file's latest value even when the local version is newer")
 	db := fs.String("db", "", "SQLite file (default MEMSTATE_DB or ~/.memstate/memstate.db)")
 	_ = fs.Parse(args)
 	if fs.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: memstated import [--project ID] [--db PATH] FILE (flags before FILE)")
+		fmt.Fprintln(os.Stderr, "usage: memstated import [--project ID] [--force] [--db PATH] FILE (flags before FILE)")
 		return 2
 	}
 	src := expandHome(fs.Arg(0))
@@ -525,7 +527,7 @@ func cmdImport(args []string) int {
 	}
 	defer store.Close()
 
-	stats, err := store.Merge(&data, *project)
+	stats, err := store.Merge(&data, *project, *force)
 	for _, st := range stats {
 		fmt.Printf("%s: %d restored, %d updated, %d deleted, %d unchanged, %d kept (local newer)\n",
 			st.ProjectID, st.Restored, st.Updated, st.Deleted, st.Unchanged, st.SkippedOlder)

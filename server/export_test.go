@@ -54,7 +54,7 @@ func TestMergeFreshTargetRestoresHistory(t *testing.T) {
 	}
 
 	dst := newTestStore(t)
-	stats, err := dst.Merge(data, "")
+	stats, err := dst.Merge(data, "", false)
 	if err != nil {
 		t.Fatalf("merge: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestMergeFreshTargetRestoresHistory(t *testing.T) {
 	}
 
 	// Re-importing the same file is a no-op (timestamps tie → local wins).
-	stats, err = dst.Merge(data, "")
+	stats, err = dst.Merge(data, "", false)
 	if err != nil {
 		t.Fatalf("re-merge: %v", err)
 	}
@@ -125,13 +125,13 @@ func TestMergeNewerWinsOlderSkipped(t *testing.T) {
 
 	// Older source: local wins, nothing written.
 	stats, err := s.Merge(exportOf("p",
-		ExportMemory{Keypath: "k", Content: "older remote", Version: 1, CreatedAt: 500}), "")
+		ExportMemory{Keypath: "k", Content: "older remote", Version: 1, CreatedAt: 500}), "", false)
 	if err != nil || stats[0].SkippedOlder != 1 {
 		t.Fatalf("older: %+v err=%v", stats, err)
 	}
 	// Tie: local wins.
 	stats, err = s.Merge(exportOf("p",
-		ExportMemory{Keypath: "k", Content: "tied remote", Version: 1, CreatedAt: 1000}), "")
+		ExportMemory{Keypath: "k", Content: "tied remote", Version: 1, CreatedAt: 1000}), "", false)
 	if err != nil || stats[0].SkippedOlder != 1 {
 		t.Fatalf("tie: %+v err=%v", stats, err)
 	}
@@ -141,7 +141,7 @@ func TestMergeNewerWinsOlderSkipped(t *testing.T) {
 
 	// Newer source: replayed through the write path as a new version.
 	stats, err = s.Merge(exportOf("p",
-		ExportMemory{Keypath: "k", Content: "newer remote", Source: "machine_a", Version: 7, CreatedAt: 2000}), "")
+		ExportMemory{Keypath: "k", Content: "newer remote", Source: "machine_a", Version: 7, CreatedAt: 2000}), "", false)
 	if err != nil || stats[0].Updated != 1 {
 		t.Fatalf("newer: %+v err=%v", stats, err)
 	}
@@ -157,6 +157,56 @@ func TestMergeNewerWinsOlderSkipped(t *testing.T) {
 	}
 }
 
+func TestMergeForceOverridesNewerLocal(t *testing.T) {
+	s := newTestStore(t)
+	if _, _, err := s.Write("p", "k", "local", WriteMeta{}, false); err != nil {
+		t.Fatal(err)
+	}
+	setCreatedAt(t, s, "p", "k", 1, 2000)
+
+	// Without force the older remote is skipped; with force it wins.
+	older := exportOf("p",
+		ExportMemory{Keypath: "k", Content: "older remote", Version: 1, CreatedAt: 500})
+	stats, err := s.Merge(older, "", false)
+	if err != nil || stats[0].SkippedOlder != 1 {
+		t.Fatalf("without force: %+v err=%v", stats, err)
+	}
+	stats, err = s.Merge(older, "", true)
+	if err != nil || stats[0].Updated != 1 {
+		t.Fatalf("with force: %+v err=%v", stats, err)
+	}
+	m, _ := s.GetLatest("p", "k")
+	if m.Content != "older remote" || m.Version != 2 {
+		t.Fatalf("forced update: %+v", m)
+	}
+	// The local value is superseded, not lost: full history remains.
+	hist, err := s.History("p", "k")
+	if err != nil || len(hist) != 2 ||
+		hist[0].Content != "older remote" || hist[1].Content != "local" {
+		t.Fatalf("history after force: %+v err=%v", hist, err)
+	}
+	if hist[0].ParentID == nil || *hist[0].ParentID != hist[1].ID {
+		t.Fatalf("parent chain broken: %+v -> %+v", hist[0], hist[1])
+	}
+
+	// Forced re-import of the same file dedupes to unchanged.
+	stats, err = s.Merge(older, "", true)
+	if err != nil || stats[0].Unchanged != 1 {
+		t.Fatalf("forced re-import: %+v err=%v", stats, err)
+	}
+
+	// A forced tombstone deletes despite the local value being newer.
+	setCreatedAt(t, s, "p", "k", 2, 3000)
+	stats, err = s.Merge(exportOf("p",
+		ExportMemory{Keypath: "k", Version: 1, Tombstone: true, CreatedAt: 100}), "", true)
+	if err != nil || stats[0].Deleted != 1 {
+		t.Fatalf("forced delete: %+v err=%v", stats, err)
+	}
+	if m, _ := s.GetLatest("p", "k"); !m.Tombstone {
+		t.Fatalf("not tombstoned: %+v", m)
+	}
+}
+
 func TestMergeIdenticalContentUnchanged(t *testing.T) {
 	s := newTestStore(t)
 	if _, _, err := s.Write("p", "k", "same", WriteMeta{}, false); err != nil {
@@ -164,7 +214,7 @@ func TestMergeIdenticalContentUnchanged(t *testing.T) {
 	}
 	setCreatedAt(t, s, "p", "k", 1, 1000)
 	stats, err := s.Merge(exportOf("p",
-		ExportMemory{Keypath: "k", Content: "same", Version: 1, CreatedAt: 2000}), "")
+		ExportMemory{Keypath: "k", Content: "same", Version: 1, CreatedAt: 2000}), "", false)
 	if err != nil || stats[0].Unchanged != 1 {
 		t.Fatalf("stats: %+v err=%v", stats, err)
 	}
@@ -181,7 +231,7 @@ func TestMergeTombstonePropagates(t *testing.T) {
 	setCreatedAt(t, s, "p", "k", 1, 1000)
 
 	stats, err := s.Merge(exportOf("p",
-		ExportMemory{Keypath: "k", Version: 2, Tombstone: true, CreatedAt: 2000}), "")
+		ExportMemory{Keypath: "k", Version: 2, Tombstone: true, CreatedAt: 2000}), "", false)
 	if err != nil || stats[0].Deleted != 1 {
 		t.Fatalf("delete: %+v err=%v", stats, err)
 	}
@@ -191,13 +241,13 @@ func TestMergeTombstonePropagates(t *testing.T) {
 	// Already deleted + newer remote tombstone → unchanged.
 	setCreatedAt(t, s, "p", "k", 2, 1500)
 	stats, err = s.Merge(exportOf("p",
-		ExportMemory{Keypath: "k", Version: 2, Tombstone: true, CreatedAt: 3000}), "")
+		ExportMemory{Keypath: "k", Version: 2, Tombstone: true, CreatedAt: 3000}), "", false)
 	if err != nil || stats[0].Unchanged != 1 {
 		t.Fatalf("double delete: %+v err=%v", stats, err)
 	}
 	// Newer remote LIVE value resurrects a locally tombstoned keypath.
 	stats, err = s.Merge(exportOf("p",
-		ExportMemory{Keypath: "k", Content: "back", Version: 9, CreatedAt: 4000}), "")
+		ExportMemory{Keypath: "k", Content: "back", Version: 9, CreatedAt: 4000}), "", false)
 	if err != nil || stats[0].Updated != 1 {
 		t.Fatalf("resurrect: %+v err=%v", stats, err)
 	}
@@ -216,7 +266,7 @@ func TestMergeMultiProjectAndRename(t *testing.T) {
 	}
 
 	dst := newTestStore(t)
-	stats, err := dst.Merge(data, "")
+	stats, err := dst.Merge(data, "", false)
 	if err != nil || len(stats) != 2 {
 		t.Fatalf("multi merge: %+v err=%v", stats, err)
 	}
@@ -225,11 +275,11 @@ func TestMergeMultiProjectAndRename(t *testing.T) {
 	}
 
 	// Rename applies only to single-project files.
-	if _, err := dst.Merge(data, "renamed"); err == nil {
+	if _, err := dst.Merge(data, "renamed", false); err == nil {
 		t.Fatal("rename of multi-project file should fail")
 	}
 	single, _ := src.Export([]string{"a"})
-	if _, err := dst.Merge(single, "renamed"); err != nil {
+	if _, err := dst.Merge(single, "renamed", false); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
 	if m, _ := dst.GetLatest("renamed", "k"); m == nil || m.Content != "va" {
@@ -243,24 +293,24 @@ func TestMergeRejectsBadInput(t *testing.T) {
 
 	bad := *good
 	bad.Format = "something-else"
-	if _, err := s.Merge(&bad, ""); err == nil {
+	if _, err := s.Merge(&bad, "", false); err == nil {
 		t.Fatal("wrong format accepted")
 	}
 	bad = *good
 	bad.FormatVersion = 99
-	if _, err := s.Merge(&bad, ""); err == nil {
+	if _, err := s.Merge(&bad, "", false); err == nil {
 		t.Fatal("wrong format_version accepted")
 	}
 	if _, err := s.Merge(exportOf("p",
-		ExportMemory{Keypath: "", Content: "v", Version: 1, CreatedAt: 1}), ""); err == nil {
+		ExportMemory{Keypath: "", Content: "v", Version: 1, CreatedAt: 1}), "", false); err == nil {
 		t.Fatal("empty keypath accepted")
 	}
 	if _, err := s.Merge(exportOf("p",
-		ExportMemory{Keypath: "k", Content: "v", Version: 0, CreatedAt: 1}), ""); err == nil {
+		ExportMemory{Keypath: "k", Content: "v", Version: 0, CreatedAt: 1}), "", false); err == nil {
 		t.Fatal("version 0 accepted")
 	}
 	if _, err := s.Merge(exportOf("",
-		ExportMemory{Keypath: "k", Content: "v", Version: 1, CreatedAt: 1}), ""); err == nil {
+		ExportMemory{Keypath: "k", Content: "v", Version: 1, CreatedAt: 1}), "", false); err == nil {
 		t.Fatal("missing project_id accepted")
 	}
 }
