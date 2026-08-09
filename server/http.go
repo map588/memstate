@@ -77,6 +77,16 @@ func newRouter(store *Store, shutdown func(), embedder *Embedder) http.Handler {
 
 // ---------- helpers ----------
 
+// orEmpty replaces a nil slice with an empty one. Go encodes a nil slice
+// as JSON null; response arrays must always encode as [] so clients can
+// iterate without a null guard.
+func orEmpty[T any](s []T) []T {
+	if s == nil {
+		return []T{}
+	}
+	return s
+}
+
 func writeJSON(w http.ResponseWriter, code int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -318,7 +328,7 @@ func handleDelete(store *Store) http.HandlerFunc {
 				return
 			}
 			writeJSON(w, http.StatusOK, deleteResp{
-				DeletedCount: len(killed), DeletedKeypaths: killed,
+				DeletedCount: len(killed), DeletedKeypaths: orEmpty(killed),
 			})
 			return
 		}
@@ -417,7 +427,7 @@ func handleSearch(store *Store, embedder *Embedder) http.HandlerFunc {
 			writeJSON(w, http.StatusOK, map[string]any{
 				"mode":        "fts",
 				"query":       in.Query,
-				"results":     hits,
+				"results":     orEmpty(hits),
 				"total_found": len(hits),
 			})
 		case "semantic":
@@ -450,7 +460,7 @@ func handleSearch(store *Store, embedder *Embedder) http.HandlerFunc {
 				"model":       embedder.Model,
 				"threshold":   threshold,
 				"query":       in.Query,
-				"results":     hits,
+				"results":     orEmpty(hits),
 				"total_found": len(hits),
 			})
 		default:
@@ -505,7 +515,7 @@ func handleHistory(store *Store) http.HandlerFunc {
 		}
 
 		writeJSON(w, http.StatusOK, map[string]any{
-			"versions":       versions,
+			"versions":       orEmpty(versions),
 			"total_versions": len(versions),
 		})
 	}
@@ -545,7 +555,7 @@ func handleKeypaths(store *Store) http.HandlerFunc {
 			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"memories":    list,
+			"memories":    orEmpty(list),
 			"total_count": len(list),
 		})
 	}
@@ -573,7 +583,7 @@ func handleTree(store *Store) http.HandlerFunc {
 		countValues(tree, &total)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"project_id":     pid,
-			"domains":        domains,
+			"domains":        orEmpty(domains),
 			"total_memories": total,
 		})
 	}
@@ -595,7 +605,7 @@ func handleProjects(store *Store) http.HandlerFunc {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"projects": ps})
+		writeJSON(w, http.StatusOK, map[string]any{"projects": orEmpty(ps)})
 	}
 }
 
