@@ -14,7 +14,7 @@ make install          # put `memstated` on GOBIN and `memstate-mcp` on PATH via 
 make uninstall        # reverse of install
 make install-skill    # copy skill to ~/.claude/skills/memstate + add UserPromptSubmit hook
 make uninstall-skill  # reverse of install-skill
-make test             # go test + go vet + TS end-to-end smoke
+make test             # go test + go vet + TS smoke + MCP regression suite
 make clean            # remove build artifacts
 ```
 
@@ -25,6 +25,7 @@ cd server && go build -o memstated .          # Go daemon only
 cd client && npm install && npm run build     # TS proxy only
 cd server && go test -run TestStoreRoundTrip  # single Go test
 node client/dist/index.js --test              # end-to-end: spawn daemon, hit /health, list tools
+node client/test/regression.mjs               # full-stack regression: every MCP tool over stdio against a temp DB
 ```
 
 Running the daemon directly:

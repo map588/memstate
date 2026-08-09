@@ -72,9 +72,10 @@ uninstall-skill:  ## Remove skill + hook from ~/.claude
 	-python3 scripts/configure-claude-hook.py uninstall
 	@echo "Skill + hook removed from $(CLAUDE_HOME)"
 
-test: build  ## Run Go tests + TS end-to-end smoke
+test: build  ## Run Go tests + TS end-to-end smoke + MCP regression
 	cd server && go test ./... && go vet ./...
 	node client/dist/index.js --test
+	node client/test/regression.mjs
 
 # Asset names must match releaseAssetName() in server/upgrade.go —
 # `memstated upgrade` downloads them by exact name.
