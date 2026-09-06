@@ -598,11 +598,16 @@ func cmdEmbed(args []string) int {
 	if err := fs.Parse(rest); err != nil {
 		return 2
 	}
-	// The daemon's own model is the truth for what search uses. Without
-	// --model, prefer it over the shell environment, which may be empty
-	// when the model was given as a daemon flag.
+	// The daemon's own model and threshold are the truth for what search
+	// uses. Without --model, prefer them over the shell environment, which
+	// may be empty when the model was given as a daemon flag.
+	liveModel, liveThreshold := runningEmbedConfig(*addr)
 	if *model == "" {
-		*model = runningEmbedModel(*addr)
+		*model = liveModel
+	}
+	threshold := envThreshold()
+	if liveThreshold > 0 && os.Getenv("MEMSTATE_SEMANTIC_THRESHOLD") == "" {
+		threshold = liveThreshold
 	}
 	store, _, err := openStoreCLI(*db)
 	if err != nil {
@@ -615,7 +620,7 @@ func cmdEmbed(args []string) int {
 	case "status":
 		emb := NewEmbedder(*ollamaURL, *model, *embedTimeout)
 		for {
-			report, err := collectEmbedStatus(store, emb, envThreshold(), *probe)
+			report, err := collectEmbedStatus(store, emb, threshold, *probe)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "memstated embed status: %v\n", err)
 				return 1
@@ -654,10 +659,10 @@ func cmdEmbed(args []string) int {
 	return 2
 }
 
-// runningEmbedModel returns the embed_model a live daemon reports in
-// /health, or "" when none answers within 500ms. addr "" means
-// MEMSTATE_ADDR, then the default shared address.
-func runningEmbedModel(addr string) string {
+// runningEmbedConfig returns the embed_model and semantic_threshold a
+// live daemon reports in /health, or zero values when none answers within
+// 500ms. addr "" means MEMSTATE_ADDR, then the default shared address.
+func runningEmbedConfig(addr string) (string, float32) {
 	if addr == "" {
 		addr = os.Getenv("MEMSTATE_ADDR")
 	}
@@ -667,14 +672,14 @@ func runningEmbedModel(addr string) string {
 	client := &http.Client{Timeout: 500 * time.Millisecond}
 	resp, err := client.Get("http://" + addr + "/health")
 	if err != nil {
-		return ""
+		return "", 0
 	}
 	defer resp.Body.Close()
 	h, err := decodeHealth(resp.Body)
 	if err != nil {
-		return ""
+		return "", 0
 	}
-	return h.EmbedModel
+	return h.EmbedModel, h.SemanticThreshold
 }
 
 func cmdStop(args []string) int {

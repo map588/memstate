@@ -23,6 +23,9 @@ type healthResponse struct {
 	// embeddings are disabled. The proxy compares it against its own
 	// MEMSTATE_EMBED_MODEL when it attaches to a daemon it did not start.
 	EmbedModel string `json:"embed_model,omitempty"`
+	// SemanticThreshold is the daemon's default cosine floor for semantic
+	// search, so CLI tools report the value search uses.
+	SemanticThreshold float32 `json:"semantic_threshold,omitempty"`
 }
 
 func decodeHealth(r io.Reader) (*healthResponse, error) {
@@ -47,6 +50,7 @@ func newRouter(store *Store, shutdown func(), embedder *Embedder) http.Handler {
 		}
 		if embedder != nil {
 			h.EmbedModel = embedder.Model
+			h.SemanticThreshold = envThreshold()
 		}
 		writeJSON(w, http.StatusOK, h)
 	})

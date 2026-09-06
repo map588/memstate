@@ -63,8 +63,8 @@ func TestHTTPHealth(t *testing.T) {
 func TestHTTPHealthReportsEmbedModel(t *testing.T) {
 	ts := newTestServerWithEmbedder(t, &Embedder{Model: "qwen3-embedding"})
 	_, body := getJSON(t, ts.URL+"/health")
-	if body["embed_model"] != "qwen3-embedding" {
-		t.Fatalf("embed_model: %+v", body)
+	if body["embed_model"] != "qwen3-embedding" || body["semantic_threshold"] != float64(defaultThreshold) {
+		t.Fatalf("embed_model / semantic_threshold: %+v", body)
 	}
 }
 

@@ -154,13 +154,14 @@ func TestEmbedStatusReport(t *testing.T) {
 	}
 }
 
-func TestRunningEmbedModel(t *testing.T) {
+func TestRunningEmbedConfig(t *testing.T) {
+	t.Setenv("MEMSTATE_SEMANTIC_THRESHOLD", "0.6")
 	ts := newTestServerWithEmbedder(t, &Embedder{Model: "live-model"})
 	addr := strings.TrimPrefix(ts.URL, "http://")
-	if got := runningEmbedModel(addr); got != "live-model" {
-		t.Fatalf("live daemon: got %q", got)
+	if model, th := runningEmbedConfig(addr); model != "live-model" || th != 0.6 {
+		t.Fatalf("live daemon: got %q %v", model, th)
 	}
-	if got := runningEmbedModel("127.0.0.1:9"); got != "" {
-		t.Fatalf("closed port must give empty, got %q", got)
+	if model, th := runningEmbedConfig("127.0.0.1:9"); model != "" || th != 0 {
+		t.Fatalf("closed port must give zero values, got %q %v", model, th)
 	}
 }
