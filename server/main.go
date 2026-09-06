@@ -96,6 +96,8 @@ func main() {
 			os.Exit(cmdSearch(os.Args[2:]))
 		case "upgrade":
 			os.Exit(cmdUpgrade(os.Args[2:]))
+		case "embed":
+			os.Exit(cmdEmbed(os.Args[2:]))
 		case "-h", "--help", "help":
 			printUsage()
 			os.Exit(0)
@@ -112,6 +114,13 @@ func main() {
 	idleTimeoutFlag := fs.Duration("idle-timeout", 0,
 		"shut down after this duration with no HTTP requests (0 = disabled). "+
 			"Ignored when --owner-pid is set. Env: MEMSTATE_IDLE_TIMEOUT.")
+	embedModelFlag := fs.String("embed-model", "",
+		"Ollama model for semantic search (default nomic-embed-text). Env: MEMSTATE_EMBED_MODEL.")
+	ollamaURLFlag := fs.String("ollama-url", "",
+		"Ollama base URL (default http://127.0.0.1:11434). Env: MEMSTATE_OLLAMA_URL.")
+	embedTimeoutFlag := fs.Duration("embed-timeout", 0,
+		"max time for one Ollama embed call, must cover a cold model load (default 60s). "+
+			"Env: MEMSTATE_EMBED_TIMEOUT.")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
 	}
@@ -166,7 +175,7 @@ func main() {
 	// the server by cancelling the root context.
 	shutdownFn := func() { stop() }
 
-	embedder := NewEmbedder()
+	embedder := NewEmbedder(*ollamaURLFlag, *embedModelFlag, *embedTimeoutFlag)
 	// Eagerly repair any missing vectors (post-migration wipe, model switch,
 	// writes made while Ollama was down). Non-blocking; failures just log.
 	embedder.BackfillEmbeddings(store)
@@ -300,6 +309,9 @@ func printUsage() {
   memstated --addr HOST:PORT       run on an explicit address (shared mode)
   memstated --owner-pid N          shut down when process N disappears
   memstated --idle-timeout 30m     shut down after N of no-request idleness
+  memstated --embed-model NAME     Ollama model for semantic search
+  memstated --ollama-url URL       Ollama base URL
+  memstated --embed-timeout 60s    max time per Ollama embed call (cold load included)
   memstated stop   [--addr HOST:PORT]   send a shutdown request to a running daemon
   memstated status [--addr HOST:PORT]   query /health
 
@@ -318,11 +330,21 @@ func printUsage() {
   memstated import [--project ID] [--force] [--db PATH] FILE
                                    timestamp-merge an export file into the local DB
                                    (newer keys win; new keys keep their history)
+  memstated embed status [--db PATH]
+                                   list embedding models in the DB with row counts
+  memstated embed rebuild [--model NAME] [--ollama-url URL] [--embed-timeout D] [--db PATH]
+                                   drop and recompute every vector for one model
+  memstated embed prune [--keep NAME] [--db PATH]
+                                   delete vectors of every model except --keep
+                                   (default: the configured model)
 
 Environment:
   MEMSTATE_ADDR           default for --addr
   MEMSTATE_DB             SQLite file path (default ~/.memstate/memstate.db)
   MEMSTATE_IDLE_TIMEOUT   default for --idle-timeout (e.g. 30m)
+  MEMSTATE_EMBED_MODEL    default for --embed-model (nomic-embed-text)
+  MEMSTATE_OLLAMA_URL     default for --ollama-url (http://127.0.0.1:11434)
+  MEMSTATE_EMBED_TIMEOUT  default for --embed-timeout (60s)
   MEMSTATE_NO_UPDATE_CHECK  set to disable the daemon's daily release check
 `)
 }
@@ -545,10 +567,81 @@ func cmdImport(args []string) int {
 	// ones; rebuild synchronously so semantic search works immediately.
 	// If Ollama is down this logs and moves on — the daemon's startup
 	// backfill is the safety net.
-	emb := NewEmbedder()
+	emb := NewEmbedder("", "", 0)
 	emb.BackfillEmbeddings(store)
 	emb.WaitForPending()
 	return 0
+}
+
+// cmdEmbed manages the stored vector sets: `status` lists models with row
+// counts, `rebuild` recomputes one model from scratch, `prune` drops every
+// other model. Direct SQLite access, like dump and export; safe next to a
+// live daemon because the daemon reads every vector fresh from the DB.
+func cmdEmbed(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: memstated embed status|rebuild|prune [flags]")
+		return 2
+	}
+	verb, rest := args[0], args[1:]
+	fs := flag.NewFlagSet("embed "+verb, flag.ExitOnError)
+	db := fs.String("db", "", "SQLite file (default MEMSTATE_DB or ~/.memstate/memstate.db)")
+	model := fs.String("model", "", "embed model (default MEMSTATE_EMBED_MODEL or nomic-embed-text)")
+	keep := fs.String("keep", "", "prune: model to keep (default MEMSTATE_EMBED_MODEL or nomic-embed-text)")
+	ollamaURL := fs.String("ollama-url", "", "Ollama base URL (default MEMSTATE_OLLAMA_URL or http://127.0.0.1:11434)")
+	embedTimeout := fs.Duration("embed-timeout", 0, "rebuild: max time per Ollama call (default MEMSTATE_EMBED_TIMEOUT or 60s)")
+	if err := fs.Parse(rest); err != nil {
+		return 2
+	}
+	store, _, err := openStoreCLI(*db)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "memstated embed: %v\n", err)
+		return 1
+	}
+	defer store.Close()
+
+	switch verb {
+	case "status":
+		stats, err := store.EmbeddingModelStats()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "memstated embed status: %v\n", err)
+			return 1
+		}
+		configured := NewEmbedder("", *model, 0).Model
+		fmt.Printf("configured model: %s\n", configured)
+		if len(stats) == 0 {
+			fmt.Println("no vectors stored")
+			return 0
+		}
+		for _, st := range stats {
+			mark := " "
+			if st.Model == configured {
+				mark = "*"
+			}
+			fmt.Printf("%s %-32s %6d rows  dim %d\n", mark, st.Model, st.Rows, st.Dim)
+		}
+		return 0
+	case "rebuild":
+		emb := NewEmbedder(*ollamaURL, *model, *embedTimeout)
+		dropped, done, skipped, err := emb.Rebuild(store, os.Stdout)
+		fmt.Printf("model %s: dropped %d, embedded %d, skipped %d\n",
+			emb.Model, dropped, done, skipped)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "memstated embed rebuild: %v\n", err)
+			return 1
+		}
+		return 0
+	case "prune":
+		keepModel := NewEmbedder("", *keep, 0).Model
+		n, err := store.DeleteEmbeddingsExcept(keepModel)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "memstated embed prune: %v\n", err)
+			return 1
+		}
+		fmt.Printf("kept %s, dropped %d rows of other models\n", keepModel, n)
+		return 0
+	}
+	fmt.Fprintf(os.Stderr, "memstated embed: unknown verb %q (expected status|rebuild|prune)\n", verb)
+	return 2
 }
 
 func cmdStop(args []string) int {

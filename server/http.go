@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // healthResponse is the JSON shape probed by double-start detection.
@@ -20,6 +19,10 @@ type healthResponse struct {
 	// LatestAvailable is set when watchUpdates has seen a newer release —
 	// the "run `memstated upgrade`" nudge, surfaced by `memstated status`.
 	LatestAvailable string `json:"latest_available,omitempty"`
+	// EmbedModel is the Ollama model this daemon embeds with; empty when
+	// embeddings are disabled. The proxy compares it against its own
+	// MEMSTATE_EMBED_MODEL when it attaches to a daemon it did not start.
+	EmbedModel string `json:"embed_model,omitempty"`
 }
 
 func decodeHealth(r io.Reader) (*healthResponse, error) {
@@ -37,11 +40,15 @@ func newRouter(store *Store, shutdown func(), embedder *Embedder) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, healthResponse{
+		h := healthResponse{
 			Service:         healthServiceName,
 			Version:         healthVersion,
 			LatestAvailable: updateAvailable(),
-		})
+		}
+		if embedder != nil {
+			h.EmbedModel = embedder.Model
+		}
+		writeJSON(w, http.StatusOK, h)
 	})
 
 	// POST /admin/shutdown — local-only kill switch for a manually-started
@@ -139,7 +146,7 @@ func maybeEmbedContent(store *Store, embedder *Embedder, projectID, keypath, con
 				return
 			}
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), embedder.timeout())
 		defer cancel()
 		vec, err := embedder.EmbedDocument(ctx, content)
 		if err != nil {
@@ -436,7 +443,7 @@ func handleSearch(store *Store, embedder *Embedder) http.HandlerFunc {
 					"semantic search disabled (no embedder configured)")
 				return
 			}
-			ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(r.Context(), embedder.timeout())
 			defer cancel()
 			qvec, err := embedder.EmbedQuery(ctx, in.Query)
 			if err != nil {

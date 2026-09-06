@@ -43,6 +43,10 @@ Running the daemon directly:
 ./server/memstated export --all                          # full-history JSON to ~/.memstate/exports/
 ./server/memstated import backup.json                    # timestamp-merge into the local DB
 ./server/memstated upgrade                               # swap in the latest GitHub release binary; restarts a running shared daemon
+./server/memstated --addr 127.0.0.1:8765 --embed-model qwen3-embedding:4b   # pick the Ollama embed model (env MEMSTATE_EMBED_MODEL)
+./server/memstated embed status                          # embedding models in the DB with row counts and dims
+./server/memstated embed rebuild --model qwen3-embedding:4b   # drop + recompute one model's vectors (direct SQLite, prints progress)
+./server/memstated embed prune --keep qwen3-embedding:4b      # delete vectors of every other model
 ```
 
 ## Architecture
@@ -62,6 +66,7 @@ Two modes, selected at proxy startup:
 
 - **Child mode (default):** proxy spawns `memstated` on `127.0.0.1:0` (OS-picked port), passes its own PID via `--owner-pid`, and reads the `MEMSTATE_READY addr=<addr>` banner from the daemon's stderr to learn the address. On proxy exit the daemon is SIGTERMed; if the proxy is SIGKILLed, the daemon's 2-second `kill(owner_pid, 0)` loop notices and self-exits.
 - **Attach mode (`MEMSTATE_ADDR` set):** proxy probes `/health`. If a memstate daemon answers → attach. If nothing is listening → spawn a **detached** daemon on that addr (no `--owner-pid`, own session) and attach; the daemon outlives the proxy. If a non-memstate process is on the port → hard error. Set `MEMSTATE_IDLE_TIMEOUT` (e.g. `30m`) in the proxy's env to have the lazy-spawned daemon self-exit after idleness.
+- **Embed options flow through the proxy.** `parseEmbedOptions` in `client/src/index.ts` reads `--embed-model` / `--ollama-url` / `--embed-timeout` from the proxy argv (flag beats env) and `embedDaemonArgs` renders them as daemon flags on every spawn, child or detached. `memstate-mcp setup [--embed-model NAME]` writes the model into the agent config `args` (or the `claude mcp add` command), listing the models Ollama serves when interactive. On attach the proxy compares its model with the daemon's `embed_model` from `/health` and warns on mismatch.
 - **Detached MEMSTATE_DB warning:** the proxy only warns that `MEMSTATE_DB` is ignored when it *attached* to an already-running daemon. When it lazy-spawns, the child inherits env, so the warning would be wrong — tracked via the `alreadyRunning` flag in `attach()`.
 
 A manually-started `--addr` daemon that finds the port busy probes `/health` itself: if occupant is ours → exit 0 quietly; otherwise exit 2 loudly. The proxy translates exit 2 from a lazy-spawn into a readable "port occupied by non-memstate" error.
@@ -86,7 +91,7 @@ A manually-started `--addr` daemon that finds the port busy probes `/health` its
 
 ### Embeddings (`server/embed.go`)
 
-Ollama-backed content embeddings are fire-and-forget from the write path via `maybeEmbedContent` → `embedder.inFlight`. Writes succeed even if Ollama is down; errors are throttled to one log per model per hour. Semantic search returns 503 when the embedder is disabled. nomic-embed models get `search_document:` / `search_query:` task prefixes (`EmbedDocument` / `EmbedQuery`); other models get raw text. On startup `BackfillEmbeddings` eagerly embeds every current keypath missing a vector for the configured model (sequential, aborts on first error — the next startup or per-write heal retries). Tests use `Embedder.WaitForPending()` for determinism — production never waits.
+Ollama-backed content embeddings are fire-and-forget from the write path via `maybeEmbedContent` → `embedder.inFlight`. Writes succeed even if Ollama is down; errors are throttled to one log per model per hour. Semantic search returns 503 when the embedder is disabled. Model-family prompt formats live in `queryText` / `documentText`: nomic-embed models get `search_document:` / `search_query:` prefixes, qwen3-embedding models get an `Instruct:`/`Query:` line on the query side only, other models get raw text. `NewEmbedder(url, model, timeout)` resolves explicit args, then `MEMSTATE_OLLAMA_URL` / `MEMSTATE_EMBED_MODEL` / `MEMSTATE_EMBED_TIMEOUT`, then defaults (the 60s timeout exists because a 4B model cold-loads in ~20s, which the old 10s bound cut off); the daemon exposes both as `--ollama-url` / `--embed-model` and reports the model in `/health` (`embed_model`), which the proxy checks against its own env on attach. On startup `BackfillEmbeddings` eagerly embeds every current keypath missing a vector for the configured model (sequential, aborts on first transport error — the next startup or per-write heal retries). `Backfill` is the synchronous core; `Rebuild` = delete the model's rows + `Backfill`. Tests use `Embedder.WaitForPending()` for determinism — production never waits.
 
 ## Conventions (non-obvious)
 
@@ -97,6 +102,7 @@ Ollama-backed content embeddings are fire-and-forget from the write path via `ma
 - Formerly accepted-but-ignored fields: `category`/`topics` are now stored and filterable; `at_revision` and `context` were dropped and are rejected by `DisallowUnknownFields`. Do not add silently-ignored request fields — accept a field only when it does something.
 - **Dump/search subcommands are CLI-only** (`memstated dump|search`, `server/dump.go`): human DB-inspection over direct SQLite, with ANSI markdown highlighting (auto-disabled when stdout isn't a TTY or `NO_COLOR`/`--no-color` is set). The model already has `memstate_get`/`memstate_search`; do not add HTTP routes or MCP tools for these.
 - **Releases & self-upgrade:** `healthVersion` in `server/main.go` is the single version source; CI (`.github/workflows/build.yml`) refuses a `v*` tag that doesn't match it, then publishes raw platform binaries (`memstated-<os>-<arch>[.exe]`, built by `make release`) as GitHub release assets. `memstated upgrade` (`server/upgrade.go`) downloads the matching asset over the current executable and stop-swap-restarts a shared daemon; asset names must stay in sync with `releaseAssetName()`. The daemon checks the releases API on startup + daily (`watchUpdates`) and nudges via a stderr line + `latest_available` in `/health`; `MEMSTATE_NO_UPDATE_CHECK` disables it (tests set it — hermetic daemons must not touch the network).
+- **`memstated embed status|rebuild|prune` is CLI-only** (`cmdEmbed` in `server/main.go`, direct SQLite like dump/export). Vectors are keyed by model name, so several sets coexist; `rebuild` rewrites one model's set from scratch, `prune` drops all others. Do not add an HTTP route or MCP tool for this.
 - **Export/import is deliberately CLI-only** (`memstated export|import`, direct SQLite access in `server/export.go` + `server/main.go`). It's a human cross-machine workflow; do NOT add an MCP tool or HTTP route for it. Import merges by timestamp: keypaths absent locally get their full version history copied; existing keypaths take the file's latest value only when it is strictly newer (replayed through the normal write path, so dedupe/supersede/tombstone semantics apply and re-imports are no-ops). `import --force` skips the timestamp comparison so the file's latest always wins (identical state still dedupes).
 
 ## Where data lives
@@ -106,7 +112,8 @@ Ollama-backed content embeddings are fire-and-forget from the write path via `ma
 | SQLite DB | `~/.memstate/memstate.db` (env `MEMSTATE_DB`; `~/` is expanded) |
 | Daemon log | `~/.memstate/memstated.log` |
 | Ollama URL | `http://127.0.0.1:11434` (env `MEMSTATE_OLLAMA_URL`) |
-| Embed model | `nomic-embed-text` (env `MEMSTATE_EMBED_MODEL`) |
+| Embed model | `nomic-embed-text` (env `MEMSTATE_EMBED_MODEL` or `--embed-model`) |
+| Embed timeout | `60s` per Ollama call (env `MEMSTATE_EMBED_TIMEOUT` or `--embed-timeout`; must cover a cold load of a large model) |
 | Semantic threshold | `0.5` (env `MEMSTATE_SEMANTIC_THRESHOLD` or per-request) |
 
 Daemon binds loopback only. In attach mode, `MEMSTATE_DB` on the proxy is silently ignored (the running daemon picked its DB at startup) — the proxy emits a warning.

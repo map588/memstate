@@ -18,6 +18,14 @@ You need Go 1.27+ and Node 18+. Semantic search also needs a local
 ollama pull nomic-embed-text
 ```
 
+Any Ollama embedding model works. Select one with `MEMSTATE_EMBED_MODEL`
+or `memstated --embed-model NAME`; for example:
+
+```bash
+ollama pull qwen3-embedding:4b
+memstated --addr 127.0.0.1:8765 --embed-model qwen3-embedding:4b
+```
+
 If Ollama does not run, memstate still works. Writes and FTS search
 are not affected. Semantic search returns 503 until the embedder is
 available.
@@ -146,7 +154,29 @@ dropped. Set the threshold in the request or with
 `MEMSTATE_SEMANTIC_THRESHOLD`. Each result pairs the keypath with the
 current non-tombstoned memory and the similarity score. With
 nomic-embed models, the daemon adds the `search_query:` and
-`search_document:` task prefixes automatically.
+`search_document:` task prefixes automatically. With Qwen3-Embedding
+models, the daemon adds the retrieval instruction line to the query and
+sends documents as raw text. Other models get raw text on both sides.
+
+### Embedding models
+
+Vectors are stored per model name, so a model switch does not destroy the
+old set. The daemon reports its model in `/health` as `embed_model`, and
+the proxy warns when its own `MEMSTATE_EMBED_MODEL` differs from that of
+a daemon it attached to. After a switch, the daemon fills in the new
+model's vectors on its next start. Use the `embed` subcommand to inspect
+or rewrite the sets directly:
+
+```bash
+memstated embed status                          # models in the DB, row counts, dims
+memstated embed rebuild --model qwen3-embedding:4b   # drop and recompute one model's vectors
+memstated embed prune --keep qwen3-embedding:4b      # delete every other model's vectors
+```
+
+`rebuild` is the tool for a change in embedding structure under the same
+model name: a new prompt format, a new Ollama build with different
+output, or a corrupted set. It runs one Ollama call at a time and prints
+progress per keypath.
 
 ## How storage works
 
@@ -187,8 +217,9 @@ search, but its full version history stays readable.
 |---|---|
 | SQLite DB | `~/.memstate/memstate.db` (override with `MEMSTATE_DB`, and `~/` is expanded) |
 | Daemon log | `~/.memstate/memstated.log` |
-| Ollama URL | `http://127.0.0.1:11434` (override with `MEMSTATE_OLLAMA_URL`) |
-| Embed model | `nomic-embed-text` (override with `MEMSTATE_EMBED_MODEL`) |
+| Ollama URL | `http://127.0.0.1:11434` (override with `MEMSTATE_OLLAMA_URL` or `--ollama-url`) |
+| Embed model | `nomic-embed-text` (override with `MEMSTATE_EMBED_MODEL` or `--embed-model`) |
+| Embed timeout | `60s` per Ollama call (override with `MEMSTATE_EMBED_TIMEOUT` or `--embed-timeout`). Must cover a cold model load: a 4B model needs about 20s on first use. |
 | Semantic threshold | `0.5` (override with `MEMSTATE_SEMANTIC_THRESHOLD` or per request) |
 | Network egress | The daemon binds `127.0.0.1` only. Ollama calls, when enabled, go to the configured Ollama URL, which is usually also loopback. |
 
@@ -203,6 +234,24 @@ For a per-project database, set `MEMSTATE_DB` in the MCP config's
   }
 }
 ```
+
+The proxy starts the daemon, so it also decides the embedding model.
+Pass it as a proxy argument, and the proxy hands it to every daemon it
+spawns. A flag wins over the matching environment variable.
+
+```json
+{
+  "memstate": {
+    "command": "memstate-mcp",
+    "args": ["--embed-model", "qwen3-embedding:4b"]
+  }
+}
+```
+
+`memstate-mcp setup` asks for the model, lists what your local Ollama
+serves, and writes the choice into each agent config. Pass
+`--embed-model NAME` to skip the prompt. `--ollama-url` and
+`--embed-timeout` work the same way.
 
 ## Share one daemon across agents (optional)
 

@@ -55,6 +55,17 @@ func TestHTTPHealth(t *testing.T) {
 	if code != 200 || body["service"] != "memstate" || body["version"] == "" {
 		t.Fatalf("bad health: %d %+v", code, body)
 	}
+	if _, has := body["embed_model"]; has {
+		t.Fatalf("embed_model must be absent when embeddings are disabled: %+v", body)
+	}
+}
+
+func TestHTTPHealthReportsEmbedModel(t *testing.T) {
+	ts := newTestServerWithEmbedder(t, &Embedder{Model: "qwen3-embedding"})
+	_, body := getJSON(t, ts.URL+"/health")
+	if body["embed_model"] != "qwen3-embedding" {
+		t.Fatalf("embed_model: %+v", body)
+	}
 }
 
 func TestHTTPStoreAndGet(t *testing.T) {

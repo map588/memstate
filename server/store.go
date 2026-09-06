@@ -468,6 +468,56 @@ func (s *Store) ListMissingEmbeddings(model string) ([]MissingEmbedding, error) 
 	return out, rows.Err()
 }
 
+// EmbeddingModelStat summarizes the vectors stored under one model name.
+type EmbeddingModelStat struct {
+	Model string
+	Rows  int
+	Dim   int
+}
+
+// EmbeddingModelStats lists every model that has vectors in the store,
+// with the row count and vector dimension. Dim is the largest dim seen;
+// a model always produces one dim, so MIN and MAX agree in practice.
+func (s *Store) EmbeddingModelStats() ([]EmbeddingModelStat, error) {
+	rows, err := s.db.Query(`
+		SELECT model, COUNT(*), MAX(dim) FROM keypath_embeddings
+		GROUP BY model ORDER BY model`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []EmbeddingModelStat
+	for rows.Next() {
+		var st EmbeddingModelStat
+		if err := rows.Scan(&st.Model, &st.Rows, &st.Dim); err != nil {
+			return nil, err
+		}
+		out = append(out, st)
+	}
+	return out, rows.Err()
+}
+
+// DeleteEmbeddingsForModel removes every vector stored under model and
+// returns how many rows it removed.
+func (s *Store) DeleteEmbeddingsForModel(model string) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM keypath_embeddings WHERE model=?`, model)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// DeleteEmbeddingsExcept removes every vector NOT stored under keep and
+// returns how many rows it removed. Used to reclaim space after a model
+// switch.
+func (s *Store) DeleteEmbeddingsExcept(keep string) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM keypath_embeddings WHERE model<>?`, keep)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // KeypathEmbedding is a row from keypath_embeddings, exposed to the search
 // path after the vector is unpacked.
 type KeypathEmbedding struct {

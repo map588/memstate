@@ -33,6 +33,10 @@ type Embedder struct {
 	URL    string
 	Model  string
 	Client *http.Client
+	// Timeout bounds one Ollama call. It must cover a cold model load:
+	// a 4B-parameter model takes 20s or more to load on first use.
+	// Zero means defaultEmbedTimeout.
+	Timeout time.Duration
 
 	// errorLog throttles Ollama-unreachable warnings to once per model
 	// per hour so a long outage doesn't flood stderr.
@@ -55,42 +59,94 @@ func (e *Embedder) WaitForPending() {
 	e.inFlight.Wait()
 }
 
-// NewEmbedder reads config from env vars and returns an Embedder. It does NOT
-// probe the server — the daemon starts even if Ollama is down, and writes
-// that fail to embed silently degrade to FTS-only search.
+// NewEmbedder returns an Embedder for the given Ollama URL, model, and
+// per-call timeout. An empty (or zero) argument falls back to the
+// environment, then to the default. It does NOT probe the server — the
+// daemon starts even if Ollama is down, and writes that fail to embed
+// silently degrade to FTS-only search.
 //
 // Env vars:
 //
-//	MEMSTATE_OLLAMA_URL    (default http://127.0.0.1:11434)
-//	MEMSTATE_EMBED_MODEL   (default nomic-embed-text)
-//
-// Pass disable=true to return a nil embedder — caller branches on that.
-func NewEmbedder() *Embedder {
-	url := os.Getenv("MEMSTATE_OLLAMA_URL")
+//	MEMSTATE_OLLAMA_URL      (default http://127.0.0.1:11434)
+//	MEMSTATE_EMBED_MODEL     (default nomic-embed-text)
+//	MEMSTATE_EMBED_TIMEOUT   (default 60s; Go duration syntax)
+func NewEmbedder(url, model string, timeout time.Duration) *Embedder {
 	if url == "" {
-		url = "http://127.0.0.1:11434"
+		url = os.Getenv("MEMSTATE_OLLAMA_URL")
 	}
-	model := os.Getenv("MEMSTATE_EMBED_MODEL")
+	if url == "" {
+		url = defaultOllamaURL
+	}
 	if model == "" {
-		model = "nomic-embed-text"
+		model = os.Getenv("MEMSTATE_EMBED_MODEL")
+	}
+	if model == "" {
+		model = defaultEmbedModel
+	}
+	if timeout == 0 {
+		if v := os.Getenv("MEMSTATE_EMBED_TIMEOUT"); v != "" {
+			d, err := time.ParseDuration(v)
+			if err != nil || d <= 0 {
+				fmt.Fprintf(os.Stderr, "memstated: bad MEMSTATE_EMBED_TIMEOUT %q, using %s\n",
+					v, defaultEmbedTimeout)
+			} else {
+				timeout = d
+			}
+		}
+	}
+	if timeout == 0 {
+		timeout = defaultEmbedTimeout
 	}
 	return &Embedder{
 		URL:          url,
 		Model:        model,
-		Client:       &http.Client{Timeout: 10 * time.Second},
+		Client:       &http.Client{Timeout: timeout},
+		Timeout:      timeout,
 		errorLogCool: time.Hour,
 	}
 }
 
-// taskPrefix returns the retrieval task prefix for the configured model.
-// nomic-embed models are trained with "search_document:"/"search_query:"
-// prefixes and retrieval quality degrades without them; other models get
-// the raw text.
-func (e *Embedder) taskPrefix(kind string) string {
-	if strings.HasPrefix(e.Model, "nomic-embed") {
-		return kind + ": "
+const (
+	defaultOllamaURL    = "http://127.0.0.1:11434"
+	defaultEmbedModel   = "nomic-embed-text"
+	defaultEmbedTimeout = 60 * time.Second
+)
+
+// timeout returns the per-call bound, or the default for a zero-value
+// Embedder (tests build those directly).
+func (e *Embedder) timeout() time.Duration {
+	if e.Timeout > 0 {
+		return e.Timeout
 	}
-	return ""
+	return defaultEmbedTimeout
+}
+
+// qwenQueryInstruct is the retrieval instruction Qwen3-Embedding models
+// expect on the query side. Documents are embedded without an instruction.
+const qwenQueryInstruct = "Instruct: Given a search query, retrieve memories " +
+	"that answer the query\nQuery: "
+
+// queryText wraps a search query in the retrieval format the configured
+// model family was trained with. nomic-embed models want a
+// "search_query: " prefix; Qwen3-Embedding models want an instruction
+// line; other models get the raw text.
+func (e *Embedder) queryText(text string) string {
+	switch {
+	case strings.HasPrefix(e.Model, "nomic-embed"):
+		return "search_query: " + text
+	case strings.HasPrefix(e.Model, "qwen3-embedding"):
+		return qwenQueryInstruct + text
+	}
+	return text
+}
+
+// documentText wraps stored content in the document-side format for the
+// configured model family. Only nomic-embed models need a prefix.
+func (e *Embedder) documentText(text string) string {
+	if strings.HasPrefix(e.Model, "nomic-embed") {
+		return "search_document: " + text
+	}
+	return text
 }
 
 // embedMaxBytes caps document text sent to the embedder. Ollama's default
@@ -118,7 +174,7 @@ func truncateBytes(s string, max int) string {
 func (e *Embedder) EmbedDocument(ctx context.Context, text string) ([]float32, error) {
 	doc := truncateBytes(text, embedMaxBytes)
 	for {
-		vec, err := e.Embed(ctx, e.taskPrefix("search_document")+doc)
+		vec, err := e.Embed(ctx, e.documentText(doc))
 		var se *embedStatusError
 		if err == nil || len(doc) <= 512 ||
 			!errors.As(err, &se) || !strings.Contains(se.msg, "context length") {
@@ -130,7 +186,7 @@ func (e *Embedder) EmbedDocument(ctx context.Context, text string) ([]float32, e
 
 // EmbedQuery embeds a search query (the "query" side of retrieval).
 func (e *Embedder) EmbedQuery(ctx context.Context, text string) ([]float32, error) {
-	return e.Embed(ctx, e.taskPrefix("search_query")+text)
+	return e.Embed(ctx, e.queryText(text))
 }
 
 // Embed returns the vector for text using the configured model.
@@ -168,54 +224,71 @@ func (e *Embedder) Embed(ctx context.Context, text string) ([]float32, error) {
 // BackfillEmbeddings eagerly embeds, in the background, every current
 // keypath that lacks a vector for the configured model. Run once at daemon
 // startup: it repairs the wipe after an embed-scheme migration, populates a
-// freshly switched MEMSTATE_EMBED_MODEL, and catches up on writes that
-// happened while Ollama was down. Sequential on purpose — one in-flight
-// Ollama call at a time — and it aborts on the first embed error (Ollama is
-// down; the next startup or per-write heal retries). Nil receiver is a no-op.
+// freshly switched embed model, and catches up on writes that happened
+// while Ollama was down. Failures log and return; the next startup or
+// per-write heal retries. Nil receiver is a no-op.
 func (e *Embedder) BackfillEmbeddings(store *Store) {
 	if e == nil {
 		return
 	}
 	e.inFlight.Go(func() {
-		missing, err := store.ListMissingEmbeddings(e.Model)
+		done, skipped, err := e.Backfill(store, io.Discard)
 		if err != nil {
-			e.maybeLog(fmt.Sprintf("backfill: list missing: %v", err))
+			e.maybeLog(fmt.Sprintf("backfill aborted after %d: %v", done, err))
 			return
 		}
-		if len(missing) == 0 {
-			return
+		if done+skipped > 0 {
+			fmt.Fprintf(os.Stderr, "memstated: backfilled %d embeddings (model %s, %d skipped)\n",
+				done, e.Model, skipped)
 		}
-		done, skipped := 0, 0
-		for _, m := range missing {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			vec, err := e.EmbedDocument(ctx, m.Content)
-			cancel()
-			if err != nil {
-				// Ollama rejected this input (e.g. context overflow): skip it
-				// and keep going. A transport error means Ollama is down:
-				// abort — the next startup or per-write heal retries.
-				var se *embedStatusError
-				if errors.As(err, &se) {
-					skipped++
-					fmt.Fprintf(os.Stderr, "memstated: backfill: skipping %s/%s: %v\n",
-						m.ProjectID, m.Keypath, err)
-					continue
-				}
-				e.maybeLog(fmt.Sprintf("backfill aborted after %d/%d: embed %s/%s: %v",
-					done, len(missing), m.ProjectID, m.Keypath, err))
-				return
-			}
-			if err := store.UpsertKeypathEmbedding(m.ProjectID, m.Keypath, e.Model,
-				len(vec), packVector(vec)); err != nil {
-				e.maybeLog(fmt.Sprintf("backfill aborted after %d/%d: upsert %s/%s: %v",
-					done, len(missing), m.ProjectID, m.Keypath, err))
-				return
-			}
-			done++
-		}
-		fmt.Fprintf(os.Stderr, "memstated: backfilled %d embeddings (model %s, %d skipped)\n",
-			done, e.Model, skipped)
 	})
+}
+
+// Backfill synchronously embeds every current keypath that lacks a vector
+// for the configured model and reports how many it embedded and skipped.
+// Sequential on purpose — one in-flight Ollama call at a time. Ollama
+// rejecting one input (e.g. context overflow) skips that keypath; a
+// transport error means Ollama is down and aborts the run. Progress lines
+// go to progress, one per keypath.
+func (e *Embedder) Backfill(store *Store, progress io.Writer) (done, skipped int, err error) {
+	missing, err := store.ListMissingEmbeddings(e.Model)
+	if err != nil {
+		return 0, 0, fmt.Errorf("list missing: %w", err)
+	}
+	for i, m := range missing {
+		ctx, cancel := context.WithTimeout(context.Background(), e.timeout())
+		vec, err := e.EmbedDocument(ctx, m.Content)
+		cancel()
+		if err != nil {
+			var se *embedStatusError
+			if errors.As(err, &se) {
+				skipped++
+				fmt.Fprintf(os.Stderr, "memstated: backfill: skipping %s/%s: %v\n",
+					m.ProjectID, m.Keypath, err)
+				continue
+			}
+			return done, skipped, fmt.Errorf("embed %s/%s: %w", m.ProjectID, m.Keypath, err)
+		}
+		if err := store.UpsertKeypathEmbedding(m.ProjectID, m.Keypath, e.Model,
+			len(vec), packVector(vec)); err != nil {
+			return done, skipped, fmt.Errorf("upsert %s/%s: %w", m.ProjectID, m.Keypath, err)
+		}
+		done++
+		fmt.Fprintf(progress, "[%d/%d] %s/%s (dim %d)\n", i+1, len(missing), m.ProjectID, m.Keypath, len(vec))
+	}
+	return done, skipped, nil
+}
+
+// Rebuild drops every vector stored for the configured model and embeds
+// all current keypaths again. Use it when the model's prompt format or
+// output changes, so no stale vector survives under the same model name.
+func (e *Embedder) Rebuild(store *Store, progress io.Writer) (dropped int64, done, skipped int, err error) {
+	dropped, err = store.DeleteEmbeddingsForModel(e.Model)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("drop vectors: %w", err)
+	}
+	done, skipped, err = e.Backfill(store, progress)
+	return dropped, done, skipped, err
 }
 
 // maybeLog emits a warning to stderr no more than once per cool-down window

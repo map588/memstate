@@ -75,6 +75,7 @@ uninstall-skill:  ## Remove skill + hook from ~/.claude
 test: build  ## Run Go tests + TS end-to-end smoke + MCP regression
 	cd server && go test ./... && go vet ./...
 	node client/dist/index.js --test
+	env -u MEMSTATE_ADDR MEMSTATE_NO_UPDATE_CHECK=1 node client/dist/index.js --test --embed-model memstate-smoke-model | grep -q '"embed_model":"memstate-smoke-model"'
 	node client/test/regression.mjs
 
 # Asset names must match releaseAssetName() in server/upgrade.go —

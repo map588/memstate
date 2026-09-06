@@ -6,7 +6,8 @@ Two modes:
 - semantic:      cosine similarity between the query and embeddings of
                  the current content at each keypath. Requires Ollama
                  running locally with the configured embed model
-                 (default nomic-embed-text).
+                 (default nomic-embed-text; set MEMSTATE_EMBED_MODEL
+                 or start memstated with --embed-model to change it).
 """
 import argparse
 import sys

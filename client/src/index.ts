@@ -31,6 +31,50 @@ import {
 const { version: VERSION } = require("../package.json") as { version: string };
 
 const ATTACH_ADDR = process.env.MEMSTATE_ADDR ?? "";
+
+// Embedding options. The proxy owns the daemon it starts, so it is the
+// place to decide these. A command-line flag beats the environment; an
+// unset option is left to the daemon's own defaults.
+interface EmbedOptions {
+  model?: string;
+  ollamaUrl?: string;
+  timeout?: string;
+}
+
+const EMBED_FLAGS: Record<string, keyof EmbedOptions> = {
+  "--embed-model": "model",
+  "--ollama-url": "ollamaUrl",
+  "--embed-timeout": "timeout",
+};
+
+export function parseEmbedOptions(argv: string[], env: NodeJS.ProcessEnv): EmbedOptions {
+  const out: EmbedOptions = {};
+  if (env.MEMSTATE_EMBED_MODEL) out.model = env.MEMSTATE_EMBED_MODEL;
+  if (env.MEMSTATE_OLLAMA_URL) out.ollamaUrl = env.MEMSTATE_OLLAMA_URL;
+  if (env.MEMSTATE_EMBED_TIMEOUT) out.timeout = env.MEMSTATE_EMBED_TIMEOUT;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    const eq = arg.indexOf("=");
+    const name = eq === -1 ? arg : arg.slice(0, eq);
+    const key = EMBED_FLAGS[name];
+    if (!key) continue;
+    const value = eq === -1 ? argv[++i] : arg.slice(eq + 1);
+    if (!value) throw new Error(`${name} needs a value`);
+    out[key] = value;
+  }
+  return out;
+}
+
+// embedDaemonArgs renders the options as memstated flags for spawn.
+export function embedDaemonArgs(opts: EmbedOptions): string[] {
+  const args: string[] = [];
+  if (opts.model) args.push("--embed-model", opts.model);
+  if (opts.ollamaUrl) args.push("--ollama-url", opts.ollamaUrl);
+  if (opts.timeout) args.push("--embed-timeout", opts.timeout);
+  return args;
+}
+
+const EMBED_OPTS = parseEmbedOptions(process.argv.slice(2), process.env);
 const TEST_MODE = process.argv.includes("--test");
 const READY_BANNER = "MEMSTATE_READY addr=";
 
@@ -78,6 +122,10 @@ function resolveDaemonBin(): string {
 
 type HealthProbe = "ours" | "alien" | "empty";
 
+// daemonEmbedModel is the embed model the last successful /health probe
+// reported. Empty when the daemon runs without embeddings.
+let daemonEmbedModel = "";
+
 async function probeHealth(addr: string): Promise<HealthProbe> {
   try {
     const controller = new AbortController();
@@ -86,8 +134,10 @@ async function probeHealth(addr: string): Promise<HealthProbe> {
     clearTimeout(timer);
     if (!res.ok) return "alien";
     try {
-      const json = (await res.json()) as { service?: string };
-      return json.service === "memstate" ? "ours" : "alien";
+      const json = (await res.json()) as { service?: string; embed_model?: string };
+      if (json.service !== "memstate") return "alien";
+      daemonEmbedModel = json.embed_model ?? "";
+      return "ours";
     } catch {
       return "alien";
     }
@@ -174,13 +224,24 @@ async function attach(addr: string): Promise<void> {
   }
   if (probe === "empty") {
     await spawnDetached(addr);
-  } else if (process.env.MEMSTATE_DB) {
+  } else {
     // A daemon we just spawned inherited our env; warn only when attaching
-    // to one we didn't start, since its MEMSTATE_DB was decided earlier.
-    process.stderr.write(
-      `memstate: warning — MEMSTATE_DB is ignored when attaching to an ` +
-        `already-running daemon at ${addr}.\n`
-    );
+    // to one we didn't start, since its MEMSTATE_DB and embed model were
+    // decided earlier.
+    if (process.env.MEMSTATE_DB) {
+      process.stderr.write(
+        `memstate: warning — MEMSTATE_DB is ignored when attaching to an ` +
+          `already-running daemon at ${addr}.\n`
+      );
+    }
+    const wantModel = EMBED_OPTS.model;
+    if (wantModel && daemonEmbedModel && wantModel !== daemonEmbedModel) {
+      process.stderr.write(
+        `memstate: warning — embed model ${wantModel} is ignored; ` +
+          `the daemon at ${addr} embeds with ${daemonEmbedModel}. ` +
+          `Restart it with --embed-model ${wantModel} to switch.\n`
+      );
+    }
   }
   daemonAddr = addr;
   baseURL = process.env.MEMSTATE_LOCAL_URL ?? `http://${addr}/api/v1`;
@@ -196,7 +257,7 @@ async function spawnDetached(addr: string): Promise<void> {
   const bin = resolveDaemonBin();
   const { logFD, logPath } = openDaemonLog();
 
-  const child = spawn(bin, ["--addr", addr], {
+  const child = spawn(bin, ["--addr", addr, ...embedDaemonArgs(EMBED_OPTS)], {
     detached: true,
     stdio: ["ignore", logFD ?? "ignore", logFD ?? "ignore"],
   });
@@ -236,7 +297,7 @@ async function spawnChild(): Promise<void> {
   const bin = resolveDaemonBin();
   const { logFD, logPath } = openDaemonLog();
 
-  const child = spawn(bin, ["--owner-pid", String(process.pid)], {
+  const child = spawn(bin, ["--owner-pid", String(process.pid), ...embedDaemonArgs(EMBED_OPTS)], {
     // Not detached: keeps the child in our process group so a terminal SIGINT
     // reaches it and .kill() is authoritative.
     detached: false,

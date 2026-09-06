@@ -255,14 +255,105 @@ func TestEmbedHealsMissingVectorOnUnchangedWrite(t *testing.T) {
 	}
 }
 
-func TestEmbedderTaskPrefixes(t *testing.T) {
-	nomic := &Embedder{Model: "nomic-embed-text"}
-	if got := nomic.taskPrefix("search_query"); got != "search_query: " {
-		t.Fatalf("nomic prefix: %q", got)
+func TestEmbedderQueryAndDocumentText(t *testing.T) {
+	cases := []struct {
+		model, query, doc string
+	}{
+		{"nomic-embed-text", "search_query: q", "search_document: d"},
+		{"nomic-embed-text-v2", "search_query: q", "search_document: d"},
+		{"qwen3-embedding", qwenQueryInstruct + "q", "d"},
+		{"qwen3-embedding:4b", qwenQueryInstruct + "q", "d"},
+		{"mxbai-embed-large", "q", "d"},
 	}
-	other := &Embedder{Model: "mxbai-embed-large"}
-	if got := other.taskPrefix("search_query"); got != "" {
-		t.Fatalf("non-nomic models must get no prefix: %q", got)
+	for _, c := range cases {
+		e := &Embedder{Model: c.model}
+		if got := e.queryText("q"); got != c.query {
+			t.Errorf("%s query: got %q want %q", c.model, got, c.query)
+		}
+		if got := e.documentText("d"); got != c.doc {
+			t.Errorf("%s document: got %q want %q", c.model, got, c.doc)
+		}
+	}
+}
+
+func TestNewEmbedderArgsBeatEnv(t *testing.T) {
+	t.Setenv("MEMSTATE_EMBED_MODEL", "env-model")
+	t.Setenv("MEMSTATE_OLLAMA_URL", "http://env:1")
+	t.Setenv("MEMSTATE_EMBED_TIMEOUT", "90s")
+	if e := NewEmbedder("", "", 0); e.Model != "env-model" || e.URL != "http://env:1" || e.Timeout != 90*time.Second {
+		t.Fatalf("env fallback: %+v", e)
+	}
+	e := NewEmbedder("http://flag:2", "flag-model", 5*time.Second)
+	if e.Model != "flag-model" || e.URL != "http://flag:2" || e.Timeout != 5*time.Second || e.Client.Timeout != 5*time.Second {
+		t.Fatalf("explicit args must win: %+v", e)
+	}
+	t.Setenv("MEMSTATE_EMBED_MODEL", "")
+	t.Setenv("MEMSTATE_OLLAMA_URL", "")
+	t.Setenv("MEMSTATE_EMBED_TIMEOUT", "")
+	if e := NewEmbedder("", "", 0); e.Model != defaultEmbedModel || e.URL != defaultOllamaURL || e.Timeout != defaultEmbedTimeout {
+		t.Fatalf("defaults: %+v", e)
+	}
+	t.Setenv("MEMSTATE_EMBED_TIMEOUT", "garbage")
+	if e := NewEmbedder("", "", 0); e.Timeout != defaultEmbedTimeout {
+		t.Fatalf("bad env timeout must fall back to default: %+v", e)
+	}
+	if (&Embedder{}).timeout() != defaultEmbedTimeout {
+		t.Fatal("zero-value Embedder must use the default timeout")
+	}
+}
+
+func TestRebuildAndPruneEmbeddings(t *testing.T) {
+	ollama := mockOllama(t)
+	defer ollama.Close()
+	store := newTestStore(t)
+	_, _, _ = store.Write("p", "a", "alpha content", WriteMeta{}, false)
+	_, _, _ = store.Write("p", "b", "bravo content", WriteMeta{}, false)
+
+	// A stale vector under the current model name: rebuild must replace it.
+	stale := packVector([]float32{1, 0, 0, 0, 0, 0, 0, 0})
+	if err := store.UpsertKeypathEmbedding("p", "a", "mock", 8, stale); err != nil {
+		t.Fatal(err)
+	}
+	// A vector under another model name: rebuild must leave it alone.
+	if err := store.UpsertKeypathEmbedding("p", "a", "old-model", 3, packVector([]float32{1, 1, 1})); err != nil {
+		t.Fatal(err)
+	}
+
+	emb := newTestEmbedder(t, ollama)
+	var progress bytes.Buffer
+	dropped, done, skipped, err := emb.Rebuild(store, &progress)
+	if err != nil || dropped != 1 || done != 2 || skipped != 0 {
+		t.Fatalf("rebuild: dropped=%d done=%d skipped=%d err=%v", dropped, done, skipped, err)
+	}
+	if !strings.Contains(progress.String(), "[2/2] p/b") {
+		t.Fatalf("progress output: %q", progress.String())
+	}
+	rows, err := store.ListKeypathEmbeddings("p", "mock")
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("mock rows after rebuild: %d %v", len(rows), err)
+	}
+	for _, r := range rows {
+		if r.Keypath == "a" && cosine(r.Vector, []float32{1, 0, 0, 0, 0, 0, 0, 0}) > 0.999 {
+			t.Fatal("rebuild kept the stale vector for p/a")
+		}
+	}
+
+	stats, err := store.EmbeddingModelStats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []EmbeddingModelStat{{"mock", 2, 8}, {"old-model", 1, 3}}
+	if len(stats) != 2 || stats[0] != want[0] || stats[1] != want[1] {
+		t.Fatalf("stats: got %+v want %+v", stats, want)
+	}
+
+	n, err := store.DeleteEmbeddingsExcept("mock")
+	if err != nil || n != 1 {
+		t.Fatalf("prune: n=%d err=%v", n, err)
+	}
+	stats, _ = store.EmbeddingModelStats()
+	if len(stats) != 1 || stats[0].Model != "mock" {
+		t.Fatalf("stats after prune: %+v", stats)
 	}
 }
 

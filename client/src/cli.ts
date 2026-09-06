@@ -27,10 +27,15 @@ async function main(): Promise<void> {
 memstate-mcp CLI
 
 Usage:
-  memstate-mcp setup   Write MCP config into detected AI agents
+  memstate-mcp setup [--embed-model NAME]
+                       Write MCP config into detected AI agents; picks the
+                       Ollama embedding model (interactive when omitted)
   memstate-mcp init    Write agent instruction files in the current project
 
 When no subcommand is given, stdin/stdout are used as an MCP server.
+Server flags: --embed-model NAME, --ollama-url URL, --embed-timeout D
+(each also readable from MEMSTATE_EMBED_MODEL / MEMSTATE_OLLAMA_URL /
+MEMSTATE_EMBED_TIMEOUT; the flag wins).
       `.trim()
       );
       break;
