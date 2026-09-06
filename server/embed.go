@@ -123,8 +123,11 @@ func (e *Embedder) timeout() time.Duration {
 
 // qwenQueryInstruct is the retrieval instruction Qwen3-Embedding models
 // expect on the query side. Documents are embedded without an instruction.
-const qwenQueryInstruct = "Instruct: Given a search query, retrieve memories " +
-	"that answer the query\nQuery: "
+// Wording measured 2026-09-06 on 40 queries over 661 memories: this task
+// description gave MRR 0.74 on vague queries against 0.66 for a generic
+// "retrieve memories" wording and 0.62 with no instruction.
+const qwenQueryInstruct = "Instruct: Given a question about a software project, " +
+	"retrieve the engineering note that answers it\nQuery: "
 
 // queryText wraps a search query in the retrieval format the configured
 // model family was trained with. nomic-embed models want a
