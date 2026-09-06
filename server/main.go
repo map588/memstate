@@ -180,9 +180,12 @@ func main() {
 	// writes made while Ollama was down). Non-blocking; failures just log.
 	embedder.BackfillEmbeddings(store)
 
-	handler := newRouter(store, shutdownFn, embedder)
 	// Idle-exit is only meaningful for long-lived detached daemons; when
 	// --owner-pid is set the parent already owns our lifetime.
+	if *ownerPIDFlag == 0 {
+		daemonIdleTimeout = idleTimeout
+	}
+	handler := newRouter(store, shutdownFn, embedder)
 	if idleTimeout > 0 && *ownerPIDFlag == 0 {
 		var lastActivity atomic.Int64
 		lastActivity.Store(time.Now().UnixNano())
@@ -248,20 +251,23 @@ func isAddrInUse(err error) bool {
 }
 
 func looksLikeOurDaemon(addr string) bool {
+	h, err := fetchHealth(addr)
+	return err == nil && h.Service == healthServiceName
+}
+
+// fetchHealth returns the /health document of the daemon at addr, or an
+// error when nothing answers within 500ms or the reply is not ours.
+func fetchHealth(addr string) (*healthResponse, error) {
 	client := &http.Client{Timeout: 500 * time.Millisecond}
 	resp, err := client.Get("http://" + addr + "/health")
-	if err != nil || resp == nil {
-		return false
+	if err != nil {
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return false
+		return nil, fmt.Errorf("health: HTTP %d", resp.StatusCode)
 	}
-	h, err := decodeHealth(resp.Body)
-	if err != nil {
-		return false
-	}
-	return h.Service == healthServiceName
+	return decodeHealth(resp.Body)
 }
 
 // activityMiddleware stamps lastActivity on every incoming request so the
@@ -669,13 +675,7 @@ func runningEmbedConfig(addr string) (string, float32) {
 	if addr == "" {
 		addr = defaultAddr
 	}
-	client := &http.Client{Timeout: 500 * time.Millisecond}
-	resp, err := client.Get("http://" + addr + "/health")
-	if err != nil {
-		return "", 0
-	}
-	defer resp.Body.Close()
-	h, err := decodeHealth(resp.Body)
+	h, err := fetchHealth(addr)
 	if err != nil {
 		return "", 0
 	}

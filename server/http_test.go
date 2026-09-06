@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func newTestServer(t *testing.T) *httptest.Server {
@@ -60,11 +61,22 @@ func TestHTTPHealth(t *testing.T) {
 	}
 }
 
-func TestHTTPHealthReportsEmbedModel(t *testing.T) {
-	ts := newTestServerWithEmbedder(t, &Embedder{Model: "qwen3-embedding"})
+func TestHTTPHealthReportsEmbedConfig(t *testing.T) {
+	daemonIdleTimeout = 30 * time.Minute
+	t.Cleanup(func() { daemonIdleTimeout = 0 })
+	ts := newTestServerWithEmbedder(t, &Embedder{Model: "qwen3-embedding", URL: "http://o:1", Timeout: 45 * time.Second})
 	_, body := getJSON(t, ts.URL+"/health")
-	if body["embed_model"] != "qwen3-embedding" || body["semantic_threshold"] != float64(defaultThreshold) {
-		t.Fatalf("embed_model / semantic_threshold: %+v", body)
+	want := map[string]any{
+		"embed_model":        "qwen3-embedding",
+		"semantic_threshold": float64(defaultThreshold),
+		"ollama_url":         "http://o:1",
+		"embed_timeout":      "45s",
+		"idle_timeout":       "30m0s",
+	}
+	for k, v := range want {
+		if body[k] != v {
+			t.Errorf("%s: got %v want %v (body %+v)", k, body[k], v, body)
+		}
 	}
 }
 

@@ -205,7 +205,10 @@ func cmdUpgrade(args []string) int {
 	if restartAddr == "" {
 		restartAddr = defaultAddr
 	}
-	wasRunning := looksLikeOurDaemon(restartAddr)
+	// Read the running daemon's effective config first, so the restart
+	// keeps its embed model, thresholds and idle timeout.
+	prev, err := fetchHealth(restartAddr)
+	wasRunning := err == nil && prev.Service == healthServiceName
 	if wasRunning {
 		fmt.Printf("stopping daemon at %s\n", restartAddr)
 		if err := stopAndWait(restartAddr, 5*time.Second); err != nil {
@@ -223,7 +226,7 @@ func cmdUpgrade(args []string) int {
 	}
 
 	if wasRunning {
-		if err := startDetachedDaemon(exePath, restartAddr); err != nil {
+		if err := startDetachedDaemon(exePath, restartAddr, prev); err != nil {
 			fmt.Fprintf(os.Stderr,
 				"memstated upgrade: binary upgraded but restart failed: %v\n"+
 					"start it manually: memstated --addr %s\n", err, restartAddr)
@@ -300,10 +303,37 @@ func stopAndWait(addr string, timeout time.Duration) error {
 	return fmt.Errorf("daemon at %s did not exit within %v", addr, timeout)
 }
 
+// restartPlan turns the config a daemon reported in /health into the flags
+// and environment that start an equivalent daemon on addr. A nil or empty
+// report gives just --addr, so the new daemon falls back to its defaults.
+func restartPlan(prev *healthResponse, addr string) (args, env []string) {
+	args = []string{"--addr", addr}
+	if prev == nil {
+		return args, nil
+	}
+	if prev.EmbedModel != "" {
+		args = append(args, "--embed-model", prev.EmbedModel)
+	}
+	if prev.OllamaURL != "" {
+		args = append(args, "--ollama-url", prev.OllamaURL)
+	}
+	if prev.EmbedTimeout != "" {
+		args = append(args, "--embed-timeout", prev.EmbedTimeout)
+	}
+	if prev.IdleTimeout != "" {
+		args = append(args, "--idle-timeout", prev.IdleTimeout)
+	}
+	if prev.SemanticThreshold > 0 {
+		env = append(env, fmt.Sprintf("MEMSTATE_SEMANTIC_THRESHOLD=%g", prev.SemanticThreshold))
+	}
+	return args, env
+}
+
 // startDetachedDaemon launches the (new) binary as a shared daemon in its own
-// session, stderr/stdout appended to ~/.memstate/memstated.log — the same
-// file the MCP proxy tees child-mode daemons into.
-func startDetachedDaemon(exePath, addr string) error {
+// session with the config prev reported (see restartPlan), stderr/stdout
+// appended to ~/.memstate/memstated.log — the same file the MCP proxy tees
+// child-mode daemons into.
+func startDetachedDaemon(exePath, addr string, prev *healthResponse) error {
 	var logF *os.File
 	if home, err := os.UserHomeDir(); err == nil {
 		dir := filepath.Join(home, ".memstate")
@@ -311,7 +341,9 @@ func startDetachedDaemon(exePath, addr string) error {
 		logF, _ = os.OpenFile(filepath.Join(dir, "memstated.log"),
 			os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
 	}
-	cmd := exec.Command(exePath, "--addr", addr)
+	args, env := restartPlan(prev, addr)
+	cmd := exec.Command(exePath, args...)
+	cmd.Env = append(os.Environ(), env...)
 	cmd.SysProcAttr = detachSysProcAttr()
 	if logF != nil {
 		cmd.Stdout = logF
