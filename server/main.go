@@ -330,8 +330,11 @@ func printUsage() {
   memstated import [--project ID] [--force] [--db PATH] FILE
                                    timestamp-merge an export file into the local DB
                                    (newer keys win; new keys keep their history)
-  memstated embed status [--db PATH]
-                                   list embedding models in the DB with row counts
+  memstated embed status [--watch] [--probe] [--model NAME] [--addr HOST:PORT] [--db PATH]
+                                   coverage bar per model, missing counts, content
+                                   sizes, cosine histogram and threshold fit;
+                                   --watch redraws every 2s, --probe times Ollama;
+                                   --model defaults to the running daemon's model
   memstated embed rebuild [--model NAME] [--ollama-url URL] [--embed-timeout D] [--db PATH]
                                    drop and recompute every vector for one model
   memstated embed prune [--keep NAME] [--db PATH]
@@ -588,9 +591,18 @@ func cmdEmbed(args []string) int {
 	model := fs.String("model", "", "embed model (default MEMSTATE_EMBED_MODEL or nomic-embed-text)")
 	keep := fs.String("keep", "", "prune: model to keep (default MEMSTATE_EMBED_MODEL or nomic-embed-text)")
 	ollamaURL := fs.String("ollama-url", "", "Ollama base URL (default MEMSTATE_OLLAMA_URL or http://127.0.0.1:11434)")
-	embedTimeout := fs.Duration("embed-timeout", 0, "rebuild: max time per Ollama call (default MEMSTATE_EMBED_TIMEOUT or 60s)")
+	embedTimeout := fs.Duration("embed-timeout", 0, "max time per Ollama call (default MEMSTATE_EMBED_TIMEOUT or 60s)")
+	watch := fs.Bool("watch", false, "status: redraw every 2s until interrupted")
+	probe := fs.Bool("probe", false, "status: time one live Ollama embed call")
+	addr := fs.String("addr", "", "running daemon to read the model from (default MEMSTATE_ADDR or 127.0.0.1:8765)")
 	if err := fs.Parse(rest); err != nil {
 		return 2
+	}
+	// The daemon's own model is the truth for what search uses. Without
+	// --model, prefer it over the shell environment, which may be empty
+	// when the model was given as a daemon flag.
+	if *model == "" {
+		*model = runningEmbedModel(*addr)
 	}
 	store, _, err := openStoreCLI(*db)
 	if err != nil {
@@ -601,25 +613,23 @@ func cmdEmbed(args []string) int {
 
 	switch verb {
 	case "status":
-		stats, err := store.EmbeddingModelStats()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "memstated embed status: %v\n", err)
-			return 1
-		}
-		configured := NewEmbedder("", *model, 0).Model
-		fmt.Printf("configured model: %s\n", configured)
-		if len(stats) == 0 {
-			fmt.Println("no vectors stored")
-			return 0
-		}
-		for _, st := range stats {
-			mark := " "
-			if st.Model == configured {
-				mark = "*"
+		emb := NewEmbedder(*ollamaURL, *model, *embedTimeout)
+		for {
+			report, err := collectEmbedStatus(store, emb, envThreshold(), *probe)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "memstated embed status: %v\n", err)
+				return 1
 			}
-			fmt.Printf("%s %-32s %6d rows  dim %d\n", mark, st.Model, st.Rows, st.Dim)
+			if *watch {
+				fmt.Print("\033[H\033[2J") // clear screen, cursor home
+			}
+			renderEmbedStatus(os.Stdout, report)
+			if !*watch {
+				return 0
+			}
+			fmt.Printf("\n%s  refresh 2s, Ctrl-C to stop\n", time.Now().Format("15:04:05"))
+			time.Sleep(2 * time.Second)
 		}
-		return 0
 	case "rebuild":
 		emb := NewEmbedder(*ollamaURL, *model, *embedTimeout)
 		dropped, done, skipped, err := emb.Rebuild(store, os.Stdout)
@@ -642,6 +652,29 @@ func cmdEmbed(args []string) int {
 	}
 	fmt.Fprintf(os.Stderr, "memstated embed: unknown verb %q (expected status|rebuild|prune)\n", verb)
 	return 2
+}
+
+// runningEmbedModel returns the embed_model a live daemon reports in
+// /health, or "" when none answers within 500ms. addr "" means
+// MEMSTATE_ADDR, then the default shared address.
+func runningEmbedModel(addr string) string {
+	if addr == "" {
+		addr = os.Getenv("MEMSTATE_ADDR")
+	}
+	if addr == "" {
+		addr = defaultAddr
+	}
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	resp, err := client.Get("http://" + addr + "/health")
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	h, err := decodeHealth(resp.Body)
+	if err != nil {
+		return ""
+	}
+	return h.EmbedModel
 }
 
 func cmdStop(args []string) int {

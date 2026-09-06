@@ -342,7 +342,7 @@ func TestRebuildAndPruneEmbeddings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []EmbeddingModelStat{{"mock", 2, 8}, {"old-model", 1, 3}}
+	want := []EmbeddingModelStat{{"mock", 2, 8, 64}, {"old-model", 1, 3, 12}}
 	if len(stats) != 2 || stats[0] != want[0] || stats[1] != want[1] {
 		t.Fatalf("stats: got %+v want %+v", stats, want)
 	}

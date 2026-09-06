@@ -168,10 +168,20 @@ model's vectors on its next start. Use the `embed` subcommand to inspect
 or rewrite the sets directly:
 
 ```bash
-memstated embed status                          # models in the DB, row counts, dims
+memstated embed status [--watch] [--probe]      # dashboard: coverage bars, sizes, threshold fit
 memstated embed rebuild --model qwen3-embedding:4b   # drop and recompute one model's vectors
 memstated embed prune --keep qwen3-embedding:4b      # delete every other model's vectors
 ```
+
+`embed status` shows, per model, a coverage bar of current keypaths
+with a vector, the vector dimension, storage size, and row count. It
+also shows how many keypaths exceed the embed cap (only their head is
+embedded), a histogram of pairwise cosine scores for the configured
+model, the nearest-neighbour percentiles, and the share of pairs that
+pass the current threshold. Use the last two to set
+`MEMSTATE_SEMANTIC_THRESHOLD` for a new model: raise it until few pairs
+pass but most nearest neighbours still do. `--watch` redraws every two
+seconds while a backfill runs. `--probe` times one live Ollama call.
 
 `rebuild` is the tool for a change in embedding structure under the same
 model name: a new prompt format, a new Ollama build with different

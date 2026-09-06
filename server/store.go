@@ -473,6 +473,7 @@ type EmbeddingModelStat struct {
 	Model string
 	Rows  int
 	Dim   int
+	Bytes int64 // total vector storage
 }
 
 // EmbeddingModelStats lists every model that has vectors in the store,
@@ -480,7 +481,7 @@ type EmbeddingModelStat struct {
 // a model always produces one dim, so MIN and MAX agree in practice.
 func (s *Store) EmbeddingModelStats() ([]EmbeddingModelStat, error) {
 	rows, err := s.db.Query(`
-		SELECT model, COUNT(*), MAX(dim) FROM keypath_embeddings
+		SELECT model, COUNT(*), MAX(dim), SUM(LENGTH(vector)) FROM keypath_embeddings
 		GROUP BY model ORDER BY model`)
 	if err != nil {
 		return nil, err
@@ -489,7 +490,7 @@ func (s *Store) EmbeddingModelStats() ([]EmbeddingModelStat, error) {
 	var out []EmbeddingModelStat
 	for rows.Next() {
 		var st EmbeddingModelStat
-		if err := rows.Scan(&st.Model, &st.Rows, &st.Dim); err != nil {
+		if err := rows.Scan(&st.Model, &st.Rows, &st.Dim, &st.Bytes); err != nil {
 			return nil, err
 		}
 		out = append(out, st)
