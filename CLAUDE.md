@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Build & test
 
-Two-process project: Go daemon under `server/`, TypeScript MCP proxy under `client/`. Requires Go 1.26+ and Node 18+.
+Two-process project: Go daemon under `server/`, TypeScript MCP proxy under `client/`. Requires Go 1.27+ and Node 18+.
 
 The Makefile at the repo root is the canonical entrypoint:
 

@@ -11,7 +11,7 @@ your agent starts and stops when your agent stops.
 
 ## Install
 
-You need Go 1.26+ and Node 18+. Semantic search also needs a local
+You need Go 1.27+ and Node 18+. Semantic search also needs a local
 [Ollama](https://ollama.com) with an embedding model pulled:
 
 ```bash
