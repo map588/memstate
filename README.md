@@ -30,6 +30,22 @@ If Ollama does not run, memstate still works. Writes and FTS search
 are not affected. Semantic search returns 503 until the embedder is
 available.
 
+A server with an OpenAI-compatible embeddings API also works, for
+example the llama.cpp server, LM Studio, or vLLM. Set
+`MEMSTATE_OLLAMA_URL` (or `--ollama-url`) to its base URL, which ends in
+`/v1`. The daemon then sends `POST {url}/embeddings` with
+`{"model", "input"}` instead of Ollama's `/api/embeddings`. For
+example, with the llama.cpp server and nomic-embed-text:
+
+```bash
+llama-server -m nomic-embed-text-v1.5.Q8_0.gguf --embeddings --pooling mean --alias nomic-embed-text --port 8081
+memstated --addr 127.0.0.1:8765 --ollama-url http://127.0.0.1:8081/v1
+```
+
+When the server rejects a long memory ("context length" from Ollama,
+"too large to process" from llama.cpp), the daemon halves the text and
+tries again.
+
 ```bash
 git clone git@github.com:map588/memstate.git
 cd memstate
@@ -227,7 +243,7 @@ search, but its full version history stays readable.
 |---|---|
 | SQLite DB | `~/.memstate/memstate.db` (override with `MEMSTATE_DB`, and `~/` is expanded) |
 | Daemon log | `~/.memstate/memstated.log` |
-| Ollama URL | `http://127.0.0.1:11434` (override with `MEMSTATE_OLLAMA_URL` or `--ollama-url`) |
+| Ollama URL | `http://127.0.0.1:11434` (override with `MEMSTATE_OLLAMA_URL` or `--ollama-url`; a URL that ends in `/v1` selects an OpenAI-compatible API) |
 | Embed model | `nomic-embed-text` (override with `MEMSTATE_EMBED_MODEL` or `--embed-model`) |
 | Embed timeout | `60s` per Ollama call (override with `MEMSTATE_EMBED_TIMEOUT` or `--embed-timeout`). Must cover a cold model load: a 4B model needs about 20s on first use. |
 | Semantic threshold | `0.5` (override with `MEMSTATE_SEMANTIC_THRESHOLD` or per request) |

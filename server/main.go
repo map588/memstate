@@ -117,7 +117,7 @@ func main() {
 	embedModelFlag := fs.String("embed-model", "",
 		"Ollama model for semantic search (default nomic-embed-text). Env: MEMSTATE_EMBED_MODEL.")
 	ollamaURLFlag := fs.String("ollama-url", "",
-		"Ollama base URL (default http://127.0.0.1:11434). Env: MEMSTATE_OLLAMA_URL.")
+		"Ollama base URL (default http://127.0.0.1:11434), or an OpenAI-compatible API base URL that ends in /v1. Env: MEMSTATE_OLLAMA_URL.")
 	embedTimeoutFlag := fs.Duration("embed-timeout", 0,
 		"max time for one Ollama embed call, must cover a cold model load (default 60s). "+
 			"Env: MEMSTATE_EMBED_TIMEOUT.")
@@ -316,7 +316,7 @@ func printUsage() {
   memstated --owner-pid N          shut down when process N disappears
   memstated --idle-timeout 30m     shut down after N of no-request idleness
   memstated --embed-model NAME     Ollama model for semantic search
-  memstated --ollama-url URL       Ollama base URL
+  memstated --ollama-url URL       Ollama base URL, or an OpenAI-compatible base URL ending in /v1
   memstated --embed-timeout 60s    max time per Ollama embed call (cold load included)
   memstated stop   [--addr HOST:PORT]   send a shutdown request to a running daemon
   memstated status [--addr HOST:PORT]   query /health
@@ -352,7 +352,7 @@ Environment:
   MEMSTATE_DB             SQLite file path (default ~/.memstate/memstate.db)
   MEMSTATE_IDLE_TIMEOUT   default for --idle-timeout (e.g. 30m)
   MEMSTATE_EMBED_MODEL    default for --embed-model (nomic-embed-text)
-  MEMSTATE_OLLAMA_URL     default for --ollama-url (http://127.0.0.1:11434)
+  MEMSTATE_OLLAMA_URL     default for --ollama-url (http://127.0.0.1:11434; a /v1 URL is OpenAI-compatible)
   MEMSTATE_EMBED_TIMEOUT  default for --embed-timeout (60s)
   MEMSTATE_NO_UPDATE_CHECK  set to disable the daemon's daily release check
 `)
@@ -596,7 +596,7 @@ func cmdEmbed(args []string) int {
 	db := fs.String("db", "", "SQLite file (default MEMSTATE_DB or ~/.memstate/memstate.db)")
 	model := fs.String("model", "", "embed model (default MEMSTATE_EMBED_MODEL or nomic-embed-text)")
 	keep := fs.String("keep", "", "prune: model to keep (default MEMSTATE_EMBED_MODEL or nomic-embed-text)")
-	ollamaURL := fs.String("ollama-url", "", "Ollama base URL (default MEMSTATE_OLLAMA_URL or http://127.0.0.1:11434)")
+	ollamaURL := fs.String("ollama-url", "", "Ollama base URL, or an OpenAI-compatible base URL ending in /v1 (default MEMSTATE_OLLAMA_URL or http://127.0.0.1:11434)")
 	embedTimeout := fs.Duration("embed-timeout", 0, "max time per Ollama call (default MEMSTATE_EMBED_TIMEOUT or 60s)")
 	watch := fs.Bool("watch", false, "status: redraw every 2s until interrupted")
 	probe := fs.Bool("probe", false, "status: time one live Ollama embed call")
