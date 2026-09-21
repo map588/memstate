@@ -22,7 +22,13 @@ import (
 
 func buildDaemon(t *testing.T) string {
 	t.Helper()
-	bin := filepath.Join(t.TempDir(), "memstated")
+	name := "memstated"
+	if runtime.GOOS == "windows" {
+		// Windows runs only files with an executable extension; "go build -o"
+		// does not add one when the name is given.
+		name += ".exe"
+	}
+	bin := filepath.Join(t.TempDir(), name)
 	cmd := exec.Command("go", "build", "-o", bin, ".")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, out)
