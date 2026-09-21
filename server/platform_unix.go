@@ -10,6 +10,9 @@ import (
 	"time"
 )
 
+// errAddrInUse is the errno of a bind to an address that another socket holds.
+const errAddrInUse = syscall.EADDRINUSE
+
 // detachSysProcAttr puts the restarted daemon in its own session so it
 // survives the upgrade process (and its terminal) exiting.
 func detachSysProcAttr() *syscall.SysProcAttr {
