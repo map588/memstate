@@ -10,6 +10,9 @@ import (
 	"time"
 )
 
+// isPlatformAddrInUse adds nothing on Unix: syscall.EADDRINUSE covers it.
+func isPlatformAddrInUse(error) bool { return false }
+
 // detachSysProcAttr puts the restarted daemon in its own session so it
 // survives the upgrade process (and its terminal) exiting.
 func detachSysProcAttr() *syscall.SysProcAttr {

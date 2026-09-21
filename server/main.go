@@ -244,7 +244,7 @@ func handleBusyPort(addr string) {
 
 func isAddrInUse(err error) bool {
 	var opErr *net.OpError
-	if errors.As(err, &opErr) && errors.Is(opErr.Err, syscall.EADDRINUSE) {
+	if errors.As(err, &opErr) && (errors.Is(opErr.Err, syscall.EADDRINUSE) || isPlatformAddrInUse(opErr.Err)) {
 		return true
 	}
 	return strings.Contains(err.Error(), "address already in use")

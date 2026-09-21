@@ -3,12 +3,19 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"syscall"
 
 	"golang.org/x/sys/windows"
 )
+
+// isPlatformAddrInUse reports the Windows form of "address already in use".
+// Winsock returns WSAEADDRINUSE (10048), which is not syscall.EADDRINUSE.
+func isPlatformAddrInUse(err error) bool {
+	return errors.Is(err, windows.WSAEADDRINUSE)
+}
 
 // detachSysProcAttr detaches the restarted daemon from the console so it
 // survives the upgrade process exiting.
