@@ -63,6 +63,24 @@ test, and the MCP regression suite (`client/test/regression.mjs`), which
 calls each tool through the real proxy and daemon against a temporary
 database.
 
+### Daemon only, without Go
+
+To get only `memstated` as a prebuilt binary (linux/amd64 or
+darwin/arm64), run the install script. It downloads the newest
+[release](https://github.com/map588/memstate/releases) into
+`~/.local/bin`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/map588/memstate/main/install.sh | bash
+```
+
+Set `MEMSTATE_VERSION=v0.7.0` to pin a release, or
+`MEMSTATE_INSTALL_DIR` to change the directory. Later,
+`memstated upgrade` replaces the binary with the newest release.
+
+The script does not install the MCP proxy. `memstate-mcp` needs Node
+and is built from this repository with `make install` or `make build`.
+
 ### Claude Code skill and hook (optional)
 
 If you use Claude Code, `make install-skill` installs the bundled
