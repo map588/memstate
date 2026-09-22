@@ -43,7 +43,7 @@ import (
 const (
 	defaultAddr       = "127.0.0.1:8765" // used only in --addr / stop / status
 	healthServiceName = "memstate"
-	healthVersion     = "0.7.0"
+	healthVersion     = "0.7.1"
 	readyBanner       = "MEMSTATE_READY addr="
 )
 
