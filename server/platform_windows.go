@@ -10,6 +10,11 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// errAddrInUse is the errno of a bind to an address that another socket
+// holds. Windows reports WSAEADDRINUSE (10048); syscall.EADDRINUSE is only
+// an invented value on Windows and never matches a real bind error.
+const errAddrInUse = windows.WSAEADDRINUSE
+
 // detachSysProcAttr detaches the restarted daemon from the console so it
 // survives the upgrade process exiting.
 // 0x00000008 = DETACHED_PROCESS, 0x00000200 = CREATE_NEW_PROCESS_GROUP.

@@ -22,7 +22,13 @@ import (
 
 func buildDaemon(t *testing.T) string {
 	t.Helper()
-	bin := filepath.Join(t.TempDir(), "memstated")
+	name := "memstated"
+	if runtime.GOOS == "windows" {
+		// Windows runs only files with an executable extension; "go build -o"
+		// does not add one when the name is given.
+		name += ".exe"
+	}
+	bin := filepath.Join(t.TempDir(), name)
 	cmd := exec.Command("go", "build", "-o", bin, ".")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, out)
@@ -324,4 +330,24 @@ func intStr(n int) string {
 		}
 		return string(b)
 	})()
+}
+
+// TestIsAddrInUse binds a second listener to the address of a first one.
+// That bind error must count as "address in use" on every platform: on
+// Windows the errno is WSAEADDRINUSE, not syscall.EADDRINUSE. CI runs on
+// Linux only, so this test is the one that shows the Windows case there.
+func TestIsAddrInUse(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	second, err := net.Listen("tcp", l.Addr().String())
+	if err == nil {
+		second.Close()
+		t.Fatal("a second listener on the same address succeeded")
+	}
+	if !isAddrInUse(err) {
+		t.Fatalf("isAddrInUse(%v) = false, want true", err)
+	}
 }
