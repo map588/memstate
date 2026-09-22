@@ -39,7 +39,7 @@ case "$arch" in
 esac
 asset="memstated-$goos-$goarch"
 case "$asset" in
-  memstated-linux-amd64|memstated-darwin-arm64) ;;
+  memstated-linux-amd64|memstated-linux-arm64|memstated-darwin-amd64|memstated-darwin-arm64) ;;
   *) die "no release binary for $goos/$goarch; build from source with 'make install'" ;;
 esac
 

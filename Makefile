@@ -80,10 +80,12 @@ test: build  ## Run Go tests + TS end-to-end smoke + MCP regression
 
 # Asset names must match releaseAssetName() in server/upgrade.go —
 # `memstated upgrade` downloads them by exact name.
-release:  ## Build static memstated for linux/amd64, darwin/arm64, windows/amd64 under dist/
+release:  ## Build static memstated for linux/{amd64,arm64}, darwin/{amd64,arm64}, windows/amd64 under dist/
 	rm -rf $(DIST)
 	mkdir -p $(DIST)
 	cd server && CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ../$(DIST)/memstated-linux-amd64 .
+	cd server && CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o ../$(DIST)/memstated-linux-arm64 .
+	cd server && CGO_ENABLED=0 GOOS=darwin  GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ../$(DIST)/memstated-darwin-amd64 .
 	cd server && CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o ../$(DIST)/memstated-darwin-arm64 .
 	cd server && CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ../$(DIST)/memstated-windows-amd64.exe .
 	@echo

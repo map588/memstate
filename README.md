@@ -65,8 +65,8 @@ database.
 
 ### Daemon only, without Go
 
-To get only `memstated` as a prebuilt binary (linux/amd64 or
-darwin/arm64), run the install script. It downloads the newest
+To get only `memstated` as a prebuilt binary (Linux or macOS, amd64 or
+arm64), run the install script. It downloads the newest
 [release](https://github.com/map588/memstate/releases) into
 `~/.local/bin`:
 
