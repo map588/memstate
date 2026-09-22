@@ -67,7 +67,8 @@ func (e *Embedder) WaitForPending() {
 //
 // Env vars:
 //
-//	MEMSTATE_OLLAMA_URL      (default http://127.0.0.1:11434)
+//	MEMSTATE_OLLAMA_URL      (default http://127.0.0.1:11434; a URL that ends
+//	                         in /v1 selects an OpenAI-compatible API)
 //	MEMSTATE_EMBED_MODEL     (default nomic-embed-text)
 //	MEMSTATE_EMBED_TIMEOUT   (default 60s; Go duration syntax)
 func NewEmbedder(url, model string, timeout time.Duration) *Embedder {
@@ -180,11 +181,19 @@ func (e *Embedder) EmbedDocument(ctx context.Context, text string) ([]float32, e
 		vec, err := e.Embed(ctx, e.documentText(doc))
 		var se *embedStatusError
 		if err == nil || len(doc) <= 512 ||
-			!errors.As(err, &se) || !strings.Contains(se.msg, "context length") {
+			!errors.As(err, &se) || !contextOverflow(se.msg) {
 			return vec, err
 		}
 		doc = truncateBytes(doc, len(doc)/2)
 	}
+}
+
+// contextOverflow reports whether an embedding server rejected the input
+// because it is longer than the model's context. Ollama says the input
+// "exceeds the context length"; the llama.cpp server says it "is too large
+// to process".
+func contextOverflow(msg string) bool {
+	return strings.Contains(msg, "context length") || strings.Contains(msg, "too large to process")
 }
 
 // EmbedQuery embeds a search query (the "query" side of retrieval).
@@ -192,36 +201,68 @@ func (e *Embedder) EmbedQuery(ctx context.Context, text string) ([]float32, erro
 	return e.Embed(ctx, e.queryText(text))
 }
 
-// Embed returns the vector for text using the configured model.
+// openAIBase reports whether URL is the base of an OpenAI-compatible API.
+// By convention such a base ends in /v1: the llama.cpp server, LM Studio,
+// vLLM, and Ollama's own /v1 all serve POST {base}/embeddings.
+func (e *Embedder) openAIBase() bool {
+	return strings.HasSuffix(strings.TrimRight(e.URL, "/"), "/v1")
+}
+
+// Embed returns the vector for text using the configured model. It uses
+// Ollama's native API (POST {URL}/api/embeddings) unless URL ends in /v1,
+// where it uses the OpenAI embeddings API (POST {URL}/embeddings).
 func (e *Embedder) Embed(ctx context.Context, text string) ([]float32, error) {
-	body, _ := json.Marshal(map[string]string{"model": e.Model, "prompt": text})
-	req, err := http.NewRequestWithContext(ctx, "POST",
-		e.URL+"/api/embeddings", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := e.Client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		raw, _ := io.ReadAll(resp.Body)
-		return nil, &embedStatusError{
-			msg: fmt.Sprintf("ollama /api/embeddings: %s: %s", resp.Status, string(raw)),
+	if e.openAIBase() {
+		var out struct {
+			Data []struct {
+				Embedding []float32 `json:"embedding"`
+			} `json:"data"`
 		}
+		err := e.post(ctx, strings.TrimRight(e.URL, "/")+"/embeddings", "openai-compatible /embeddings",
+			map[string]string{"model": e.Model, "input": text}, &out)
+		if err != nil {
+			return nil, err
+		}
+		if len(out.Data) == 0 || len(out.Data[0].Embedding) == 0 {
+			return nil, errors.New("embedding server returned empty embedding")
+		}
+		return out.Data[0].Embedding, nil
 	}
 	var out struct {
 		Embedding []float32 `json:"embedding"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	err := e.post(ctx, e.URL+"/api/embeddings", "ollama /api/embeddings",
+		map[string]string{"model": e.Model, "prompt": text}, &out)
+	if err != nil {
 		return nil, err
 	}
 	if len(out.Embedding) == 0 {
 		return nil, errors.New("ollama returned empty embedding")
 	}
 	return out.Embedding, nil
+}
+
+// post sends payload as JSON to url and decodes the reply into out. A reply
+// other than 200 becomes an embedStatusError (server reachable, input
+// rejected); a transport error comes back as is (server down). what names
+// the endpoint in the error message.
+func (e *Embedder) post(ctx context.Context, url, what string, payload, out any) error {
+	body, _ := json.Marshal(payload)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := e.Client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		raw, _ := io.ReadAll(resp.Body)
+		return &embedStatusError{msg: fmt.Sprintf("%s: %s: %s", what, resp.Status, string(raw))}
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
 }
 
 // BackfillEmbeddings eagerly embeds, in the background, every current

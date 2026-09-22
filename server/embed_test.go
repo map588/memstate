@@ -522,3 +522,66 @@ func TestEmbedDocumentHalvesOnContextOverflow(t *testing.T) {
 		t.Fatalf("accepted prompt should be halved under the limit, got %d bytes", len(accepted))
 	}
 }
+
+// mockOpenAI serves only POST /v1/embeddings, in the OpenAI shape that the
+// llama.cpp server uses. An input longer than maxBytes (when maxBytes > 0)
+// gets the llama.cpp error for input over the batch size. Each embedded
+// input is appended to accepted.
+func mockOpenAI(t *testing.T, maxBytes int, accepted *[]string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/v1/embeddings" {
+			http.NotFound(w, r)
+			return
+		}
+		var in struct{ Model, Input string }
+		_ = json.NewDecoder(r.Body).Decode(&in)
+		if maxBytes > 0 && len(in.Input) > maxBytes {
+			w.WriteHeader(500)
+			_, _ = w.Write([]byte(`{"error":{"code":500,"message":"input (2206 tokens) is too large to process. increase the physical batch size (current batch size: 512)","type":"server_error"}}`))
+			return
+		}
+		*accepted = append(*accepted, in.Input)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"object": "list",
+			"model":  in.Model,
+			"data":   []map[string]any{{"object": "embedding", "index": 0, "embedding": []float32{0.6, 0.8}}},
+		})
+	}))
+}
+
+func TestEmbedOpenAICompatibleAPI(t *testing.T) {
+	// A base URL that ends in /v1 (with or without a slash) selects the
+	// OpenAI embeddings API; the nomic query prefix still applies.
+	var accepted []string
+	srv := mockOpenAI(t, 0, &accepted)
+	defer srv.Close()
+	for _, base := range []string{srv.URL + "/v1", srv.URL + "/v1/"} {
+		e := &Embedder{URL: base, Model: "nomic-embed-text", Client: &http.Client{Timeout: 2 * time.Second}}
+		vec, err := e.EmbedQuery(context.Background(), "auth provider")
+		if err != nil || len(vec) != 2 || vec[0] != 0.6 || vec[1] != 0.8 {
+			t.Fatalf("base %s: vec=%v err=%v", base, vec, err)
+		}
+	}
+	if len(accepted) != 2 || accepted[0] != "search_query: auth provider" || accepted[1] != accepted[0] {
+		t.Fatalf("inputs sent: %q", accepted)
+	}
+}
+
+func TestEmbedDocumentHalvesOnLlamaCppOverflow(t *testing.T) {
+	// The llama.cpp server rejects input over its batch size with "is too
+	// large to process", not Ollama's "context length". EmbedDocument must
+	// halve and retry for that message too.
+	var accepted []string
+	srv := mockOpenAI(t, 1000, &accepted)
+	defer srv.Close()
+	e := &Embedder{URL: srv.URL + "/v1", Model: "mock", Client: &http.Client{Timeout: 2 * time.Second}}
+	big := strings.Repeat("dense-token-text ", 500) // 8500 bytes
+	vec, err := e.EmbedDocument(context.Background(), big)
+	if err != nil || len(vec) != 2 {
+		t.Fatalf("embed should succeed after halving: vec=%v err=%v", vec, err)
+	}
+	if len(accepted) != 1 || len(accepted[0]) > 1000 {
+		t.Fatalf("want one accepted input under 1000 bytes, got %d: %q", len(accepted), accepted)
+	}
+}
