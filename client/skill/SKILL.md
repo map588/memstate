@@ -184,8 +184,8 @@ python3 scripts/memstate_get.py --memory-id N                 # one memory by in
 python3 scripts/memstate_search.py --query "PLAIN WORDS" \
   [--project ID]             # default: this repo's project
   [--all-projects]           # search the whole store
-  [--mode fts|semantic]      # fts = literal words (default); semantic = by meaning (needs Ollama)
-  [--threshold 0.0-1.0]      # semantic only, default 0.5
+  [--mode hybrid|fts|semantic]  # hybrid (default) = any word + meaning, fused; fts = every word; semantic = meaning only (needs Ollama)
+  [--threshold 0.0-1.0]      # semantic and hybrid, default 0.5
   [--category WORD] [--topics TAG1,TAG2]   # topics = match any
   [--keypath-prefix KP]      # only this keypath or below, e.g. branches.feature_x
   [--limit N]                # default 20
@@ -195,7 +195,9 @@ Only the current version of each keypath is searchable. Tombstoned
 keypaths and soft-deleted projects never match. Query text is plain
 words. Punctuation is safe, and there is no boolean syntax.
 **Response:** `results[]`, `total_found`, `query`, `mode` (+ `score`
-per result and `threshold`/`model` in semantic mode).
+per result and `threshold`/`model` in semantic and hybrid modes; hybrid
+adds `sources` per result and `degraded` when the embedder was
+unavailable and only FTS hits are present).
 
 ### `memstate_history.py`: version chain of one keypath
 
@@ -232,8 +234,9 @@ Any write to the same project_id revives it with all memories intact.
 2. **Update, do not duplicate.** Same keypath, new value. The version
    chain is the changelog.
 3. **Search before browsing.** `memstate_search.py` beats a walk of
-   the tree when you know roughly what you want. Use `--mode semantic`
-   when the stored wording probably differs from yours.
+   the tree when you know roughly what you want. The default hybrid
+   mode already matches by meaning; use `--mode fts` when you need every
+   word to match.
 4. **Only current versions surface.** Search and get return the latest
    non-deleted version per keypath. Use `memstate_history.py` to see
    the past. There is no `is_latest` flag to check.

@@ -213,10 +213,41 @@ async function main() {
       project_id: PROJECT,
       query: "sqlite",
     });
+    check("search: default mode is hybrid and degrades to fts without Ollama",
+      !r.isError &&
+        r.data.mode === "hybrid" &&
+        typeof r.data.degraded === "string" &&
+        r.data.results.some((h) => h.keypath === "decisions" &&
+          h.sources.length === 1 && h.sources[0] === "fts"),
+      JSON.stringify(r));
+
+    r = await call(client, "memstate_search", {
+      project_id: PROJECT,
+      query: "sqlite",
+      mode: "fts",
+    });
     check("search: fts finds current content",
       !r.isError &&
         r.data.mode === "fts" &&
         r.data.results.some((h) => h.keypath === "decisions"),
+      JSON.stringify(r));
+
+    r = await call(client, "memstate_search", {
+      project_id: PROJECT,
+      query: "sqlite zzzznonsense",
+      mode: "fts",
+    });
+    check("search: fts requires every word",
+      !r.isError && r.data.total_found === 0,
+      JSON.stringify(r));
+
+    r = await call(client, "memstate_search", {
+      project_id: PROJECT,
+      query: "sqlite zzzznonsense",
+      mode: "hybrid",
+    });
+    check("search: hybrid matches on any word",
+      !r.isError && r.data.results.some((h) => h.keypath === "decisions"),
       JSON.stringify(r));
 
     r = await call(client, "memstate_search", {

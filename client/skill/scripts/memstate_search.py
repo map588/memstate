@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """Search memories (memstated).
 
-Two modes:
-- fts (default): SQLite FTS5 keyword match on content + keypath.
+Three modes:
+- hybrid (default): FTS match on any query word fused with the semantic
+                 ranking (reciprocal rank fusion). When the embedder is
+                 unavailable the FTS hits are returned alone and the
+                 response carries a `degraded` reason.
+- fts:           SQLite FTS5 keyword match on content + keypath. Every
+                 query word must match.
 - semantic:      cosine similarity between the query and embeddings of
                  the current content at each keypath. Requires Ollama
                  running locally with the configured embed model
@@ -23,9 +28,9 @@ def main() -> int:
     ap.add_argument("--all-projects", action="store_true",
                     help="search every project instead of just this repo's")
     ap.add_argument("--limit", type=int, default=20)
-    ap.add_argument("--mode", choices=("fts", "semantic"), default="fts")
+    ap.add_argument("--mode", choices=("hybrid", "fts", "semantic"), default="hybrid")
     ap.add_argument("--threshold", type=float, default=None,
-                    help="semantic only: cosine floor for hits (default 0.5)")
+                    help="semantic and hybrid: cosine floor for hits (default 0.5)")
     ap.add_argument("--category", default=None,
                     help="only return memories with this category")
     ap.add_argument("--topics", default=None,

@@ -404,14 +404,14 @@ type searchReq struct {
 	Query     string   `json:"query"`
 	ProjectID string   `json:"project_id,omitempty"`
 	Limit     int      `json:"limit,omitempty"`
-	Mode      string   `json:"mode,omitempty"`     // "fts" (default) | "semantic"
+	Mode      string   `json:"mode,omitempty"`     // "hybrid" (default) | "fts" | "semantic"
 	Category  string   `json:"category,omitempty"` // exact-match filter
 	Topics    []string `json:"topics,omitempty"`   // match-any filter
 	// KeypathPrefix restricts hits to this keypath or its descendants
 	// (dot-boundary). Used to scope a search to one subtree, e.g. a
 	// branches.<slug> area.
 	KeypathPrefix string `json:"keypath_prefix,omitempty"`
-	// Threshold is semantic-only. nil (absent) → MEMSTATE_SEMANTIC_THRESHOLD
+	// Threshold applies to the semantic and hybrid modes. nil (absent) → MEMSTATE_SEMANTIC_THRESHOLD
 	// env / defaultThreshold. An explicit value (including 0 or negative) is
 	// honoured as-is so callers can accept-all with threshold=0.
 	Threshold *float32 `json:"threshold,omitempty"`
@@ -437,14 +437,25 @@ func handleSearch(store *Store, embedder *Embedder) http.HandlerFunc {
 
 		mode := in.Mode
 		if mode == "" {
-			mode = "fts"
+			mode = "hybrid"
 		}
 		filter := SearchFilter{
 			Category:      in.Category,
 			Topics:        in.Topics,
 			KeypathPrefix: NormalizeKeypath(in.KeypathPrefix),
 		}
+		threshold := envThreshold()
+		if in.Threshold != nil {
+			threshold = *in.Threshold
+		}
 		switch mode {
+		case "hybrid":
+			out, status, err := hybridSearch(r.Context(), store, embedder, in, filter, threshold)
+			if err != nil {
+				writeErr(w, status, err.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, out)
 		case "fts":
 			hits, err := store.Search(in.ProjectID, in.Query, filter, in.Limit)
 			if err != nil {
@@ -471,12 +482,6 @@ func handleSearch(store *Store, embedder *Embedder) http.HandlerFunc {
 					fmt.Sprintf("embed query: %v", err))
 				return
 			}
-			var threshold float32
-			if in.Threshold != nil {
-				threshold = *in.Threshold
-			} else {
-				threshold = envThreshold()
-			}
 			hits, err := store.SemanticSearch(in.ProjectID, qvec, embedder.Model, threshold, filter, in.Limit)
 			if err != nil {
 				writeErr(w, http.StatusInternalServerError, err.Error())
@@ -492,9 +497,56 @@ func handleSearch(store *Store, embedder *Embedder) http.HandlerFunc {
 			})
 		default:
 			writeErr(w, http.StatusBadRequest,
-				fmt.Sprintf("unknown mode %q (expected fts|semantic)", mode))
+				fmt.Sprintf("unknown mode %q (expected hybrid|fts|semantic)", mode))
 		}
 	}
+}
+
+// hybridSearch runs the FTS side with OR semantics and the semantic side
+// with the cosine threshold, then fuses both rankings with rrfFuse. When
+// the embedder is nil or the query embedding fails, the FTS results are
+// returned alone and the response carries a "degraded" reason, so a search
+// never fails because Ollama is down. The returned status is only used when
+// err is non-nil.
+func hybridSearch(ctx context.Context, store *Store, embedder *Embedder, in searchReq, filter SearchFilter, threshold float32) (map[string]any, int, error) {
+	limit := in.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+	// Each side hands more candidates to the fuser than the caller asked
+	// for, so a hit that ranks low on one side but high on the other still
+	// surfaces.
+	pool := max(3*limit, 30)
+	fts, err := store.SearchAny(in.ProjectID, in.Query, filter, pool)
+	if err != nil {
+		return nil, http.StatusBadRequest, err
+	}
+	out := map[string]any{
+		"mode":  "hybrid",
+		"query": in.Query,
+	}
+	var sem []*SemanticHit
+	if embedder == nil {
+		out["degraded"] = "semantic unavailable: no embedder configured"
+	} else {
+		ctx, cancel := context.WithTimeout(ctx, embedder.timeout())
+		defer cancel()
+		qvec, err := embedder.EmbedQuery(ctx, in.Query)
+		if err != nil {
+			out["degraded"] = fmt.Sprintf("semantic unavailable: embed query: %v", err)
+		} else {
+			sem, err = store.SemanticSearch(in.ProjectID, qvec, embedder.Model, threshold, filter, pool)
+			if err != nil {
+				return nil, http.StatusInternalServerError, err
+			}
+			out["model"] = embedder.Model
+			out["threshold"] = threshold
+		}
+	}
+	hits := rrfFuse(fts, sem, limit)
+	out["results"] = orEmpty(hits)
+	out["total_found"] = len(hits)
+	return out, http.StatusOK, nil
 }
 
 type historyReq struct {

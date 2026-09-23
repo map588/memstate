@@ -604,13 +604,15 @@ const TOOLS: ToolDef[] = [
         limit: { type: "integer", default: 20 },
         mode: {
           type: "string",
-          enum: ["fts", "semantic"],
-          default: "fts",
+          enum: ["hybrid", "fts", "semantic"],
+          default: "hybrid",
           description:
-            "\"fts\" matches the literal words (stemmed) in content and " +
-            "keypath. \"semantic\" matches by MEANING of the content — use " +
-            "it when the stored wording is probably different from yours; " +
-            "needs Ollama running on the server.",
+            "\"hybrid\" (default) merges a literal-word match (any word " +
+            "may hit) with a match by MEANING and ranks by both; when the " +
+            "embedder is unavailable it returns the literal matches alone " +
+            "and sets `degraded` to the reason. \"fts\" requires EVERY " +
+            "word to match. \"semantic\" matches by meaning only and " +
+            "fails when Ollama is down.",
         },
         category: {
           type: "string",
@@ -633,8 +635,8 @@ const TOOLS: ToolDef[] = [
         threshold: {
           type: "number",
           description:
-            "semantic mode only: similarity floor 0..1 (default 0.5). " +
-            "Raise to tighten, lower to widen.",
+            "semantic and hybrid modes: similarity floor 0..1 (default " +
+            "0.5). Raise to tighten, lower to widen.",
         },
       },
       required: ["query"],

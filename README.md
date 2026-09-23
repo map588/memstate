@@ -27,8 +27,9 @@ memstated --addr 127.0.0.1:8765 --embed-model qwen3-embedding:4b
 ```
 
 If Ollama does not run, memstate still works. Writes and FTS search
-are not affected. Semantic search returns 503 until the embedder is
-available.
+are not affected. The default hybrid search returns FTS hits alone and
+sets `degraded` in the response. Explicit semantic search returns 503
+until the embedder is available.
 
 A server with an OpenAI-compatible embeddings API also works, for
 example the llama.cpp server, LM Studio, or vLLM. Set
@@ -152,14 +153,14 @@ Pass it only to reach a different project. Keypaths use dot notation.
 | `memstate_set` | Write a short value at a keypath (`config.port = "8080"`). |
 | `memstate_remember` | Write a markdown summary. An explicit keypath stores all content there. Without a keypath, each `## heading` becomes its own versioned memory, nested by `###` depth. |
 | `memstate_get` | Read a keypath, browse a subtree, or return the full project tree. |
-| `memstate_search` | Search current memories. `mode="fts"` (default) uses SQLite FTS5. `mode="semantic"` embeds the query with Ollama and ranks by cosine similarity against the embedding of each keypath's current content. Both modes accept `category` and `topics` filters. |
+| `memstate_search` | Search current memories. `mode="hybrid"` (default) fuses an any-word FTS5 match with the semantic ranking. `mode="fts"` uses SQLite FTS5 and requires every word. `mode="semantic"` embeds the query with Ollama and ranks by cosine similarity against the embedding of each keypath's current content. All modes accept `category` and `topics` filters. |
 | `memstate_history` | Return every version of a keypath, newest first, with tombstones. |
 | `memstate_delete` | Add a tombstone to a keypath. History is kept. |
 | `memstate_delete_project` | Soft-delete a project. |
 
 A useful agent loop:
 
-- At task start, call `memstate_get()` to load the tree. The proxy derives the project id from the repository name. Call `memstate_search(query=..., mode="semantic")` when you do not know the exact keypath.
+- At task start, call `memstate_get()` to load the tree. The proxy derives the project id from the repository name. Call `memstate_search(query=...)` when you do not know the exact keypath.
 - At task end, call `memstate_remember(content="## Summary\n...\n## Decisions\n...")` and let the server extract the sections.
 
 `node client/dist/index.js init` writes rule files for several agents
@@ -176,6 +177,17 @@ for both the explicit-keypath mode and the heading-extract mode.
 - In extract mode, each `##` heading becomes a top-level keypath (`## Auth` → `auth`). This is the same tree that explicit writes use. Pass `root: "<prefix>"` to nest all sections under a prefix.
 - Common section names collapse to canonical slugs: `## TODOs` → `todo`, `## Open Questions` → `questions`, `## Files to touch` → `files`, and more.
 - The server stores prose before the first `##` under `preamble`, or under `<root>.preamble` when a root is given.
+
+### `memstate_search`: hybrid mode
+
+`mode="hybrid"` is the default. The daemon runs two searches and merges
+them with reciprocal rank fusion (k=60): an FTS5 match where any query
+word may hit, ranked by bm25, and the semantic search described below.
+A keypath found by both searches outranks one found by only one. Each
+result carries `score` (the fused score) and `sources` (`fts`,
+`semantic`, or both). When the embedder is not configured or the query
+embedding fails, the response holds the FTS hits alone and `degraded`
+names the reason. Hybrid search never fails because Ollama is down.
 
 ### `memstate_search`: semantic mode
 

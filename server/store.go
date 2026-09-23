@@ -730,16 +730,41 @@ func (f SearchFilter) Matches(m *Memory) bool {
 // token becomes a quoted string (implicit AND). Punctuation like apostrophes
 // or hyphens would otherwise be parsed as FTS5 operator syntax and error out.
 func ftsQuote(q string) string {
+	return strings.Join(ftsTokens(q), " ")
+}
+
+// ftsQuoteOr is ftsQuote with OR between the tokens: a row matches when it
+// contains any token, and bm25 ranks rows by how many tokens they contain.
+// Hybrid search uses it so a long natural-language query still yields FTS
+// candidates.
+func ftsQuoteOr(q string) string {
+	return strings.Join(ftsTokens(q), " OR ")
+}
+
+func ftsTokens(q string) []string {
 	fields := strings.Fields(q)
 	for i, f := range fields {
 		fields[i] = `"` + strings.ReplaceAll(f, `"`, `""`) + `"`
 	}
-	return strings.Join(fields, " ")
+	return fields
 }
 
 // Search does an FTS5 match on content+keypath, restricted to current
-// non-tombstoned versions in live (non-deleted) projects.
+// non-tombstoned versions in live (non-deleted) projects. Every token in
+// query must match.
 func (s *Store) Search(projectID, query string, filter SearchFilter, limit int) ([]*Memory, error) {
+	return s.searchFTS(projectID, ftsQuote(query), filter, limit)
+}
+
+// SearchAny is Search with OR semantics: a row matches when it contains at
+// least one token of query. Rows that contain more tokens rank first.
+func (s *Store) SearchAny(projectID, query string, filter SearchFilter, limit int) ([]*Memory, error) {
+	return s.searchFTS(projectID, ftsQuoteOr(query), filter, limit)
+}
+
+// searchFTS runs an already-quoted FTS5 MATCH expression with the shared
+// filter SQL.
+func (s *Store) searchFTS(projectID, ftsQuery string, filter SearchFilter, limit int) ([]*Memory, error) {
 	if limit <= 0 {
 		limit = 20
 	}
@@ -754,7 +779,7 @@ func (s *Store) Search(projectID, query string, filter SearchFilter, limit int) 
 		    WHERE m2.project_id = m.project_id AND m2.keypath = m.keypath
 		  )
 	`
-	args := []any{ftsQuote(query)}
+	args := []any{ftsQuery}
 	if projectID != "" {
 		q += ` AND m.project_id = ?`
 		args = append(args, projectID)
