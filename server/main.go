@@ -58,6 +58,53 @@ func defaultDBPath() string {
 	return filepath.Join(home, ".memstate", "memstate.db")
 }
 
+// addrFilePath is where a shared-mode daemon (--addr) records its bind
+// address, next to the database, so hooks and CLI subcommands can find it
+// without MEMSTATE_ADDR. Child-mode daemons do not write it: their address
+// is private to the parent that spawned them.
+func addrFilePath() string {
+	return filepath.Join(filepath.Dir(defaultDBPath()), "daemon.addr")
+}
+
+// writeAddrFile records addr atomically (temp file + rename).
+func writeAddrFile(addr string) error {
+	path := addrFilePath()
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(addr+"\n"), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// removeAddrFile deletes the addr file when it still names addr. A file
+// that names another daemon is left alone.
+func removeAddrFile(addr string) {
+	path := addrFilePath()
+	b, err := os.ReadFile(path)
+	if err != nil || strings.TrimSpace(string(b)) != addr {
+		return
+	}
+	_ = os.Remove(path)
+}
+
+// discoverAddr finds a running shared daemon: MEMSTATE_ADDR wins, then the
+// addr file, which is trusted only when a memstate daemon answers /health
+// there (the file goes stale when a daemon is killed without cleanup).
+func discoverAddr() (string, bool) {
+	if v := os.Getenv("MEMSTATE_ADDR"); v != "" {
+		return v, true
+	}
+	b, err := os.ReadFile(addrFilePath())
+	if err != nil {
+		return "", false
+	}
+	addr := strings.TrimSpace(string(b))
+	if addr == "" || !looksLikeOurDaemon(addr) {
+		return "", false
+	}
+	return addr, true
+}
+
 // expandHome resolves a leading ~/ or bare ~ to the current user's home dir.
 // Shells normally do this, but MEMSTATE_DB is commonly set in config files
 // (e.g. an MCP server JSON entry) where the shell never touches it.
@@ -216,6 +263,16 @@ func main() {
 	// stderr line + latest_available in /health. Never blocks startup.
 	if os.Getenv("MEMSTATE_NO_UPDATE_CHECK") == "" {
 		go watchUpdates(ctx)
+	}
+
+	// A shared daemon publishes its address in the addr file so that
+	// `memstated recall` and other local tools can find it without env.
+	if explicitAddr {
+		if err := writeAddrFile(actualAddr); err != nil {
+			log.Printf("memstated: write addr file: %v", err)
+		} else {
+			defer removeAddrFile(actualAddr)
+		}
 	}
 
 	// Announce our bind address on stderr so the spawning parent can find us.

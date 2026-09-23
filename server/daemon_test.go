@@ -351,3 +351,101 @@ func TestIsAddrInUse(t *testing.T) {
 		t.Fatalf("isAddrInUse(%v) = false, want true", err)
 	}
 }
+
+// TestAddrFileSharedMode: a --addr daemon writes daemon.addr next to its
+// database and removes it on shutdown; a random-port daemon writes nothing.
+func TestAddrFileSharedMode(t *testing.T) {
+	bin := buildDaemon(t)
+	dir := t.TempDir()
+	env := map[string]string{"MEMSTATE_DB": filepath.Join(dir, "t.db")}
+	addrFile := filepath.Join(dir, "daemon.addr")
+
+	addr := reserveAndRelease(t)
+	cmd, _, _ := runDaemon(t, bin, []string{"--addr", addr}, env)
+	t.Cleanup(func() {
+		if cmd.ProcessState == nil || !cmd.ProcessState.Exited() {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	})
+	b, err := os.ReadFile(addrFile)
+	if err != nil {
+		t.Fatalf("addr file missing after --addr start: %v", err)
+	}
+	if got := strings.TrimSpace(string(b)); got != addr {
+		t.Fatalf("addr file = %q want %q", got, addr)
+	}
+
+	stop := exec.Command(bin, "stop", "--addr", addr)
+	if out, err := stop.CombinedOutput(); err != nil {
+		t.Fatalf("stop failed: %v\n%s", err, out)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("daemon did not exit after stop")
+	}
+	if _, err := os.Stat(addrFile); !os.IsNotExist(err) {
+		t.Fatalf("addr file should be removed on shutdown, stat err=%v", err)
+	}
+
+	// Random-port mode never publishes an address.
+	dir2 := t.TempDir()
+	cmd2, _, _ := runDaemon(t, bin, nil, map[string]string{"MEMSTATE_DB": filepath.Join(dir2, "t.db")})
+	t.Cleanup(func() {
+		_ = cmd2.Process.Kill()
+		_ = cmd2.Wait()
+	})
+	if _, err := os.Stat(filepath.Join(dir2, "daemon.addr")); !os.IsNotExist(err) {
+		t.Fatalf("random-port daemon must not write an addr file, stat err=%v", err)
+	}
+}
+
+// TestDiscoverAddr covers the three sources: env, a live addr file, and a
+// stale addr file whose daemon is gone.
+func TestDiscoverAddr(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("MEMSTATE_DB", filepath.Join(dir, "t.db"))
+	t.Setenv("MEMSTATE_ADDR", "")
+
+	if _, ok := discoverAddr(); ok {
+		t.Fatalf("no env and no file must not discover anything")
+	}
+
+	// Stale file: nothing listens there.
+	stale := reserveAndRelease(t)
+	if err := os.WriteFile(filepath.Join(dir, "daemon.addr"), []byte(stale+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := discoverAddr(); ok {
+		t.Fatalf("stale addr file must be rejected, got %q", got)
+	}
+
+	// Live file: a real router answers /health.
+	ts := newTestServer(t)
+	live := strings.TrimPrefix(ts.URL, "http://")
+	if err := writeAddrFile(live); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := discoverAddr(); !ok || got != live {
+		t.Fatalf("live addr file: got %q ok=%v want %q", got, ok, live)
+	}
+
+	// Env wins over the file, even without validation.
+	t.Setenv("MEMSTATE_ADDR", "127.0.0.1:9")
+	if got, ok := discoverAddr(); !ok || got != "127.0.0.1:9" {
+		t.Fatalf("env must win: got %q ok=%v", got, ok)
+	}
+
+	// Removing with a different addr leaves the file; the right addr deletes it.
+	removeAddrFile("127.0.0.1:9")
+	if _, err := os.Stat(filepath.Join(dir, "daemon.addr")); err != nil {
+		t.Fatalf("removeAddrFile with a foreign addr must keep the file: %v", err)
+	}
+	removeAddrFile(live)
+	if _, err := os.Stat(filepath.Join(dir, "daemon.addr")); !os.IsNotExist(err) {
+		t.Fatalf("removeAddrFile with the owning addr must delete the file: %v", err)
+	}
+}
