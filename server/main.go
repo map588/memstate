@@ -145,6 +145,8 @@ func main() {
 			os.Exit(cmdUpgrade(os.Args[2:]))
 		case "embed":
 			os.Exit(cmdEmbed(os.Args[2:]))
+		case "recall":
+			os.Exit(cmdRecall(os.Args[2:]))
 		case "-h", "--help", "help":
 			printUsage()
 			os.Exit(0)
@@ -403,6 +405,10 @@ func printUsage() {
   memstated embed prune [--keep NAME] [--db PATH]
                                    delete vectors of every model except --keep
                                    (default: the configured model)
+  memstated recall                 Claude Code UserPromptSubmit hook: read the
+                                   hook event on stdin, search the shared daemon
+                                   (MEMSTATE_ADDR, else daemon.addr) with the
+                                   prompt, print unseen hits; always exits 0
 
 Environment:
   MEMSTATE_ADDR           default for --addr

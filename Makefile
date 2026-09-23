@@ -22,6 +22,7 @@ SERVER_BIN  := server/memstated
 CLAUDE_HOME := $(HOME)/.claude
 SKILL_DIR   := $(CLAUDE_HOME)/skills/memstate
 HOOK_SCRIPT := $(CLAUDE_HOME)/hooks/memstate-persist-reminder.sh
+RECALL_HOOK_SCRIPT := $(CLAUDE_HOME)/hooks/memstate-recall.sh
 
 .PHONY: build install uninstall install-skill uninstall-skill test release clean help
 
@@ -55,22 +56,24 @@ uninstall:  ## Remove installed binary and unlink proxy
 	-rm -f $(GOBIN)/memstated
 	-cd client && npm unlink -g @memstate/mcp
 
-install-skill:  ## Install Claude Code skill + UserPromptSubmit hook into ~/.claude
+install-skill:  ## Install Claude Code skill + UserPromptSubmit hooks into ~/.claude
 	@mkdir -p $(CLAUDE_HOME)/skills $(CLAUDE_HOME)/hooks
 	rm -rf $(SKILL_DIR)
 	cp -R client/skill $(SKILL_DIR)
 	install -m 0755 .claude/hooks/memstate-persist-reminder.sh $(HOOK_SCRIPT)
-	python3 scripts/configure-claude-hook.py install $(HOOK_SCRIPT)
+	install -m 0755 .claude/hooks/memstate-recall.sh $(RECALL_HOOK_SCRIPT)
+	python3 scripts/configure-claude-hook.py install $(HOOK_SCRIPT) $(RECALL_HOOK_SCRIPT)
 	@echo
 	@echo "Skill installed → $(SKILL_DIR)"
-	@echo "Hook installed  → $(HOOK_SCRIPT)"
+	@echo "Hooks installed → $(HOOK_SCRIPT)"
+	@echo "                  $(RECALL_HOOK_SCRIPT) (needs a shared daemon: MEMSTATE_ADDR or ~/.memstate/daemon.addr)"
 	@echo "Settings updated: $(CLAUDE_HOME)/settings.json (backup at settings.json.bak)"
 
-uninstall-skill:  ## Remove skill + hook from ~/.claude
+uninstall-skill:  ## Remove skill + hooks from ~/.claude
 	-rm -rf $(SKILL_DIR)
-	-rm -f $(HOOK_SCRIPT)
+	-rm -f $(HOOK_SCRIPT) $(RECALL_HOOK_SCRIPT)
 	-python3 scripts/configure-claude-hook.py uninstall
-	@echo "Skill + hook removed from $(CLAUDE_HOME)"
+	@echo "Skill + hooks removed from $(CLAUDE_HOME)"
 
 test: build  ## Run Go tests + TS end-to-end smoke + MCP regression
 	cd server && go test ./... && go vet ./...

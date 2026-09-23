@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Install/uninstall the memstate UserPromptSubmit hook in ~/.claude/settings.json.
+"""Install/uninstall the memstate UserPromptSubmit hooks in ~/.claude/settings.json.
 
-Idempotent: any existing UserPromptSubmit entry whose command references
-`memstate-persist-reminder` is replaced. Writes a .bak alongside.
+Idempotent: any existing UserPromptSubmit entry whose command references one
+of MARKERS is replaced. Writes a .bak alongside.
 """
 from __future__ import annotations
 import json
@@ -11,7 +11,12 @@ import sys
 from pathlib import Path
 
 SETTINGS = Path.home() / ".claude" / "settings.json"
-MARKER = "memstate-persist-reminder"
+MARKERS = ("memstate-persist-reminder", "memstate-recall")
+
+
+def is_memstate_hook(hook: dict) -> bool:
+    command = hook.get("command", "")
+    return any(marker in command for marker in MARKERS)
 
 
 def load() -> dict:
@@ -36,7 +41,7 @@ def strip_memstate(cfg: dict) -> None:
     ups = hooks.get("UserPromptSubmit", [])
     clean = []
     for entry in ups:
-        kept = [h for h in entry.get("hooks", []) if MARKER not in h.get("command", "")]
+        kept = [h for h in entry.get("hooks", []) if not is_memstate_hook(h)]
         if kept:
             entry["hooks"] = kept
             clean.append(entry)
@@ -48,15 +53,17 @@ def strip_memstate(cfg: dict) -> None:
         cfg.pop("hooks", None)
 
 
-def install(script_path: str) -> None:
+def install(script_paths: list[str]) -> None:
     cfg = load()
     strip_memstate(cfg)
-    cfg.setdefault("hooks", {}).setdefault("UserPromptSubmit", []).append(
-        {
-            "matcher": "",
-            "hooks": [{"type": "command", "command": script_path}],
-        }
-    )
+    entries = cfg.setdefault("hooks", {}).setdefault("UserPromptSubmit", [])
+    for script_path in script_paths:
+        entries.append(
+            {
+                "matcher": "",
+                "hooks": [{"type": "command", "command": script_path}],
+            }
+        )
     save(cfg)
 
 
@@ -70,12 +77,12 @@ def uninstall() -> None:
 
 def main() -> None:
     if len(sys.argv) < 2:
-        sys.exit("usage: configure-claude-hook.py install <script-path> | uninstall")
+        sys.exit("usage: configure-claude-hook.py install <script-path>... | uninstall")
     cmd = sys.argv[1]
     if cmd == "install":
         if len(sys.argv) < 3:
-            sys.exit("install requires a script path")
-        install(sys.argv[2])
+            sys.exit("install requires at least one script path")
+        install(sys.argv[2:])
     elif cmd == "uninstall":
         uninstall()
     else:

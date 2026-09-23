@@ -85,12 +85,22 @@ and is built from this repository with `make install` or `make build`.
 ### Claude Code skill and hook (optional)
 
 If you use Claude Code, `make install-skill` installs the bundled
-skill under `~/.claude/skills/memstate/`. It also adds a
-UserPromptSubmit hook. The hook points you to `memstate_remember`
-after three or more file edits since your last persist.
-`make uninstall-skill` removes both. The install is idempotent and
-safe to run again. It replaces existing memstate entries in
-`settings.json` and does not duplicate them.
+skill under `~/.claude/skills/memstate/`. It also adds two
+UserPromptSubmit hooks:
+
+- `memstate-persist-reminder.sh` points you to `memstate_remember`
+  after three or more file edits since your last persist.
+- `memstate-recall.sh` runs `memstated recall`. It searches the
+  current repository's memories with the prompt text (hybrid mode)
+  and injects up to three hits the model has not seen in this
+  session. It needs a shared daemon: set `MEMSTATE_ADDR`, or start
+  `memstated --addr HOST:PORT`, which records its address in
+  `~/.memstate/daemon.addr`. Without one the hook prints nothing.
+  Set `MEMSTATE_NO_RECALL=1` to turn it off.
+
+`make uninstall-skill` removes the skill and both hooks. The install
+is idempotent and safe to run again. It replaces existing memstate
+entries in `settings.json` and does not duplicate them.
 
 ## Connect memstate to your agent
 

@@ -8,7 +8,8 @@
  * calls each MCP tool, and checks the response contracts: write actions
  * (created / superseded / unchanged), heading extraction, tree and keypath
  * reads, FTS search and filters, history with tombstones, recursive delete,
- * project soft-delete and revival, and error paths.
+ * project soft-delete and revival, error paths, and the `memstated recall`
+ * hook against a second daemon in shared mode (found through daemon.addr).
  *
  * The test is hermetic: MEMSTATE_OLLAMA_URL points at a closed port, so
  * embedding is unreachable. Writes must still succeed (fire-and-forget) and
@@ -16,6 +17,7 @@
  *
  * Run: node client/test/regression.mjs   (after `make build`)
  */
+import { execFileSync, spawn } from "child_process";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -26,6 +28,9 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROXY = path.resolve(__dirname, "..", "dist", "index.js");
 const PROJECT = "regress_test";
+const DAEMON =
+  process.env.MEMSTATE_BIN ||
+  path.resolve(__dirname, "..", "..", "server", "memstated");
 
 let failures = 0;
 function check(name, cond, detail = "") {
@@ -387,6 +392,35 @@ async function main() {
     check("set: missing required fields is an error",
       bad.isError === true,
       JSON.stringify(bad));
+
+    // ---- recall hook ----------------------------------------------------------
+    // A shared-mode daemon on the same DB publishes daemon.addr next to it;
+    // `memstated recall` has no MEMSTATE_ADDR here, so it must discover the
+    // daemon through that file. The cwd basename slugs to PROJECT.
+    await withSharedDaemon(env, async () => {
+      const cwd = path.join(tmp, "regress-test");
+      fs.mkdirSync(cwd);
+      const recall = (session) =>
+        execFileSync(DAEMON, ["recall"], {
+          env,
+          input: JSON.stringify({
+            session_id: session,
+            cwd,
+            prompt: "why did we choose sqlite for the store",
+          }),
+        }).toString();
+      const first = recall("regress_s1");
+      check("recall: finds the shared daemon via daemon.addr and injects a hit",
+        first.includes(`<memstate-recall project="${PROJECT}">`) &&
+          first.includes("### decisions"),
+        JSON.stringify(first));
+      check("recall: same session does not repeat a keypath",
+        recall("regress_s1") === "",
+        JSON.stringify(first));
+      check("recall: a new session sees the keypath again",
+        recall("regress_s2").includes("### decisions"),
+        "");
+    });
   } finally {
     clearTimeout(watchdog);
     await client.close();
@@ -398,6 +432,38 @@ async function main() {
     process.exit(1);
   }
   process.stdout.write("\nall regression checks passed\n");
+}
+
+// withSharedDaemon starts `memstated --addr 127.0.0.1:0` with env, waits
+// for its READY banner, runs fn, then stops it and waits for exit.
+async function withSharedDaemon(env, fn) {
+  const child = spawn(DAEMON, ["--addr", "127.0.0.1:0"], {
+    env,
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  const addr = await new Promise((resolve, reject) => {
+    let buf = "";
+    const timer = setTimeout(() => reject(new Error("shared daemon: no READY banner")), 5000);
+    child.stderr.on("data", (chunk) => {
+      buf += chunk.toString();
+      const m = /MEMSTATE_READY addr=(\S+)/.exec(buf);
+      if (m) {
+        clearTimeout(timer);
+        child.stderr.removeAllListeners("data");
+        child.stderr.resume();
+        resolve(m[1]);
+      }
+    });
+    child.on("exit", (code) => reject(new Error(`shared daemon exited early (${code})`)));
+  });
+  const exited = new Promise((resolve) => child.on("exit", resolve));
+  try {
+    await fn(addr);
+  } finally {
+    execFileSync(DAEMON, ["stop", "--addr", addr], { env, stdio: "ignore" });
+    await Promise.race([exited, new Promise((r) => setTimeout(r, 5000))]);
+    if (child.exitCode === null) child.kill("SIGKILL");
+  }
 }
 
 main().catch((err) => {
