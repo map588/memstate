@@ -389,6 +389,12 @@ def check_write_target(args, project: str) -> None:
         return
     explicit = bool(args.project)
     if not explicit:
+        if os.environ.get("MEMSTATE_REQUIRE_PROJECT") == "1":
+            raise SystemExit(
+                "Error: MEMSTATE_REQUIRE_PROJECT=1: a write needs a project. Pass "
+                f'--project ID (for this directory "{project}", an id from '
+                "memstate_get.py --list-projects, or a new id with --new-project), "
+                "or --scope user for facts about this machine")
         if in_git_repo():
             if args.new_project:
                 raise SystemExit(
