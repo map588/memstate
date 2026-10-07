@@ -73,6 +73,23 @@ func daemonLogPath() string {
 	return filepath.Join(filepath.Dir(defaultDBPath()), "memstated.log")
 }
 
+// resolveListenAddr picks the bind address: the --addr flag, else
+// MEMSTATE_ADDR, else a random port. explicit reports whether the daemon
+// is a shared one that must publish its address. A daemon with an owner
+// is private: it ignores MEMSTATE_ADDR, so a child spawned in a shell
+// that names the shared daemon does not try the shared port and exit, and
+// it never publishes daemon.addr.
+func resolveListenAddr(flagAddr string, ownerPID int) (addr string, explicit bool) {
+	addr = flagAddr
+	if addr == "" && ownerPID == 0 {
+		addr = os.Getenv("MEMSTATE_ADDR")
+	}
+	if addr == "" {
+		return "127.0.0.1:0", false // random port
+	}
+	return addr, true
+}
+
 // writeAddrFile records addr atomically (temp file + rename).
 func writeAddrFile(addr string) error {
 	path := addrFilePath()
@@ -202,14 +219,7 @@ func main() {
 		}
 	}
 
-	resolved := *addrFlag
-	if resolved == "" {
-		resolved = os.Getenv("MEMSTATE_ADDR")
-	}
-	explicitAddr := resolved != ""
-	if !explicitAddr {
-		resolved = "127.0.0.1:0" // random port
-	}
+	resolved, explicitAddr := resolveListenAddr(*addrFlag, *ownerPIDFlag)
 
 	ln, err := net.Listen("tcp", resolved)
 	if err != nil {
