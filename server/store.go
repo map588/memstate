@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -41,7 +42,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_mem_pkv
 DROP INDEX IF EXISTS idx_mem_pk;
 
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
-  content, keypath, tokenize = 'porter unicode61'
+  content, keypath, project_id, tokenize = 'porter unicode61'
 );
 
 -- Semantic search embeds the CONTENT of the current version at each keypath;
@@ -100,28 +101,38 @@ type Store struct {
 	db *sql.DB
 }
 
+// storeMaxConns is the connection pool size: one per core, at least 2 so a
+// read never waits behind a write, at most 4. In the 2026-10-07 load test
+// (scoped FTS, embedder off) one connection gave 1100 mixed requests/s on
+// 1.3 cores, two gave 1640 on 2.3, four gave 2200 on 4.1 and eight gave
+// 2100-2800 on 6 or more: past four, cores go to scheduler spin, not work.
+func storeMaxConns() int {
+	return min(max(runtime.NumCPU(), 2), 4)
+}
+
 func OpenStore(path string) (*Store, error) {
 	// Apply PRAGMAs per connection via DSN so every pooled connection
 	// inherits the same behaviour. SQLite PRAGMAs set on one connection do
 	// not propagate to siblings, so the DSN is the only reliable place.
 	//
-	// - busy_timeout=5000: writers wait up to 5s when another writer holds
-	//   the DB lock. Belt-and-suspenders with MaxOpenConns=1 below.
-	// - journal_mode=WAL: concurrent readers + single writer.
+	// - busy_timeout=5000: a writer waits up to 5s for the write lock that
+	//   another connection holds, instead of failing with SQLITE_BUSY.
+	// - journal_mode=WAL: readers run while one writer commits.
 	// - synchronous=NORMAL: safe under WAL, faster than FULL.
-	// - cache_size=-64000: 64MB page cache (negative = KB).
-	// - mmap_size=268435456: 256MB memory-mapped reads. Safe because we
-	//   use a single pooled connection (see SetMaxOpenConns below), so the
-	//   cross-connection stale-read race that can surface on macOS does
-	//   not apply here.
+	// - cache_size=-16000: 16MB page cache per connection (negative = KB);
+	//   the pool below opens up to storeMaxConns of them.
 	// - temp_store=MEMORY: keep temp tables / sort scratch in RAM.
 	// - foreign_keys=1: enforce FK constraints.
+	// - _txlock=immediate (a driver option, not a PRAGMA): every Begin()
+	//   takes the write lock at once. Write reads the latest version and
+	//   then inserts inside one transaction; with a deferred BEGIN a second
+	//   writer that committed in between would make that upgrade fail with
+	//   SQLITE_BUSY, which busy_timeout cannot wait out.
 	pragmas := []string{
 		"busy_timeout(5000)",
 		"journal_mode(WAL)",
 		"synchronous(NORMAL)",
-		"cache_size(-64000)",
-		"mmap_size(268435456)",
+		"cache_size(-16000)",
 		"temp_store(MEMORY)",
 		"foreign_keys(1)",
 	}
@@ -136,15 +147,17 @@ func OpenStore(path string) (*Store, error) {
 		dsn.WriteString("_pragma=")
 		dsn.WriteString(p)
 	}
+	dsn.WriteString("&_txlock=immediate")
 	db, err := sql.Open("sqlite", dsn.String())
 	if err != nil {
 		return nil, err
 	}
-	// Single connection serializes all DB access. At this scale (small
-	// writes, small reads, no long-running queries) the contention savings
-	// outweigh the parallelism loss, and it sidesteps modernc.org/sqlite's
-	// per-connection PRAGMA quirks under concurrent fire-and-forget embeds.
-	db.SetMaxOpenConns(1)
+	// A small pool lets reads run on several cores. A single connection
+	// capped the daemon at about 270 mixed requests per second with one
+	// core saturated (load test, 2026-10-07); SQLite serializes the writers
+	// itself. The PRAGMAs travel in the DSN, so every connection has them.
+	db.SetMaxOpenConns(storeMaxConns())
+	db.SetMaxIdleConns(storeMaxConns())
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
@@ -154,6 +167,48 @@ func OpenStore(path string) (*Store, error) {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 	return &Store{db: db}, nil
+}
+
+// migrateFTSProjectColumn rebuilds memories_fts when it predates the
+// project_id column. A search scoped to one project then matches only that
+// project's rows inside FTS5, instead of scanning every project's documents
+// and discarding the rest in SQL (that scan was 53% of daemon CPU in the
+// 2026-10-07 load test). The index holds only current versions, so it is
+// rebuilt from them.
+func migrateFTSProjectColumn(db *sql.DB) error {
+	var n int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('memories_fts') WHERE name='project_id'`,
+	).Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmts := []string{
+		`DROP TABLE memories_fts`,
+		`CREATE VIRTUAL TABLE memories_fts USING fts5(
+		   content, keypath, project_id, tokenize = 'porter unicode61'
+		 )`,
+		`INSERT INTO memories_fts(rowid, content, keypath, project_id)
+		 SELECT m.id, m.content, m.keypath, m.project_id FROM memories m
+		 WHERE m.tombstone = 0
+		   AND m.version = (
+		     SELECT MAX(version) FROM memories m2
+		     WHERE m2.project_id = m.project_id AND m2.keypath = m.keypath
+		   )`,
+	}
+	for _, q := range stmts {
+		if _, err := tx.Exec(q); err != nil {
+			return fmt.Errorf("fts project column: %w", err)
+		}
+	}
+	return tx.Commit()
 }
 
 // migrate converges DBs created under older schemas. CREATE TABLE IF NOT
@@ -173,6 +228,9 @@ func migrate(db *sql.DB) error {
 				return err
 			}
 		}
+	}
+	if err := migrateFTSProjectColumn(db); err != nil {
+		return err
 	}
 	var src string
 	err := db.QueryRow(`SELECT value FROM meta WHERE key='embed_source'`).Scan(&src)
@@ -391,8 +449,8 @@ func writeExec(exec dbExec, projectID, keypath, content string, meta WriteMeta, 
 		}
 	} else {
 		if _, err := exec.Exec(
-			`INSERT INTO memories_fts(rowid, content, keypath) VALUES(?, ?, ?)`,
-			id, content, keypath,
+			`INSERT INTO memories_fts(rowid, content, keypath, project_id) VALUES(?, ?, ?, ?)`,
+			id, content, keypath, projectID,
 		); err != nil {
 			return nil, nil, err
 		}
@@ -773,9 +831,26 @@ func (s *Store) SearchAny(projectID, query string, filter SearchFilter, limit in
 	return s.searchFTS(projectID, ftsQuoteOr(query), filter, limit)
 }
 
-// searchFTS runs an already-quoted FTS5 MATCH expression with the shared
-// filter SQL.
-func (s *Store) searchFTS(projectID, ftsQuery string, filter SearchFilter, limit int) ([]*Memory, error) {
+// ftsMatch builds the MATCH expression: the quoted tokens against the text
+// columns only, and, for a project search, the project row filter, so FTS5
+// visits one project's documents instead of every project's. The SQL
+// project filter stays as the correctness gate: the tokenizer stems ids
+// ("notes" and "note" become one token), so near names can share FTS rows.
+func ftsMatch(tokens, projectID string) string {
+	m := "{content keypath}: (" + tokens + ")"
+	if projectID != "" {
+		m += ` AND project_id: "` + strings.ReplaceAll(projectID, `"`, `""`) + `"`
+	}
+	return m
+}
+
+// searchFTS runs an already-quoted FTS5 token expression with the shared
+// filter SQL. No tokens means no rows.
+func (s *Store) searchFTS(projectID, tokens string, filter SearchFilter, limit int) ([]*Memory, error) {
+	if strings.TrimSpace(tokens) == "" {
+		return nil, nil
+	}
+	ftsQuery := ftsMatch(tokens, projectID)
 	if limit <= 0 {
 		limit = defaultSearchLimit
 	}

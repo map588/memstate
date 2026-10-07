@@ -193,7 +193,7 @@ func truncateBytes(s string, max int) string {
 func (e *Embedder) EmbedDocument(ctx context.Context, text string) ([]float32, error) {
 	doc := truncateBytes(text, embedMaxBytes)
 	for {
-		vec, err := e.Embed(ctx, e.documentText(doc))
+		vec, err := e.embedWithin(ctx, embedContentSem, e.documentText(doc))
 		var se *embedStatusError
 		if err == nil || len(doc) <= 512 ||
 			!errors.As(err, &se) || !contextOverflow(se.msg) {
@@ -223,10 +223,44 @@ func (e *Embedder) openAIBase() bool {
 	return strings.HasSuffix(strings.TrimRight(e.URL, "/"), "/v1")
 }
 
-// Embed returns the vector for text using the configured model. It uses
-// Ollama's native API (POST {URL}/api/embeddings) unless URL ends in /v1,
-// where it uses the OpenAI embeddings API (POST {URL}/embeddings).
+// Two budgets cap the embedding calls in flight across the whole daemon,
+// so 1000 agents writing at once cannot open 1000 requests against one
+// local model server. Content embeds (after a write, and the backfill) and
+// query embeds (search) have separate budgets: a write storm queues
+// thousands of content embeds, and a search must not wait behind them
+// (with one shared budget a hybrid search waited the full embed timeout in
+// the 2026-10-07 load test). Callers past a budget wait, or give up when
+// their context ends.
+const (
+	embedMaxContent = 2
+	embedMaxQuery   = 4
+)
+
+var (
+	embedContentSem = make(chan struct{}, embedMaxContent)
+	embedQuerySem   = make(chan struct{}, embedMaxQuery)
+)
+
+// embedWithin runs embedOnce under the budget sem.
+func (e *Embedder) embedWithin(ctx context.Context, sem chan struct{}, text string) ([]float32, error) {
+	select {
+	case sem <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	defer func() { <-sem }()
+	return e.embedOnce(ctx, text)
+}
+
+// Embed returns the vector for text using the configured model, under the
+// query budget. It uses Ollama's native API (POST {URL}/api/embeddings)
+// unless URL ends in /v1, where it uses the OpenAI embeddings API (POST
+// {URL}/embeddings).
 func (e *Embedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	return e.embedWithin(ctx, embedQuerySem, text)
+}
+
+func (e *Embedder) embedOnce(ctx context.Context, text string) ([]float32, error) {
 	if e.openAIBase() {
 		var out struct {
 			Data []struct {

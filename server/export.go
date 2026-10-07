@@ -268,8 +268,8 @@ func mergeKeypath(tx dbExec, target string, chain []ExportMemory, st *MergeStats
 		}
 		if !srcLatest.Tombstone {
 			if _, err := tx.Exec(
-				`INSERT INTO memories_fts(rowid, content, keypath) VALUES(?, ?, ?)`,
-				prevID, srcLatest.Content, kp,
+				`INSERT INTO memories_fts(rowid, content, keypath, project_id) VALUES(?, ?, ?, ?)`,
+				prevID, srcLatest.Content, kp, target,
 			); err != nil {
 				return err
 			}
