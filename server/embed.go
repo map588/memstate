@@ -59,24 +59,33 @@ func (e *Embedder) WaitForPending() {
 	e.inFlight.Wait()
 }
 
-// NewEmbedder returns an Embedder for the given Ollama URL, model, and
-// per-call timeout. An empty (or zero) argument falls back to the
-// environment, then to the default. It does NOT probe the server — the
-// daemon starts even if Ollama is down, and writes that fail to embed
+// NewEmbedder returns an Embedder for the given embedding server URL,
+// model, and per-call timeout. An empty (or zero) argument falls back to
+// the environment, then to the default. It does NOT probe the server — the
+// daemon starts even if the server is down, and writes that fail to embed
 // silently degrade to FTS-only search.
 //
 // Env vars:
 //
-//	MEMSTATE_OLLAMA_URL      (default http://127.0.0.1:11434; a URL that ends
+//	MEMSTATE_EMBEDDING_URL   (default http://127.0.0.1:11434; a URL that ends
 //	                         in /v1 selects an OpenAI-compatible API)
 //	MEMSTATE_EMBED_MODEL     (default nomic-embed-text)
 //	MEMSTATE_EMBED_TIMEOUT   (default 60s; Go duration syntax)
+//
+// MEMSTATE_OLLAMA_URL is the old name of MEMSTATE_EMBEDDING_URL. It is
+// still read, with a deprecation line, and will be removed.
 func NewEmbedder(url, model string, timeout time.Duration) *Embedder {
 	if url == "" {
-		url = os.Getenv("MEMSTATE_OLLAMA_URL")
+		url = os.Getenv("MEMSTATE_EMBEDDING_URL")
 	}
 	if url == "" {
-		url = defaultOllamaURL
+		if v := os.Getenv("MEMSTATE_OLLAMA_URL"); v != "" {
+			url = v
+			deprecatedName("MEMSTATE_OLLAMA_URL", "MEMSTATE_EMBEDDING_URL")
+		}
+	}
+	if url == "" {
+		url = defaultEmbeddingURL
 	}
 	if model == "" {
 		model = os.Getenv("MEMSTATE_EMBED_MODEL")
@@ -108,10 +117,16 @@ func NewEmbedder(url, model string, timeout time.Duration) *Embedder {
 }
 
 const (
-	defaultOllamaURL    = "http://127.0.0.1:11434"
+	defaultEmbeddingURL = "http://127.0.0.1:11434"
 	defaultEmbedModel   = "nomic-embed-text"
 	defaultEmbedTimeout = 60 * time.Second
 )
+
+// deprecatedName prints the one-line notice for an option that was given
+// under its old name.
+func deprecatedName(old, current string) {
+	fmt.Fprintf(os.Stderr, "memstated: %s is deprecated, use %s\n", old, current)
+}
 
 // timeout returns the per-call bound, or the default for a zero-value
 // Embedder (tests build those directly).

@@ -31,10 +31,10 @@ type healthResponse struct {
 	// SemanticThreshold is the daemon's default cosine floor for semantic
 	// search, so CLI tools report the value search uses.
 	SemanticThreshold float32 `json:"semantic_threshold,omitempty"`
-	// OllamaURL, EmbedTimeout and IdleTimeout complete the effective
+	// EmbeddingURL, EmbedTimeout and IdleTimeout complete the effective
 	// startup config. `memstated upgrade` reads them before it stops a
 	// daemon and restarts it with the same settings.
-	OllamaURL    string `json:"ollama_url,omitempty"`
+	EmbeddingURL string `json:"embedding_url,omitempty"`
 	EmbedTimeout string `json:"embed_timeout,omitempty"` // Go duration
 	IdleTimeout  string `json:"idle_timeout,omitempty"`  // Go duration, absent when disabled
 }
@@ -67,7 +67,7 @@ func newRouter(store *Store, shutdown func(), embedder *Embedder) http.Handler {
 		if embedder != nil {
 			h.EmbedModel = embedder.Model
 			h.SemanticThreshold = envThreshold()
-			h.OllamaURL = embedder.URL
+			h.EmbeddingURL = embedder.URL
 			h.EmbedTimeout = embedder.timeout().String()
 		}
 		if daemonIdleTimeout > 0 {

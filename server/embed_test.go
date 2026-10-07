@@ -278,7 +278,7 @@ func TestEmbedderQueryAndDocumentText(t *testing.T) {
 
 func TestNewEmbedderArgsBeatEnv(t *testing.T) {
 	t.Setenv("MEMSTATE_EMBED_MODEL", "env-model")
-	t.Setenv("MEMSTATE_OLLAMA_URL", "http://env:1")
+	t.Setenv("MEMSTATE_EMBEDDING_URL", "http://env:1")
 	t.Setenv("MEMSTATE_EMBED_TIMEOUT", "90s")
 	if e := NewEmbedder("", "", 0); e.Model != "env-model" || e.URL != "http://env:1" || e.Timeout != 90*time.Second {
 		t.Fatalf("env fallback: %+v", e)
@@ -288,9 +288,9 @@ func TestNewEmbedderArgsBeatEnv(t *testing.T) {
 		t.Fatalf("explicit args must win: %+v", e)
 	}
 	t.Setenv("MEMSTATE_EMBED_MODEL", "")
-	t.Setenv("MEMSTATE_OLLAMA_URL", "")
+	t.Setenv("MEMSTATE_EMBEDDING_URL", "")
 	t.Setenv("MEMSTATE_EMBED_TIMEOUT", "")
-	if e := NewEmbedder("", "", 0); e.Model != defaultEmbedModel || e.URL != defaultOllamaURL || e.Timeout != defaultEmbedTimeout {
+	if e := NewEmbedder("", "", 0); e.Model != defaultEmbedModel || e.URL != defaultEmbeddingURL || e.Timeout != defaultEmbedTimeout {
 		t.Fatalf("defaults: %+v", e)
 	}
 	t.Setenv("MEMSTATE_EMBED_TIMEOUT", "garbage")
@@ -583,5 +583,18 @@ func TestEmbedDocumentHalvesOnLlamaCppOverflow(t *testing.T) {
 	}
 	if len(accepted) != 1 || len(accepted[0]) > 1000 {
 		t.Fatalf("want one accepted input under 1000 bytes, got %d: %q", len(accepted), accepted)
+	}
+}
+
+// The old URL name is still read when the new one is unset; the new one wins.
+func TestNewEmbedderOldURLName(t *testing.T) {
+	t.Setenv("MEMSTATE_EMBEDDING_URL", "")
+	t.Setenv("MEMSTATE_OLLAMA_URL", "http://old:1")
+	if e := NewEmbedder("", "", 0); e.URL != "http://old:1" {
+		t.Fatalf("old name must still be read: %+v", e)
+	}
+	t.Setenv("MEMSTATE_EMBEDDING_URL", "http://new:1")
+	if e := NewEmbedder("", "", 0); e.URL != "http://new:1" {
+		t.Fatalf("new name must win: %+v", e)
 	}
 }

@@ -56,7 +56,7 @@ type probeResult struct {
 // embedStatusReport is everything `embed status` prints.
 type embedStatusReport struct {
 	Configured string
-	OllamaURL  string
+	URL        string
 	Timeout    time.Duration
 	Threshold  float32
 	Total      int // current live keypaths
@@ -73,7 +73,7 @@ type embedStatusReport struct {
 func collectEmbedStatus(store *Store, emb *Embedder, threshold float32, probe bool) (*embedStatusReport, error) {
 	r := &embedStatusReport{
 		Configured: emb.Model,
-		OllamaURL:  emb.URL,
+		URL:        emb.URL,
 		Timeout:    emb.timeout(),
 		Threshold:  threshold,
 	}
@@ -236,7 +236,7 @@ func humanBytes(n int64) string {
 // renderEmbedStatus writes the report as a terminal dashboard.
 func renderEmbedStatus(w io.Writer, r *embedStatusReport) {
 	fmt.Fprintf(w, "model      %s\n", r.Configured)
-	fmt.Fprintf(w, "ollama     %s   timeout %s   threshold %.2f\n", r.OllamaURL, r.Timeout, r.Threshold)
+	fmt.Fprintf(w, "server     %s   timeout %s   threshold %.2f\n", r.URL, r.Timeout, r.Threshold)
 	if r.Probe != nil {
 		if r.Probe.Err != nil {
 			fmt.Fprintf(w, "probe      unreachable: %v\n", r.Probe.Err)

@@ -13,7 +13,7 @@
  * It also checks that the MCP instructions and the `init` rule files tell
  * the agent to never save a denied prompt.
  *
- * The test is hermetic: MEMSTATE_OLLAMA_URL points at a closed port, so
+ * The test is hermetic: MEMSTATE_EMBEDDING_URL points at a closed port, so
  * embedding is unreachable. Writes must still succeed (fire-and-forget) and
  * semantic search must fail fast — both are asserted below.
  *
@@ -79,7 +79,7 @@ async function main() {
   // private child daemon, so the suite never touches a user's daemon.
   env.MEMSTATE_DB = path.join(tmp, "regress.db");
   env.MEMSTATE_NO_UPDATE_CHECK = "1";
-  env.MEMSTATE_OLLAMA_URL = "http://127.0.0.1:9"; // closed port: no network
+  env.MEMSTATE_EMBEDDING_URL = "http://127.0.0.1:9"; // closed port: no network
 
   const transport = new StdioClientTransport({
     command: process.execPath,

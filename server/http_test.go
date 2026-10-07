@@ -71,7 +71,7 @@ func TestHTTPHealthReportsEmbedConfig(t *testing.T) {
 	want := map[string]any{
 		"embed_model":        "qwen3-embedding",
 		"semantic_threshold": float64(defaultThreshold),
-		"ollama_url":         "http://o:1",
+		"embedding_url":      "http://o:1",
 		"embed_timeout":      "45s",
 		"idle_timeout":       "30m0s",
 	}

@@ -33,15 +33,29 @@ function proxyArgs(entryPath: string, embedModel: string): string[] {
 
 const DEFAULT_EMBED_MODEL = "nomic-embed-text";
 
-/** listOllamaModels returns the model names a local Ollama serves, or [] when it is unreachable. */
-async function listOllamaModels(): Promise<string[]> {
-  const base = process.env.MEMSTATE_OLLAMA_URL || "http://127.0.0.1:11434";
+/**
+ * listEmbeddingModels returns the model names the local embedding server
+ * serves, or [] when it is unreachable. The server is MEMSTATE_EMBEDDING_URL
+ * (or the old MEMSTATE_OLLAMA_URL). Ollama answers GET /api/tags; a base
+ * that ends in /v1 is an OpenAI-compatible server and answers GET /models.
+ */
+async function listEmbeddingModels(): Promise<string[]> {
+  const base = (
+    process.env.MEMSTATE_EMBEDDING_URL ||
+    process.env.MEMSTATE_OLLAMA_URL ||
+    "http://127.0.0.1:11434"
+  ).replace(/\/+$/, "");
+  const openai = base.endsWith("/v1");
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 1500);
-    const res = await fetch(`${base}/api/tags`, { signal: controller.signal });
+    const res = await fetch(`${base}${openai ? "/models" : "/api/tags"}`, { signal: controller.signal });
     clearTimeout(timer);
     if (!res.ok) return [];
+    if (openai) {
+      const json = (await res.json()) as { data?: { id?: string }[] };
+      return (json.data ?? []).map((m) => m.id ?? "").filter(Boolean);
+    }
     const json = (await res.json()) as { models?: { name?: string }[] };
     return (json.models ?? []).map((m) => m.name ?? "").filter(Boolean);
   } catch {
@@ -59,7 +73,7 @@ async function listOllamaModels(): Promise<string[]> {
 async function chooseEmbedModel(rl: Prompt, flagValue: string | undefined): Promise<string> {
   if (flagValue !== undefined) return flagValue;
   const current = process.env.MEMSTATE_EMBED_MODEL || DEFAULT_EMBED_MODEL;
-  const models = await listOllamaModels();
+  const models = await listEmbeddingModels();
   const embedFirst = [
     ...models.filter((m) => m.includes("embed")),
     ...models.filter((m) => !m.includes("embed")),

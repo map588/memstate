@@ -314,8 +314,8 @@ func restartPlan(prev *healthResponse, addr string) (args, env []string) {
 	if prev.EmbedModel != "" {
 		args = append(args, "--embed-model", prev.EmbedModel)
 	}
-	if prev.OllamaURL != "" {
-		args = append(args, "--ollama-url", prev.OllamaURL)
+	if prev.EmbeddingURL != "" {
+		args = append(args, "--embedding-url", prev.EmbeddingURL)
 	}
 	if prev.EmbedTimeout != "" {
 		args = append(args, "--embed-timeout", prev.EmbedTimeout)

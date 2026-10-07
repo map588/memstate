@@ -53,20 +53,28 @@ let daemonMode: DaemonMode = "child";
 // unset option is left to the daemon's own defaults.
 interface EmbedOptions {
   model?: string;
-  ollamaUrl?: string;
+  embeddingUrl?: string;
   timeout?: string;
+  // legacy names the old option that supplied embeddingUrl, for one
+  // deprecation line at startup.
+  legacy?: string;
 }
 
 const EMBED_FLAGS: Record<string, keyof EmbedOptions> = {
   "--embed-model": "model",
-  "--ollama-url": "ollamaUrl",
+  "--embedding-url": "embeddingUrl",
+  "--ollama-url": "embeddingUrl", // deprecated alias
   "--embed-timeout": "timeout",
 };
 
 export function parseEmbedOptions(argv: string[], env: NodeJS.ProcessEnv): EmbedOptions {
   const out: EmbedOptions = {};
   if (env.MEMSTATE_EMBED_MODEL) out.model = env.MEMSTATE_EMBED_MODEL;
-  if (env.MEMSTATE_OLLAMA_URL) out.ollamaUrl = env.MEMSTATE_OLLAMA_URL;
+  if (env.MEMSTATE_EMBEDDING_URL) out.embeddingUrl = env.MEMSTATE_EMBEDDING_URL;
+  else if (env.MEMSTATE_OLLAMA_URL) {
+    out.embeddingUrl = env.MEMSTATE_OLLAMA_URL;
+    out.legacy = "MEMSTATE_OLLAMA_URL";
+  }
   if (env.MEMSTATE_EMBED_TIMEOUT) out.timeout = env.MEMSTATE_EMBED_TIMEOUT;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -77,6 +85,8 @@ export function parseEmbedOptions(argv: string[], env: NodeJS.ProcessEnv): Embed
     const value = eq === -1 ? argv[++i] : arg.slice(eq + 1);
     if (!value) throw new Error(`${name} needs a value`);
     out[key] = value;
+    if (name === "--ollama-url") out.legacy = "--ollama-url";
+    else if (key === "embeddingUrl") delete out.legacy;
   }
   return out;
 }
@@ -85,12 +95,18 @@ export function parseEmbedOptions(argv: string[], env: NodeJS.ProcessEnv): Embed
 export function embedDaemonArgs(opts: EmbedOptions): string[] {
   const args: string[] = [];
   if (opts.model) args.push("--embed-model", opts.model);
-  if (opts.ollamaUrl) args.push("--ollama-url", opts.ollamaUrl);
+  if (opts.embeddingUrl) args.push("--embedding-url", opts.embeddingUrl);
   if (opts.timeout) args.push("--embed-timeout", opts.timeout);
   return args;
 }
 
 const EMBED_OPTS = parseEmbedOptions(process.argv.slice(2), process.env);
+if (EMBED_OPTS.legacy) {
+  process.stderr.write(
+    `memstate: ${EMBED_OPTS.legacy} is deprecated, use ` +
+      `${EMBED_OPTS.legacy.startsWith("--") ? "--embedding-url" : "MEMSTATE_EMBEDDING_URL"}\n`
+  );
+}
 const TEST_MODE = process.argv.includes("--test");
 const READY_BANNER = "MEMSTATE_READY addr=";
 

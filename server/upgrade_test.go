@@ -44,10 +44,10 @@ func TestRestartPlan(t *testing.T) {
 	}
 	prev := &healthResponse{
 		EmbedModel: "qwen3-embedding:4b", SemanticThreshold: 0.45,
-		OllamaURL: "http://127.0.0.1:11434", EmbedTimeout: "1m0s", IdleTimeout: "30m0s",
+		EmbeddingURL: "http://127.0.0.1:11434", EmbedTimeout: "1m0s", IdleTimeout: "30m0s",
 	}
 	args, env = restartPlan(prev, "127.0.0.1:8765")
-	want := "--addr 127.0.0.1:8765 --embed-model qwen3-embedding:4b --ollama-url http://127.0.0.1:11434 --embed-timeout 1m0s --idle-timeout 30m0s"
+	want := "--addr 127.0.0.1:8765 --embed-model qwen3-embedding:4b --embedding-url http://127.0.0.1:11434 --embed-timeout 1m0s --idle-timeout 30m0s"
 	if strings.Join(args, " ") != want {
 		t.Fatalf("args: %q", strings.Join(args, " "))
 	}
@@ -69,7 +69,7 @@ func TestUpgradeRestartKeepsConfig(t *testing.T) {
 	prev := &healthResponse{
 		Service: healthServiceName, Version: healthVersion,
 		EmbedModel: "keep-me", SemanticThreshold: 0.37,
-		OllamaURL: "http://127.0.0.1:9", EmbedTimeout: "7s", IdleTimeout: "20m0s",
+		EmbeddingURL: "http://127.0.0.1:9", EmbedTimeout: "7s", IdleTimeout: "20m0s",
 	}
 	if err := startDetachedDaemon(bin, addr, prev); err != nil {
 		t.Fatal(err)
@@ -79,7 +79,7 @@ func TestUpgradeRestartKeepsConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if h.EmbedModel != "keep-me" || h.SemanticThreshold != 0.37 || h.OllamaURL != "http://127.0.0.1:9" ||
+	if h.EmbedModel != "keep-me" || h.SemanticThreshold != 0.37 || h.EmbeddingURL != "http://127.0.0.1:9" ||
 		h.EmbedTimeout != "7s" || h.IdleTimeout != "20m0s" {
 		t.Fatalf("restarted daemon lost config: %+v", h)
 	}
