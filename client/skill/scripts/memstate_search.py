@@ -29,7 +29,9 @@ def main() -> int:
     add_scope_args(ap)
     ap.add_argument("--all-projects", action="store_true",
                     help="search every project instead of just this repo's")
-    ap.add_argument("--limit", type=int, default=20)
+    ap.add_argument("--limit", type=int, default=10)
+    ap.add_argument("--include-content", action="store_true",
+                    help="return the full content of each hit, not only a 40-word preview")
     ap.add_argument("--mode", choices=("hybrid", "fts", "semantic"), default="hybrid")
     ap.add_argument("--threshold", type=float, default=None,
                     help="semantic and hybrid: cosine floor for hits (default 0.5)")
@@ -44,6 +46,8 @@ def main() -> int:
     body = {"query": args.query, "limit": args.limit, "mode": args.mode}
     if not args.all_projects:
         body["project_id"] = resolve_project(args)
+    if args.include_content:
+        body["include_content"] = True
     if args.threshold is not None:
         body["threshold"] = args.threshold
     if args.category:

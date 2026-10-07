@@ -68,6 +68,11 @@ CREATE TABLE IF NOT EXISTS meta (
 // rebuild lazily via the heal path in maybeEmbedContent.
 const embedSource = "content"
 
+// defaultSearchLimit is the number of hits a search returns when the
+// request names no limit. It is small on purpose: each hit is a lead that
+// the caller follows with a get on its keypath.
+const defaultSearchLimit = 10
+
 // Memory is one row in the version chain for a (project_id, keypath).
 type Memory struct {
 	ID        int64    `json:"id"`
@@ -583,7 +588,7 @@ type SemanticHit struct {
 // have a vector) can pass the pre-embedded query directly.
 func (s *Store) SemanticSearch(projectID string, query []float32, model string, threshold float32, filter SearchFilter, limit int) ([]*SemanticHit, error) {
 	if limit <= 0 {
-		limit = 20
+		limit = defaultSearchLimit
 	}
 	rows, err := s.ListKeypathEmbeddings(projectID, model)
 	if err != nil {
@@ -772,7 +777,7 @@ func (s *Store) SearchAny(projectID, query string, filter SearchFilter, limit in
 // filter SQL.
 func (s *Store) searchFTS(projectID, ftsQuery string, filter SearchFilter, limit int) ([]*Memory, error) {
 	if limit <= 0 {
-		limit = 20
+		limit = defaultSearchLimit
 	}
 	q := `
 		SELECT ` + memoryCols + ` FROM memories m

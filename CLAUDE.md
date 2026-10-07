@@ -79,7 +79,7 @@ A manually-started `--addr` daemon that finds the port busy probes `/health` its
 
 ### Versioned keypath store (`server/store.go`)
 
-- Data model: per-project dot-notation keypath tree. Each write appends a new row to `memories` (never updates). Prior version is returned as `superseded` so the caller sees the conflict.
+- Data model: per-project dot-notation keypath tree. Each write appends a new row to `memories` (never updates). Write responses (`writeResp`, `extractedItem`) carry `MemoryRef`s, never content: the caller knows what it sent, and the superseded version carries a `preview` of `previewWordCount` (40) words. Search hits (`searchResult`) likewise carry `preview` and add `content` only when the request sets `include_content` (the CLI and `memstated recall` do); the MCP tool does not expose it, so the model reads full text with `memstate_get`. `defaultSearchLimit` is 10.
 - Identical content AND metadata (category/topics) to current version is a no-op → `action: "unchanged"`, no new row. Same content with different metadata DOES version.
 - `Delete` appends a tombstone row; history is preserved. `ProjectDeleted` gates reads and deletes only — **any write revives a soft-deleted project** (`ensureProject`'s `ON CONFLICT ... SET deleted_at = NULL`).
 - FTS5 virtual table `memories_fts` backs the `fts` mode and the FTS side of `hybrid`; only the current version is indexed (the superseded version's FTS row is deleted on write). Free-text queries are token-quoted (`ftsQuote`, implicit AND; `ftsQuoteOr` for hybrid, any token) so punctuation can't hit FTS5 operator syntax.

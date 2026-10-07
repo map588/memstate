@@ -193,10 +193,43 @@ type storeReq struct {
 	Topics    []string `json:"topics,omitempty"`
 }
 
+// MemoryRef names one stored version without its content. Write responses
+// use it: the caller knows the content it sent, and a prior version is one
+// history call away. A superseded version carries a preview so the caller
+// can see what it replaced.
+type MemoryRef struct {
+	ID        int64    `json:"id"`
+	ProjectID string   `json:"project_id"`
+	Keypath   string   `json:"keypath"`
+	Source    string   `json:"source,omitempty"`
+	Category  string   `json:"category,omitempty"`
+	Topics    []string `json:"topics,omitempty"`
+	Version   int      `json:"version"`
+	CreatedAt int64    `json:"created_at"`
+	Preview   string   `json:"preview,omitempty"`
+}
+
+// memoryRef converts a Memory to its reference. withPreview adds the first
+// previewWordCount words of the content.
+func memoryRef(m *Memory, withPreview bool) *MemoryRef {
+	if m == nil {
+		return nil
+	}
+	r := &MemoryRef{
+		ID: m.ID, ProjectID: m.ProjectID, Keypath: m.Keypath,
+		Source: m.Source, Category: m.Category, Topics: m.Topics,
+		Version: m.Version, CreatedAt: m.CreatedAt,
+	}
+	if withPreview {
+		r.Preview = previewWords(m.Content, previewWordCount)
+	}
+	return r
+}
+
 type writeResp struct {
-	Action     string  `json:"action"` // "created" | "superseded" | "unchanged"
-	Stored     *Memory `json:"stored"`
-	Superseded *Memory `json:"superseded,omitempty"`
+	Action     string     `json:"action"` // "created" | "superseded" | "unchanged"
+	Stored     *MemoryRef `json:"stored"`
+	Superseded *MemoryRef `json:"superseded,omitempty"`
 }
 
 func handleStore(store *Store, embedder *Embedder) http.HandlerFunc {
@@ -221,8 +254,8 @@ func handleStore(store *Store, embedder *Embedder) http.HandlerFunc {
 		maybeEmbedContent(store, embedder, in.ProjectID, kp, stored.Content, action != "unchanged")
 		writeJSON(w, http.StatusOK, writeResp{
 			Action:     action,
-			Stored:     stored,
-			Superseded: prev,
+			Stored:     memoryRef(stored, false),
+			Superseded: memoryRef(prev, true),
 		})
 	}
 }
@@ -242,10 +275,10 @@ type rememberReq struct {
 
 // extractedItem is one entry in a batch remember response.
 type extractedItem struct {
-	Keypath    string  `json:"keypath"`
-	Action     string  `json:"action"` // "created" | "superseded"
-	Stored     *Memory `json:"stored"`
-	Superseded *Memory `json:"superseded,omitempty"`
+	Keypath    string     `json:"keypath"`
+	Action     string     `json:"action"` // "created" | "superseded"
+	Stored     *MemoryRef `json:"stored"`
+	Superseded *MemoryRef `json:"superseded,omitempty"`
 }
 
 // rememberResp is returned from /memories/remember regardless of whether the
@@ -296,8 +329,8 @@ func handleRemember(store *Store, embedder *Embedder) http.HandlerFunc {
 			out.Items[i] = extractedItem{
 				Keypath:    it.Keypath,
 				Action:     action,
-				Stored:     it.Stored,
-				Superseded: it.Superseded,
+				Stored:     memoryRef(it.Stored, false),
+				Superseded: memoryRef(it.Superseded, true),
 			}
 			maybeEmbedContent(store, embedder, in.ProjectID, it.Keypath,
 				it.Stored.Content, action != "unchanged")
@@ -424,6 +457,73 @@ type searchReq struct {
 	// env / defaultThreshold. An explicit value (including 0 or negative) is
 	// honoured as-is so callers can accept-all with threshold=0.
 	Threshold *float32 `json:"threshold,omitempty"`
+	// IncludeContent adds the full content to every hit. Off by default:
+	// a hit carries a preview, and the caller reads the keypaths it wants.
+	IncludeContent bool `json:"include_content,omitempty"`
+}
+
+// searchResult is one hit as the API returns it: the memory's metadata, a
+// preview of its content, and the content only when the request set
+// include_content.
+type searchResult struct {
+	ID        int64    `json:"id"`
+	ProjectID string   `json:"project_id"`
+	Keypath   string   `json:"keypath"`
+	Preview   string   `json:"preview"`
+	Content   string   `json:"content,omitempty"`
+	Source    string   `json:"source,omitempty"`
+	Category  string   `json:"category,omitempty"`
+	Topics    []string `json:"topics,omitempty"`
+	Version   int      `json:"version"`
+	CreatedAt int64    `json:"created_at"`
+	Score     *float32 `json:"score,omitempty"`
+	Sources   []string `json:"sources,omitempty"`
+}
+
+func newSearchResult(m *Memory, full bool) searchResult {
+	r := searchResult{
+		ID: m.ID, ProjectID: m.ProjectID, Keypath: m.Keypath,
+		Preview: previewWords(m.Content, previewWordCount),
+		Source:  m.Source, Category: m.Category, Topics: m.Topics,
+		Version: m.Version, CreatedAt: m.CreatedAt,
+	}
+	if full {
+		r.Content = m.Content
+	}
+	return r
+}
+
+// The three converters return an empty slice, never nil, so the JSON is
+// always an array.
+func ftsResults(ms []*Memory, full bool) []searchResult {
+	out := make([]searchResult, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, newSearchResult(m, full))
+	}
+	return out
+}
+
+func semanticResults(hs []*SemanticHit, full bool) []searchResult {
+	out := make([]searchResult, 0, len(hs))
+	for _, h := range hs {
+		r := newSearchResult(h.Memory, full)
+		score := h.Score
+		r.Score = &score
+		out = append(out, r)
+	}
+	return out
+}
+
+func hybridResults(hs []*HybridHit, full bool) []searchResult {
+	out := make([]searchResult, 0, len(hs))
+	for _, h := range hs {
+		r := newSearchResult(h.Memory, full)
+		score := h.Score
+		r.Score = &score
+		r.Sources = h.Sources
+		out = append(out, r)
+	}
+	return out
 }
 
 func handleSearch(store *Store, embedder *Embedder) http.HandlerFunc {
@@ -474,7 +574,7 @@ func handleSearch(store *Store, embedder *Embedder) http.HandlerFunc {
 			writeJSON(w, http.StatusOK, map[string]any{
 				"mode":        "fts",
 				"query":       in.Query,
-				"results":     orEmpty(hits),
+				"results":     ftsResults(hits, in.IncludeContent),
 				"total_found": len(hits),
 			})
 		case "semantic":
@@ -501,7 +601,7 @@ func handleSearch(store *Store, embedder *Embedder) http.HandlerFunc {
 				"model":       embedder.Model,
 				"threshold":   threshold,
 				"query":       in.Query,
-				"results":     orEmpty(hits),
+				"results":     semanticResults(hits, in.IncludeContent),
 				"total_found": len(hits),
 			})
 		default:
@@ -520,7 +620,7 @@ func handleSearch(store *Store, embedder *Embedder) http.HandlerFunc {
 func hybridSearch(ctx context.Context, store *Store, embedder *Embedder, in searchReq, filter SearchFilter, threshold float32) (map[string]any, int, error) {
 	limit := in.Limit
 	if limit <= 0 {
-		limit = 20
+		limit = defaultSearchLimit
 	}
 	// Each side hands more candidates to the fuser than the caller asked
 	// for, so a hit that ranks low on one side but high on the other still
@@ -553,7 +653,7 @@ func hybridSearch(ctx context.Context, store *Store, embedder *Embedder, in sear
 		}
 	}
 	hits := rrfFuse(fts, sem, limit)
-	out["results"] = orEmpty(hits)
+	out["results"] = hybridResults(hits, in.IncludeContent)
 	out["total_found"] = len(hits)
 	return out, http.StatusOK, nil
 }

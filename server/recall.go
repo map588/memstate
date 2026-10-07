@@ -372,9 +372,10 @@ func recallProjectExists(addr, project string) (bool, error) {
 
 func recallSearch(addr, project, prompt string) ([]recallHit, error) {
 	req := map[string]any{
-		"query": prompt,
-		"mode":  "hybrid",
-		"limit": recallSearchLim,
+		"query":           prompt,
+		"mode":            "hybrid",
+		"limit":           recallSearchLim,
+		"include_content": true,
 	}
 	if project != "" {
 		req["project_id"] = project

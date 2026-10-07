@@ -832,7 +832,8 @@ const TOOLS: ToolDef[] = [
     description:
       "Save ONE short fact at ONE keypath (e.g. `config.port` = `8080`). " +
       "To update a fact, write the SAME keypath with the new value — the " +
-      "old version is preserved and returned as `superseded`. Do not " +
+      "old version is preserved and named as `superseded` with a 40-word " +
+      "preview (memstate_history has it in full). Do not " +
       "create a new keypath for a new value of the same fact. For " +
       "multi-fact markdown summaries use memstate_remember instead.",
     inputSchema: {
@@ -1041,7 +1042,9 @@ const TOOLS: ToolDef[] = [
       "Find current memories when you don't know the exact keypath. Only " +
       "the latest version of each keypath is searched; deleted keypaths " +
       "and deleted projects never match. Searches this repo's project by " +
-      "default; pass all_projects=true to search the whole store.",
+      "default; pass all_projects=true to search the whole store. Each hit " +
+      "carries `preview` (its first 40 words), not the content: pick the " +
+      "keypaths that matter and read them with memstate_get(keypath).",
     inputSchema: {
       type: "object",
       properties: {
@@ -1064,7 +1067,7 @@ const TOOLS: ToolDef[] = [
           default: false,
           description: "search every project in the store instead of just this repo's",
         },
-        limit: { type: "integer", default: 20 },
+        limit: { type: "integer", default: 10 },
         mode: {
           type: "string",
           enum: ["hybrid", "fts", "semantic"],
@@ -1229,8 +1232,10 @@ that the user or a permission check denied. Do not save its tool name, its
 command, its arguments, or the fact of the denial. Do not save it under any
 keypath or category, in a task summary, or as a warning for a later session.
 
-Writes are versioned: writing an existing keypath supersedes the old value
-and returns it to you, so you see what changed. Deletes keep history.
+Writes are versioned: writing an existing keypath supersedes the old value.
+The response names the new and the prior version (keypath, version, and a
+40-word preview of the prior content). It never echoes the content you
+sent; memstate_history returns prior versions in full. Deletes keep history.
 
 Conventions — follow these EXACTLY; every deviation fragments the store:
 - project_id: OMIT it. The cwd project is "${DEFAULT_PROJECT}"

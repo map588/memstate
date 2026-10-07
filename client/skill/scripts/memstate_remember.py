@@ -13,6 +13,8 @@ need an explicit --keypath host.<host_slug>.env.* or .tools.*. One bad
 section rejects the whole call, nothing is written.
 
 Server response (both modes): { method, items: [{keypath, action, stored, superseded?}] }.
+stored and superseded name the versions (id, keypath, version, ...) and
+carry no content; superseded has a 40-word preview.
 """
 import argparse
 import sys

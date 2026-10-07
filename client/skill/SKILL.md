@@ -35,7 +35,7 @@ run them from there or by absolute path.
 | **Project** | Top-level container for memories, keyed by `project_id`. Auto-created on first write. |
 | **Keypath** | Dot-separated path (`decisions.auth_provider`) unique within a project. Stored exactly as you write it. Nothing is auto-prefixed. |
 | **Memory** | One fact or markdown section stored at a keypath, with full version history. Memory ids are integers. |
-| **Versioning** | A write to an existing keypath supersedes the old value. The response returns the old version as `superseded`. Writes are synchronous. Data is queryable when the script returns. |
+| **Versioning** | A write to an existing keypath supersedes the old value. The response names the old version as `superseded` with a 40-word preview; `memstate_history.py` returns it in full. Writes are synchronous. Data is queryable when the script returns. |
 | **Tombstone** | A delete adds a tombstone version. History is never destroyed. A new write to the keypath revives it. |
 
 ## Naming conventions: follow EXACTLY
@@ -215,7 +215,8 @@ python3 scripts/memstate_set.py \
 ```
 
 **Response:** `action` (`created` | `superseded` | `unchanged`),
-`stored` (the new memory), `superseded` (the prior version, if any).
+`stored` (id, keypath, version, metadata; no content), `superseded` (the
+prior version, if any, with a 40-word `preview`).
 `unchanged` means identical content AND metadata. No new version was
 written.
 
@@ -233,7 +234,7 @@ python3 scripts/memstate_remember.py \
 The split is a deterministic parse of `##`+ headings. No LLM, no job
 queue. The operation is synchronous. **Response:** `method`
 (`explicit` | `headings`), `items[]` each with `keypath`, `action`,
-`stored`, `superseded?`.
+`stored`, `superseded?` (the same shapes as `memstate_set.py`).
 
 ### `memstate_get.py`: browse and retrieve
 
@@ -260,13 +261,17 @@ python3 scripts/memstate_search.py --query "PLAIN WORDS" \
   [--threshold 0.0-1.0]      # semantic and hybrid, default 0.5
   [--category WORD] [--topics TAG1,TAG2]   # topics = match any
   [--keypath-prefix KP]      # only this keypath or below, e.g. branches.feature_x
-  [--limit N]                # default 20
+  [--limit N]                # default 10
+  [--include-content]        # full content per hit instead of a 40-word preview
 ```
 
 Only the current version of each keypath is searchable. Tombstoned
 keypaths and soft-deleted projects never match. Query text is plain
 words. Punctuation is safe, and there is no boolean syntax.
-**Response:** `results[]`, `total_found`, `query`, `mode` (+ `score`
+Each hit carries `preview` (its first 40 words) instead of `content`;
+read the keypaths that matter with `memstate_get.py`, or pass
+`--include-content` when a script needs the text. **Response:**
+`results[]`, `total_found`, `query`, `mode` (+ `score`
 per result and `threshold`/`model` in semantic and hybrid modes; hybrid
 adds `sources` per result and `degraded` when the embedder was
 unavailable and only FTS hits are present).

@@ -25,7 +25,7 @@ const rrfK = 60
 // most limit items.
 func rrfFuse(fts []*Memory, sem []*SemanticHit, limit int) []*HybridHit {
 	if limit <= 0 {
-		limit = 20
+		limit = defaultSearchLimit
 	}
 	type key struct{ project, keypath string }
 	byKey := map[key]*HybridHit{}

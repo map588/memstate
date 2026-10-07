@@ -233,9 +233,17 @@ func TestCLISetEditRmViaDaemon(t *testing.T) {
 		t.Fatalf("edit: %d %s", code, out)
 	}
 	stored := edited["stored"].(map[string]any)
-	if stored["version"].(float64) != 3 || stored["category"] != "status" ||
-		!strings.Contains(stored["content"].(string), "appended") {
+	if stored["version"].(float64) != 3 || stored["category"] != "status" {
 		t.Fatalf("edit result: %v", stored)
+	}
+	if _, has := stored["content"]; has {
+		t.Fatalf("edit reply echoes content: %v", stored)
+	}
+	// The daemon search asks for include_content, so the stored text shows.
+	code, out = runCLI(t, "search", "appended", "--project", "proj", "--json")
+	got := decodeCLI(t, out)
+	if code != 0 || !strings.Contains(got["results"].([]any)[0].(map[string]any)["content"].(string), "appended") {
+		t.Fatalf("edit did not store the appended line: %d %s", code, out)
 	}
 	// An editor that changes nothing writes nothing.
 	t.Setenv("EDITOR", "true")

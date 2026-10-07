@@ -563,7 +563,7 @@ func cliSearch(args []string) int {
 	fs, o := newVerbFlags("search")
 	all := fs.Bool("all", false, "search every project")
 	mode := fs.String("mode", "hybrid", "hybrid | fts | semantic (daemon only)")
-	limit := fs.Int("limit", 20, "maximum results")
+	limit := fs.Int("limit", defaultSearchLimit, "maximum results")
 	category := fs.String("category", "", "only this category")
 	topics := fs.String("topics", "", "comma-separated: any of these topics")
 	pos, err := parseInterspersed(fs, args)
@@ -589,7 +589,7 @@ func cliSearch(args []string) int {
 	if o.db == "" {
 		d, derr := openDaemon(o.addr)
 		if derr == nil {
-			body := map[string]any{"query": query, "mode": *mode, "limit": *limit}
+			body := map[string]any{"query": query, "mode": *mode, "limit": *limit, "include_content": true}
 			if project != "" {
 				body["project_id"] = project
 			}
@@ -664,9 +664,9 @@ func cliSearch(args []string) int {
 
 // storeReply is the daemon's answer to /memories/store.
 type storeReply struct {
-	Action     string  `json:"action"`
-	Stored     *Memory `json:"stored"`
-	Superseded *Memory `json:"superseded"`
+	Action     string     `json:"action"`
+	Stored     *MemoryRef `json:"stored"`
+	Superseded *MemoryRef `json:"superseded"`
 }
 
 func printStoreReply(raw []byte, o cliOpts) int {

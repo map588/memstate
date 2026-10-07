@@ -271,7 +271,10 @@ encode this loop.
 ### `memstate_remember`: write shape
 
 The tool returns `{ method, items: [{keypath, action, stored, superseded?}] }`
-for both the explicit-keypath mode and the heading-extract mode.
+for both the explicit-keypath mode and the heading-extract mode. `stored`
+and `superseded` name the versions and carry no content; `superseded` has
+a 40-word `preview`. Search hits carry a `preview` too, and the agent reads
+the keypaths it wants with `memstate_get`.
 
 - `method` is `"explicit"` or `"headings"`.
 - `action` is `"created"`, `"superseded"`, or `"unchanged"`. `"superseded"` means a prior version existed at that keypath. `"unchanged"` means the content is identical to the current version, and no new row is written.
@@ -347,7 +350,7 @@ project_id = "my_app"
 ```
 
 Each write appends a new version. If a prior version existed, the
-response includes it as `superseded`. The agent sees the conflict, and
+response names it as `superseded` with a 40-word preview. The agent sees the conflict, and
 no data is overwritten silently. `memstate_history` returns the full
 chain. `memstate_delete` appends a tombstone row. The data stays in
 history but no longer appears in reads or search.

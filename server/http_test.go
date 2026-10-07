@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -291,10 +293,10 @@ func TestHTTPRememberPreambleCaptured(t *testing.T) {
 		t.Fatalf("code %d %+v", code, body)
 	}
 	items := body["items"].([]any)
-	kps := map[string]string{}
+	kps := map[string]bool{}
 	for _, raw := range items {
 		it := raw.(map[string]any)
-		kps[it["keypath"].(string)] = it["stored"].(map[string]any)["content"].(string)
+		kps[it["keypath"].(string)] = true
 	}
 	if _, ok := kps["preamble"]; !ok {
 		t.Fatalf("preamble not captured: %+v", kps)
@@ -487,5 +489,87 @@ func TestHTTPRejectsDroppedFields(t *testing.T) {
 	})
 	if code != 400 {
 		t.Fatalf("at_revision field should be rejected, got %d", code)
+	}
+}
+
+// A write response names the versions and never echoes content: the caller
+// knows what it sent, and the prior version is one history call away. The
+// superseded version carries a preview of previewWordCount words.
+func TestHTTPWriteResponseCarriesNoContent(t *testing.T) {
+	ts := newTestServer(t)
+	first := strings.Repeat("word ", 50) + "end"
+	code, body := postJSON(t, ts.URL+"/api/v1/memories/store", map[string]any{
+		"project_id": "p", "keypath": "k", "content": first,
+	})
+	if code != 200 {
+		t.Fatalf("code %d %+v", code, body)
+	}
+	stored := body["stored"].(map[string]any)
+	if _, has := stored["content"]; has {
+		t.Fatalf("stored echoes content: %+v", stored)
+	}
+	if _, has := stored["preview"]; has {
+		t.Fatalf("stored carries a preview: %+v", stored)
+	}
+	_, body = postJSON(t, ts.URL+"/api/v1/memories/store", map[string]any{
+		"project_id": "p", "keypath": "k", "content": "v2",
+	})
+	sup := body["superseded"].(map[string]any)
+	if _, has := sup["content"]; has {
+		t.Fatalf("superseded echoes content: %+v", sup)
+	}
+	words := strings.Fields(sup["preview"].(string))
+	if len(words) != previewWordCount+1 || words[previewWordCount] != "…" {
+		t.Fatalf("superseded preview: want %d words and a cut mark, got %q", previewWordCount, sup["preview"])
+	}
+	_, body = postJSON(t, ts.URL+"/api/v1/memories/remember", map[string]any{
+		"project_id": "p", "content": "## K\n\nv3\n",
+	})
+	it := body["items"].([]any)[0].(map[string]any)
+	if _, has := it["stored"].(map[string]any)["content"]; has {
+		t.Fatalf("remember stored echoes content: %+v", it)
+	}
+	if got := it["superseded"].(map[string]any)["preview"]; got != "v2" {
+		t.Fatalf("remember superseded preview = %v, want v2", got)
+	}
+}
+
+// A search hit carries a preview, not the content, unless the request sets
+// include_content. Without a limit a search returns defaultSearchLimit hits.
+func TestHTTPSearchReturnsPreviewNotContent(t *testing.T) {
+	ts := newTestServer(t)
+	long := strings.Repeat("alpha ", 60) + "zebra"
+	postJSON(t, ts.URL+"/api/v1/memories/store", map[string]any{
+		"project_id": "p", "keypath": "k", "content": long,
+	})
+	for _, mode := range []string{"fts", "hybrid"} {
+		_, body := postJSON(t, ts.URL+"/api/v1/memories/search", map[string]any{
+			"project_id": "p", "query": "alpha", "mode": mode,
+		})
+		hit := body["results"].([]any)[0].(map[string]any)
+		if _, has := hit["content"]; has {
+			t.Fatalf("%s: hit carries content: %+v", mode, hit)
+		}
+		if n := len(strings.Fields(hit["preview"].(string))); n != previewWordCount+1 {
+			t.Fatalf("%s: preview has %d words, want %d plus the cut mark", mode, n, previewWordCount)
+		}
+		_, body = postJSON(t, ts.URL+"/api/v1/memories/search", map[string]any{
+			"project_id": "p", "query": "alpha", "mode": mode, "include_content": true,
+		})
+		hit = body["results"].([]any)[0].(map[string]any)
+		if hit["content"] != long {
+			t.Fatalf("%s: include_content did not return the content: %+v", mode, hit)
+		}
+	}
+	for i := 0; i < defaultSearchLimit+5; i++ {
+		postJSON(t, ts.URL+"/api/v1/memories/store", map[string]any{
+			"project_id": "p", "keypath": fmt.Sprintf("many.k%d", i), "content": "common token",
+		})
+	}
+	_, body := postJSON(t, ts.URL+"/api/v1/memories/search", map[string]any{
+		"project_id": "p", "query": "common token", "mode": "fts",
+	})
+	if n := len(body["results"].([]any)); n != defaultSearchLimit {
+		t.Fatalf("default limit: got %d hits, want %d", n, defaultSearchLimit)
 	}
 }

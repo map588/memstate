@@ -150,7 +150,9 @@ async function main() {
       !r.isError &&
         r.data.action === "superseded" &&
         r.data.stored.version === 2 &&
-        r.data.superseded?.content === "first value with zanzibar token",
+        r.data.stored.content === undefined &&
+        r.data.superseded?.content === undefined &&
+        r.data.superseded?.preview === "first value with zanzibar token",
       JSON.stringify(r));
 
     r = await call(client, "memstate_set", {
@@ -160,6 +162,17 @@ async function main() {
     });
     check("set: identical rewrite is unchanged (no new version)",
       !r.isError && r.data.action === "unchanged" && r.data.stored.version === 2,
+      JSON.stringify(r));
+
+    r = await call(client, "memstate_search", {
+      project_id: PROJECT,
+      query: "second value",
+      mode: "fts",
+    });
+    check("search: hits carry a preview and no content",
+      !r.isError &&
+        r.data.results.some((h) =>
+          h.keypath === "config.alpha" && h.preview === "second value" && h.content === undefined),
       JSON.stringify(r));
 
     // ---- remember: explicit keypath and heading extraction ---------------
