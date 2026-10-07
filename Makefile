@@ -97,6 +97,7 @@ DIST    := dist
 SERVER_BIN  := server/memstated$(EXE)
 CLAUDE_HOME := $(HOME)/.claude
 SKILL_DIR   := $(CLAUDE_HOME)/skills/memstate
+PRECOMPACT_DIR := $(CLAUDE_HOME)/skills/memstate-precompact
 HOOK_SCRIPT := $(CLAUDE_HOME)/hooks/memstate-persist-reminder.sh
 RECALL_HOOK_SCRIPT := $(CLAUDE_HOME)/hooks/memstate-recall.sh
 
@@ -137,22 +138,26 @@ uninstall:  ## Remove installed binary and unlink proxy
 	-$(call RM_F,$(GOBIN)/memstate$(EXE))
 	-cd client && npm unlink -g @memstate/mcp
 
-install-skill:  ## Install Claude Code skill + UserPromptSubmit hooks into ~/.claude
+install-skill:  ## Install the Claude Code skills + UserPromptSubmit hooks into ~/.claude
 	@$(call MKDIR_P,$(CLAUDE_HOME)/skills)
 	@$(call MKDIR_P,$(CLAUDE_HOME)/hooks)
 	$(call RM_RF,$(SKILL_DIR))
 	$(call CP_R,client/skill,$(SKILL_DIR))
+	$(call RM_RF,$(PRECOMPACT_DIR))
+	$(call CP_R,client/skill-precompact,$(PRECOMPACT_DIR))
 	$(call CP_FILE,.claude/hooks/memstate-persist-reminder.sh,$(HOOK_SCRIPT))
 	$(call CP_FILE,.claude/hooks/memstate-recall.sh,$(RECALL_HOOK_SCRIPT))
 	$(PYTHON) scripts/configure-claude-hook.py install $(HOOK_SCRIPT) $(RECALL_HOOK_SCRIPT)
 	@$(BLANK)
-	@$(call SAY,Skill installed in $(call P,$(SKILL_DIR)))
+	@$(call SAY,Skills installed in $(call P,$(SKILL_DIR)))
+	@$(call SAY,                    $(call P,$(PRECOMPACT_DIR)) (run /memstate-precompact before /compact))
 	@$(call SAY,Hooks installed in $(call P,$(HOOK_SCRIPT)))
 	@$(call SAY,                   $(call P,$(RECALL_HOOK_SCRIPT)) (finds the shared daemon through ~/.memstate/daemon.addr or MEMSTATE_ADDR))
 	@$(call SAY,Settings updated: $(call P,$(CLAUDE_HOME)/settings.json) (backup at settings.json.bak))
 
-uninstall-skill:  ## Remove skill + hooks from ~/.claude
+uninstall-skill:  ## Remove both skills + hooks from ~/.claude
 	-$(call RM_RF,$(SKILL_DIR))
+	-$(call RM_RF,$(PRECOMPACT_DIR))
 	-$(call RM_F,$(HOOK_SCRIPT))
 	-$(call RM_F,$(RECALL_HOOK_SCRIPT))
 	-$(PYTHON) scripts/configure-claude-hook.py uninstall
@@ -191,6 +196,7 @@ release: client/dist/index.js  ## Build memstated for linux/{amd64,arm64}, darwi
 	$(call CP_FILE,client/LICENSE,$(BUNDLE_DIR)/client/LICENSE)
 	$(call CP_R,client/dist,$(BUNDLE_DIR)/client/dist)
 	$(call CP_R,client/skill,$(BUNDLE_DIR)/skill)
+	$(call CP_R,client/skill-precompact,$(BUNDLE_DIR)/skill-precompact)
 	$(call CP_FILE,.claude/hooks/memstate-persist-reminder.sh,$(BUNDLE_DIR)/hooks/memstate-persist-reminder.sh)
 	$(call CP_FILE,.claude/hooks/memstate-recall.sh,$(BUNDLE_DIR)/hooks/memstate-recall.sh)
 	$(call CP_FILE,scripts/configure-claude-hook.py,$(BUNDLE_DIR)/configure-claude-hook.py)

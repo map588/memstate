@@ -108,6 +108,7 @@ jobs:
           memstate --help >/dev/null 2>&1
           MEMSTATE_DB="$RUNNER_TEMP/smoke/memstate.db" MEMSTATE_NO_UPDATE_CHECK=1 memstate-mcp --test
           test -f "$HOME/.claude/skills/memstate/SKILL.md"
+          test -f "$HOME/.claude/skills/memstate-precompact/SKILL.md"
           python3 - bash <<'EOF'
           import json, os, subprocess, sys
           settings = json.load(open(os.path.join(os.path.expanduser("~"), ".claude", "settings.json")))
@@ -154,6 +155,7 @@ jobs:
           cmd /c "memstate-mcp --test 2>&1"
           if ($LASTEXITCODE -ne 0) { throw 'memstate-mcp --test failed' }
           if (-not (Test-Path (Join-Path $env:USERPROFILE '.claude\skills\memstate\SKILL.md'))) { throw 'SKILL.md is missing' }
+          if (-not (Test-Path (Join-Path $env:USERPROFILE '.claude\skills\memstate-precompact\SKILL.md'))) { throw 'precompact SKILL.md is missing' }
           @'
           import json, os, subprocess, sys
           settings = json.load(open(os.path.join(os.path.expanduser("~"), ".claude", "settings.json")))

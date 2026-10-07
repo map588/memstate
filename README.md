@@ -165,9 +165,10 @@ tries again.
 ### Claude Code skill and hook (optional)
 
 If you use Claude Code, the install script asks whether to install the
-bundled skill. From a clone, `make install-skill` installs it. The skill
-goes to `~/.claude/skills/memstate/`, and two UserPromptSubmit hooks are
-added:
+bundled skills. From a clone, `make install-skill` installs them. The
+memstate skill goes to `~/.claude/skills/memstate/`, the pre-compact
+skill to `~/.claude/skills/memstate-precompact/`, and two
+UserPromptSubmit hooks are added:
 
 - `memstate-persist-reminder.sh` points you to `memstate_remember`
   after three or more file edits since your last persist.
@@ -184,7 +185,13 @@ Claude Code runs hooks with Git Bash, so the install script adds the
 hooks only when it finds Git Bash. The persist reminder also needs `jq`
 and does nothing without it.
 
-`make uninstall-skill` removes the skill and both hooks. The install
+Before a `/compact`, run `/memstate-precompact`. The agent writes the
+session state (task summary, decisions, gotchas, todo, open questions)
+to memstate and prints the `/compact` line to paste. That line tells
+the summary what to keep and tells the next context window to read
+those keypaths first.
+
+`make uninstall-skill` removes both skills and both hooks. The install
 is idempotent and safe to run again. It replaces existing memstate
 entries in `settings.json` and does not duplicate them.
 

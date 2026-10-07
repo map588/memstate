@@ -23,7 +23,7 @@
 # layout as the repository, so the MCP proxy finds the daemon next to it:
 #   server/memstated        the daemon
 #   client/                 the MCP proxy and its node_modules
-#   skill/ hooks/ configure-claude-hook.py   the Claude Code skill
+#   skill/ skill-precompact/ hooks/ configure-claude-hook.py   the Claude Code skills
 # MEMSTATE_INSTALL_DIR gets three links: memstated, memstate (the human CLI)
 # and memstate-mcp. Run the script again to update both parts.
 set -euo pipefail
@@ -79,14 +79,16 @@ install_skill() {
     return 0
   fi
   local skill_dir="$CLAUDE_HOME/skills/memstate" hooks_dir="$CLAUDE_HOME/hooks"
+  local precompact_dir="$CLAUDE_HOME/skills/memstate-precompact"
   mkdir -p "$CLAUDE_HOME/skills" "$hooks_dir"
-  rm -rf "$skill_dir"
+  rm -rf "$skill_dir" "$precompact_dir"
   cp -R "$ROOT/skill" "$skill_dir"
+  cp -R "$ROOT/skill-precompact" "$precompact_dir"
   install -m 0755 "$ROOT/hooks/memstate-persist-reminder.sh" "$hooks_dir/memstate-persist-reminder.sh"
   install -m 0755 "$ROOT/hooks/memstate-recall.sh" "$hooks_dir/memstate-recall.sh"
   python3 "$ROOT/configure-claude-hook.py" install \
     "$hooks_dir/memstate-persist-reminder.sh" "$hooks_dir/memstate-recall.sh" </dev/null
-  log "installed the skill in $skill_dir"
+  log "installed the skills in $skill_dir and $precompact_dir"
   log "installed the hooks in $hooks_dir and added them to $CLAUDE_HOME/settings.json"
   log "the recall hook needs a shared daemon: set MEMSTATE_ADDR, or start 'memstated --addr 127.0.0.1:8765'"
 }
