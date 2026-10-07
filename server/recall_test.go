@@ -3,6 +3,10 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -523,5 +527,80 @@ func TestPinnedProject(t *testing.T) {
 	write(strconv.Itoa(os.Getpid()), "")
 	if got := pinnedProject(cwd); got != "" {
 		t.Fatalf("garbage: got %q", got)
+	}
+}
+
+// A daemon on another version gets a one-time notice, even when the search
+// fails, and a daemon on this version gets none.
+func TestRunRecallVersionSkewNotice(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("MEMSTATE_DB", filepath.Join(dir, "t.db"))
+	t.Setenv("MEMSTATE_NO_RECALL", "")
+	t.Setenv("MEMSTATE_RECALL_DEBUG", "")
+	ts := newTestServer(t)
+	cwd := filepath.Join(t.TempDir(), "skew-proj")
+	if err := os.Mkdir(cwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	postJSON(t, ts.URL+"/api/v1/memories/remember", map[string]any{
+		"project_id": "skew_proj", "keypath": "gotchas.timeout",
+		"content": "the embed timeout must cover a cold model load", "category": "gotcha",
+	})
+	// old answers /health as version 0.0.1 and relays everything else to
+	// the real daemon; when failSearch is set it rejects the search like a
+	// daemon that does not know include_content.
+	target, _ := url.Parse(ts.URL)
+	relay := httputil.NewSingleHostReverseProxy(target)
+	failSearch := false
+	healthBody := `{"service":"memstate","version":"0.0.1"}`
+	old := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/health":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(healthBody))
+		case failSearch && r.URL.Path == "/api/v1/memories/search":
+			http.Error(w, `{"error":"json: unknown field \"include_content\""}`, 400)
+		default:
+			relay.ServeHTTP(w, r)
+		}
+	}))
+	defer old.Close()
+
+	run := func(session string) string {
+		var out bytes.Buffer
+		event := `{"session_id":"` + session + `","cwd":` + jsonString(cwd) +
+			`,"prompt":"why does the embed timeout matter for cold loads"}`
+		if code := runRecall(strings.NewReader(event), &out); code != 0 {
+			t.Fatalf("runRecall exit %d", code)
+		}
+		return out.String()
+	}
+
+	t.Setenv("MEMSTATE_ADDR", strings.TrimPrefix(old.URL, "http://"))
+	first := run("v1")
+	if !strings.Contains(first, "<memstate-notice>") || !strings.Contains(first, "version 0.0.1") ||
+		!strings.Contains(first, "runs version "+healthVersion) || !strings.Contains(first, "gotchas.timeout") {
+		t.Fatalf("first prompt should carry the notice and the hit, got:\n%s", first)
+	}
+	if second := run("v1"); strings.Contains(second, "<memstate-notice>") {
+		t.Fatalf("the notice is one per session, got:\n%s", second)
+	}
+
+	failSearch = true
+	if got := run("v2"); !strings.Contains(got, "<memstate-notice>") || strings.Contains(got, "<memstate-recall") {
+		t.Fatalf("a failed search must still print the notice alone, got:\n%s", got)
+	}
+	failSearch = false
+
+	// One version string, another build: the common case right after
+	// `make install`, when the daemon still runs the previous build.
+	healthBody = `{"service":"memstate","version":"` + healthVersion + `","build":"feedface0001"}`
+	if got := run("v4"); !strings.Contains(got, "<memstate-notice>") || !strings.Contains(got, "(build feedface0001)") {
+		t.Fatalf("a different build must print the notice, got:\n%s", got)
+	}
+
+	t.Setenv("MEMSTATE_ADDR", strings.TrimPrefix(ts.URL, "http://"))
+	if got := run("v3"); strings.Contains(got, "<memstate-notice>") || !strings.Contains(got, "gotchas.timeout") {
+		t.Fatalf("same version must print hits without a notice, got:\n%s", got)
 	}
 }

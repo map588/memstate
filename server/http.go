@@ -17,6 +17,10 @@ import (
 type healthResponse struct {
 	Service string `json:"service"`
 	Version string `json:"version"`
+	// Build is buildID() of the daemon: the git revision behind Version.
+	// `memstated recall` compares it with its own so a daemon that still
+	// runs the previous build is reported.
+	Build string `json:"build,omitempty"`
 	// LatestAvailable is set when watchUpdates has seen a newer release —
 	// the "run `memstated upgrade`" nudge, surfaced by `memstated status`.
 	LatestAvailable string `json:"latest_available,omitempty"`
@@ -57,6 +61,7 @@ func newRouter(store *Store, shutdown func(), embedder *Embedder) http.Handler {
 		h := healthResponse{
 			Service:         healthServiceName,
 			Version:         healthVersion,
+			Build:           buildID(),
 			LatestAvailable: updateAvailable(),
 		}
 		if embedder != nil {

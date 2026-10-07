@@ -77,6 +77,32 @@ func runRecall(stdin io.Reader, stdout io.Writer) int {
 		debug("no shared daemon found")
 		return 0
 	}
+	seenPath := recallSeenPath(ev.SessionID)
+	seen := loadSeen(seenPath)
+	var out strings.Builder
+	var shown []string
+	// flush prints what was collected and records it. It runs on every
+	// exit after this point, so a notice survives a failed search.
+	flush := func() int {
+		if out.Len() == 0 {
+			return 0
+		}
+		fmt.Fprint(stdout, out.String())
+		if err := appendSeen(seenPath, shown); err != nil {
+			debug("record seen: %v", err)
+		}
+		pruneSeen(filepath.Dir(seenPath), recallSeenTTL)
+		return 0
+	}
+	// A daemon on another version or build answers the search with an
+	// error or with hits that carry no content, and the hook stays silent
+	// either way. Say so once per session, before the search can fail.
+	if !seen[versionMarker] {
+		if h, err := fetchHealth(addr); err == nil && (h.Version != healthVersion || h.Build != buildID()) {
+			out.WriteString(versionSkewBlock(addr, h))
+			shown = append(shown, versionMarker)
+		}
+	}
 	// The cwd project is the default. A live proxy in this directory may
 	// have pinned another project; recall follows the pin, the scope block
 	// keeps describing the directory.
@@ -88,17 +114,13 @@ func runRecall(stdin io.Reader, stdout io.Writer) int {
 	hits, err := recallSearch(addr, project, ev.Prompt)
 	if err != nil {
 		debug("search: %v", err)
-		return 0
+		return flush()
 	}
-	seenPath := recallSeenPath(ev.SessionID)
-	seen := loadSeen(seenPath)
 
 	// First eligible prompt of the session: show the cwd project and the
 	// other projects this prompt matches, so the model can judge whether
 	// the work belongs elsewhere. The marker in the seen file makes this a
 	// one-time block.
-	var out strings.Builder
-	var shown []string
 	if !seen[scopeMarker] {
 		all, err := recallSearch(addr, "", ev.Prompt)
 		if err != nil {
@@ -123,15 +145,31 @@ func runRecall(stdin io.Reader, stdout io.Writer) int {
 	text, hitKeys := renderRecall(project, hits, userHits, seen, recallMaxHits, recallMaxChars)
 	out.WriteString(text)
 	shown = append(shown, hitKeys...)
-	if out.Len() == 0 {
-		return 0
+	return flush()
+}
+
+// versionMarker is the seen-file line that records that the version notice
+// was shown to this session.
+const versionMarker = "#version"
+
+// versionSkewBlock tells the model that this hook and the shared daemon run
+// different code. The search then fails or returns hits without content,
+// and the hook prints nothing else, so this notice is the only sign. The
+// fix is a daemon restart on the installed binary.
+func versionSkewBlock(addr string, daemon *healthResponse) string {
+	describe := func(version, build string) string {
+		if build == "" {
+			return "version " + version
+		}
+		return "version " + version + " (build " + build + ")"
 	}
-	fmt.Fprint(stdout, out.String())
-	if err := appendSeen(seenPath, shown); err != nil {
-		debug("record seen: %v", err)
-	}
-	pruneSeen(filepath.Dir(seenPath), recallSeenTTL)
-	return 0
+	return fmt.Sprintf("<memstate-notice>\n"+
+		"The memstate daemon at %s runs %s. This recall hook runs %s. "+
+		"Recall is unreliable until both run one build. Tell the user to restart "+
+		"the shared daemon: `memstated upgrade --addr %s`, or `memstated stop --addr %s` "+
+		"and start the installed binary again.\n"+
+		"</memstate-notice>\n", addr, describe(daemon.Version, daemon.Build),
+		describe(healthVersion, buildID()), addr, addr)
 }
 
 // recallEligible reports whether a prompt carries enough words to search on.
