@@ -1,18 +1,23 @@
 """Shared HTTP client for the memstate CLI scripts.
 
-Two modes, mirroring the TS proxy:
+Three modes, mirroring the TS proxy:
 
   * attach  — MEMSTATE_ADDR is set: talk to a daemon someone else started.
               We never spawn, never kill.
-  * child   — MEMSTATE_ADDR is unset: spawn `memstated --owner-pid=<us>`,
-              read the "MEMSTATE_READY addr=..." banner from its stderr,
-              SIGTERM on script exit. 1:1 lifetime with this Python process.
+  * shared  — the default: a shared daemon published its address in
+              daemon.addr next to the DB and answers /health. We attach.
+              The scripts never start a shared daemon; the MCP proxy does.
+  * child   — no shared daemon, or MEMSTATE_CHILD=1: spawn
+              `memstated --owner-pid=<us>`, read the "MEMSTATE_READY
+              addr=..." banner from its stderr, SIGTERM on script exit.
+              1:1 lifetime with this Python process.
 
 The child is cached on the module, so a single script that imports this
 module and makes several requests reuses one daemon.
 
 Env:
   MEMSTATE_ADDR       attach to this host:port (attach mode)
+  MEMSTATE_CHILD      1 skips daemon.addr and spawns a private daemon
   MEMSTATE_BIN        override the daemon path (default: sibling build / PATH)
   MEMSTATE_LOCAL_URL  full base URL override (for both modes)
   MEMSTATE_DB         the child's DB; the daemon log goes in the same directory
@@ -60,6 +65,24 @@ def _memstate_dir() -> Path:
             db = str(Path.home() / db[2:])
         return Path(db).resolve().parent
     return Path.home() / ".memstate"
+
+
+def _published_addr() -> str:
+    """The address in daemon.addr next to the DB when a memstate daemon
+    answers /health there, else ""."""
+    try:
+        addr = (_memstate_dir() / "daemon.addr").read_text().strip()
+    except OSError:
+        return ""
+    if not addr:
+        return ""
+    try:
+        with urllib.request.urlopen(f"http://{addr}/health", timeout=0.5) as resp:
+            if json.load(resp).get("service") == "memstate":
+                return addr
+    except Exception:
+        pass
+    return ""
 
 
 def _spawn_child() -> str:
@@ -170,6 +193,11 @@ def _base() -> str:
     if attach_addr:
         _base_url = f"http://{attach_addr}/api/v1"
         return _base_url
+    if os.environ.get("MEMSTATE_CHILD") != "1":
+        published = _published_addr()
+        if published:
+            _base_url = f"http://{published}/api/v1"
+            return _base_url
     # Child mode: spawn exactly once (thread-safe via the lock).
     with _started_lock:
         if _child is None:

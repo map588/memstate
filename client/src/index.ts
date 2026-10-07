@@ -33,6 +33,20 @@ import {
 const { version: VERSION } = require("../package.json") as { version: string };
 
 const ATTACH_ADDR = process.env.MEMSTATE_ADDR ?? "";
+// MEMSTATE_CHILD=1 asks for a private daemon that lives and dies with this
+// proxy: the mode that was the default before one shared daemon per
+// database became the default. Tests use it to stay hermetic.
+const CHILD_MODE = process.env.MEMSTATE_CHILD === "1";
+// DEFAULT_ADDR is where the proxy starts the shared daemon of the default
+// database when none is published in daemon.addr. It matches defaultAddr
+// in server/main.go, so `memstated status|stop|upgrade` find it without
+// flags.
+const DEFAULT_ADDR = "127.0.0.1:8765";
+// daemonMode names how this proxy reached its daemon: "attach" through
+// MEMSTATE_ADDR, "shared" through daemon.addr or DEFAULT_ADDR, "child" for
+// a private daemon.
+type DaemonMode = "attach" | "shared" | "child";
+let daemonMode: DaemonMode = "child";
 
 // Embedding options. The proxy owns the daemon it starts, so it is the
 // place to decide these. A command-line flag beats the environment; an
@@ -632,7 +646,21 @@ function awaitBanner(
   });
 }
 
-async function attach(addr: string): Promise<void> {
+// readAddrFile returns the address a shared daemon published next to the
+// database (server/main.go addrFilePath), or "" when there is none. The
+// caller probes it: a daemon that died without cleanup leaves a stale file.
+function readAddrFile(): string {
+  try {
+    return fs.readFileSync(path.join(memstateDir(), "daemon.addr"), "utf-8").trim();
+  } catch {
+    return "";
+  }
+}
+
+// attach reaches the daemon at addr, or starts one there. sameDB says the
+// caller knows the daemon runs on this proxy's database (it came from the
+// daemon.addr next to it), so the MEMSTATE_DB warning does not apply.
+async function attach(addr: string, sameDB = false): Promise<void> {
   let probe = await probeHealth(addr);
   for (let i = 1; i < PROBE_TRIES && probe === "empty"; i++) {
     probe = await probeHealth(addr);
@@ -656,7 +684,7 @@ async function attach(addr: string): Promise<void> {
     // A daemon we just spawned inherited our env; warn only when attaching
     // to one we didn't start, since its MEMSTATE_DB and embed model were
     // decided earlier.
-    if (process.env.MEMSTATE_DB) {
+    if (process.env.MEMSTATE_DB && !sameDB) {
       process.stderr.write(
         `memstate: warning — MEMSTATE_DB is ignored when attaching to an ` +
           `already-running daemon at ${addr}.\n`
@@ -773,12 +801,46 @@ async function spawnChild(): Promise<void> {
   });
 }
 
+// ensureDaemon picks the daemon for this proxy. The default is one shared
+// daemon per database: a running daemon publishes its address in
+// daemon.addr next to the DB, and the proxy attaches to it; with no such
+// daemon, the proxy starts one detached on DEFAULT_ADDR. A custom
+// MEMSTATE_DB with no daemon of its own gets a private daemon, because the
+// default port belongs to the default database. MEMSTATE_ADDR and
+// MEMSTATE_CHILD override the default.
 async function ensureDaemon(): Promise<void> {
+  if (CHILD_MODE) {
+    daemonMode = "child";
+    await spawnChild();
+    return;
+  }
   if (ATTACH_ADDR) {
+    daemonMode = "attach";
     await attach(ATTACH_ADDR);
     return;
   }
-  await spawnChild();
+  const published = readAddrFile();
+  if (published && (await probeHealth(published)) === "ours") {
+    daemonMode = "shared";
+    await attach(published, true);
+    return;
+  }
+  if (process.env.MEMSTATE_DB) {
+    daemonMode = "child";
+    await spawnChild();
+    return;
+  }
+  if ((await probeHealth(DEFAULT_ADDR)) === "alien") {
+    process.stderr.write(
+      `memstate: warning — ${DEFAULT_ADDR} is held by a non-memstate process; ` +
+        `starting a private daemon instead. Set MEMSTATE_ADDR to share one.\n`
+    );
+    daemonMode = "child";
+    await spawnChild();
+    return;
+  }
+  daemonMode = "shared";
+  await attach(DEFAULT_ADDR);
 }
 
 // ---------- MCP tool surface ----------
@@ -1333,14 +1395,13 @@ async function main(): Promise<void> {
   if (TEST_MODE) {
     const res = await fetch(`http://${daemonAddr}/health`);
     const body = await res.json();
-    const mode = ATTACH_ADDR ? "attach" : "child";
     process.stdout.write(
-      `✓ daemon reachable at http://${daemonAddr} (${JSON.stringify(body)}) mode=${mode}\n`
+      `✓ daemon reachable at http://${daemonAddr} (${JSON.stringify(body)}) mode=${daemonMode}\n`
     );
     process.stdout.write(`✓ ${TOOLS.length} tools:\n`);
     for (const t of TOOLS) process.stdout.write(`    ${t.name}\n`);
     // In child mode, the --test exit will trigger our cleanup handler and
-    // SIGTERM the daemon. In attach mode, we leave it running.
+    // SIGTERM the daemon. A shared or attached daemon keeps running.
     process.exit(0);
   }
 
@@ -1382,9 +1443,8 @@ async function main(): Promise<void> {
 
   const stdio = new StdioServerTransport();
   await server.connect(stdio);
-  const mode = ATTACH_ADDR ? "attach" : "child";
   process.stderr.write(
-    `memstate MCP ready (mode=${mode}, daemon @ http://${daemonAddr})\n`
+    `memstate MCP ready (mode=${daemonMode}, daemon @ http://${daemonAddr})\n`
   );
 }
 

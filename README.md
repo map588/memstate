@@ -413,22 +413,30 @@ serves, and writes the choice into each agent config. Pass
 `--embed-model NAME` to skip the prompt. `--ollama-url` and
 `--embed-timeout` work the same way.
 
-## Share one daemon across agents (optional)
+## One daemon for all agents
 
-The default is one daemon per agent session. This is simple, and there
-is nothing to clean up. If you want one long-lived daemon that several
-MCP clients and CLI scripts share, set `MEMSTATE_ADDR`. The proxy then
-spawns a detached daemon on first use:
+The default is one shared daemon per database. The first MCP proxy
+starts it detached on `127.0.0.1:8765`, and the daemon writes its
+address to `~/.memstate/daemon.addr`. Every later proxy, the recall
+hook, the `memstate` CLI and the Python scripts find it through that
+file. The daemon outlives the clients. With `MEMSTATE_IDLE_TIMEOUT`, it
+exits when nothing has used it for the timeout period:
 
 ```bash
-export MEMSTATE_ADDR=127.0.0.1:8765
-export MEMSTATE_IDLE_TIMEOUT=30m    # optional: the daemon exits after 30 minutes idle
+export MEMSTATE_IDLE_TIMEOUT=30m    # optional
 ```
 
-Any MCP proxy or CLI script with these variables set attaches to a
-running daemon on port `8765`. If no daemon runs there, it spawns one
-detached. The daemon outlives the proxy. With `MEMSTATE_IDLE_TIMEOUT`,
-the daemon also exits when nothing has used it for the timeout period.
+Two variables change the default:
+
+- `MEMSTATE_ADDR=HOST:PORT` names the daemon to use. The proxy attaches
+  to it, or starts one there when nothing answers. Use it for a daemon
+  on another port or another machine.
+- `MEMSTATE_CHILD=1` gives the proxy a private daemon on a random port
+  that lives and dies with it. The test suite uses this. A custom
+  `MEMSTATE_DB` with no daemon of its own gets a private daemon too.
+
+If port `8765` is held by another program, the proxy warns and starts a
+private daemon.
 
 Start, stop, or inspect the daemon manually:
 

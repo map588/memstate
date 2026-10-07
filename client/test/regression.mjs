@@ -73,7 +73,10 @@ async function main() {
   }, 120_000);
 
   const env = { ...process.env };
-  delete env.MEMSTATE_ADDR; // force child mode
+  delete env.MEMSTATE_ADDR;
+  delete env.MEMSTATE_CHILD;
+  // A custom MEMSTATE_DB with no daemon.addr next to it gives the proxy a
+  // private child daemon, so the suite never touches a user's daemon.
   env.MEMSTATE_DB = path.join(tmp, "regress.db");
   env.MEMSTATE_NO_UPDATE_CHECK = "1";
   env.MEMSTATE_OLLAMA_URL = "http://127.0.0.1:9"; // closed port: no network
@@ -830,6 +833,36 @@ async function main() {
     check("set: missing required fields is an error",
       bad.isError === true,
       JSON.stringify(bad));
+
+    // ---- default daemon mode --------------------------------------------------
+    // One shared daemon per database is the default: a daemon that published
+    // daemon.addr next to the DB is attached to; MEMSTATE_CHILD=1 keeps a
+    // private daemon; a custom DB with no published daemon gets one too.
+    {
+      const smoke = async (extra) => {
+        const e = { ...env, ...extra };
+        const proxy = spawn(process.execPath, [PROXY, "--test"], { env: e, stdio: ["ignore", "pipe", "pipe"] });
+        let out = "";
+        proxy.stdout.on("data", (d) => (out += d));
+        proxy.stderr.on("data", (d) => (out += d));
+        await new Promise((resolve) => proxy.on("exit", resolve));
+        return out;
+      };
+      await withSharedDaemon(env, async (addr) => {
+        const out = await smoke({});
+        check("mode: a proxy attaches to the daemon published in daemon.addr",
+          out.includes("mode=shared") && out.includes(`http://${addr} `) && !out.includes("MEMSTATE_DB is ignored"),
+          JSON.stringify(out));
+        const child = await smoke({ MEMSTATE_CHILD: "1" });
+        check("mode: MEMSTATE_CHILD=1 ignores daemon.addr and starts a private daemon",
+          child.includes("mode=child") && !child.includes(`http://${addr} `),
+          JSON.stringify(child));
+      });
+      const alone = await smoke({});
+      check("mode: a custom DB with no published daemon gets a private daemon",
+        alone.includes("mode=child"),
+        JSON.stringify(alone));
+    }
 
     // ---- recall hook ----------------------------------------------------------
     // A shared-mode daemon on the same DB publishes daemon.addr next to it;

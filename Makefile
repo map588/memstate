@@ -57,7 +57,7 @@ ALIAS_BIN   = copy /Y "$(call P,$1)" "$(call P,$2)"
 SAY         = echo $1
 BLANK       := echo.
 LS          := dir
-SMOKE_ENV   := set "MEMSTATE_ADDR=" && set "MEMSTATE_NO_UPDATE_CHECK=1" && set "MEMSTATE_DB=$(call P,$(SMOKE_DIR)/memstate.db)" &&
+SMOKE_ENV   := set "MEMSTATE_ADDR=" && set "MEMSTATE_CHILD=1" && set "MEMSTATE_NO_UPDATE_CHECK=1" && set "MEMSTATE_DB=$(call P,$(SMOKE_DIR)/memstate.db)" &&
 MATCH_Q     = findstr /R "$1" >NUL
 XBUILD      = cd server && set "CGO_ENABLED=0" && set "GOOS=$1" && set "GOARCH=$2" && go build -trimpath -ldflags="-s -w" -o ../$(DIST)/$3 .
 VET_OTHER   = cd server && set "GOOS=linux" && go vet ./...
@@ -74,7 +74,7 @@ ALIAS_BIN   = ln -sf "$1" "$2"
 SAY         = echo '$1'
 BLANK       := echo
 LS          := ls -l
-SMOKE_ENV   := env -u MEMSTATE_ADDR MEMSTATE_NO_UPDATE_CHECK=1 MEMSTATE_DB=$(SMOKE_DIR)/memstate.db
+SMOKE_ENV   := env -u MEMSTATE_ADDR MEMSTATE_CHILD=1 MEMSTATE_NO_UPDATE_CHECK=1 MEMSTATE_DB=$(SMOKE_DIR)/memstate.db
 MATCH_Q     = grep -q '$1'
 XBUILD      = cd server && CGO_ENABLED=0 GOOS=$1 GOARCH=$2 go build -trimpath -ldflags="-s -w" -o ../$(DIST)/$3 .
 VET_OTHER   = cd server && GOOS=windows go vet ./...
@@ -148,7 +148,7 @@ install-skill:  ## Install Claude Code skill + UserPromptSubmit hooks into ~/.cl
 	@$(BLANK)
 	@$(call SAY,Skill installed in $(call P,$(SKILL_DIR)))
 	@$(call SAY,Hooks installed in $(call P,$(HOOK_SCRIPT)))
-	@$(call SAY,                   $(call P,$(RECALL_HOOK_SCRIPT)) (needs a shared daemon: MEMSTATE_ADDR or ~/.memstate/daemon.addr))
+	@$(call SAY,                   $(call P,$(RECALL_HOOK_SCRIPT)) (finds the shared daemon through ~/.memstate/daemon.addr or MEMSTATE_ADDR))
 	@$(call SAY,Settings updated: $(call P,$(CLAUDE_HOME)/settings.json) (backup at settings.json.bak))
 
 uninstall-skill:  ## Remove skill + hooks from ~/.claude
@@ -161,8 +161,8 @@ uninstall-skill:  ## Remove skill + hooks from ~/.claude
 test: build  ## Run Go tests + TS end-to-end smoke + MCP regression
 	cd server && go test ./... && go vet ./...
 	$(VET_OTHER)
-	node client/dist/index.js --test
 	$(call RM_RF,$(SMOKE_DIR))
+	$(SMOKE_ENV) node client/dist/index.js --test
 	$(SMOKE_ENV) node client/dist/index.js --test --embed-model memstate-smoke-model | $(call MATCH_Q,embed_model.:.memstate-smoke-model)
 	node client/test/regression.mjs
 
