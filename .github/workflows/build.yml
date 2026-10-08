@@ -24,6 +24,15 @@ jobs:
       - name: Release binaries
         run: make release
 
+      # The CI Windows runner is an admin, so install.ps1 passes there even
+      # with a symlink. A normal user gets "cannot unpack memstate-mcp.tar.gz".
+      - name: Bundle has no symlinks
+        run: |
+          if tar -tvzf dist/memstate-mcp.tar.gz | grep '^l'; then
+            echo "memstate-mcp.tar.gz has symlinks. tar.exe on Windows cannot unpack them without admin rights." >&2
+            exit 1
+          fi
+
       - uses: actions/upload-artifact@v4
         with:
           name: memstated-binaries

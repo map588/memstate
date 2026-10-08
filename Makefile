@@ -180,6 +180,9 @@ test: build  ## Run Go tests + TS end-to-end smoke + MCP regression
 # hook scripts and the script that registers the hooks. The installers
 # unpack it next to server/, so the proxy finds the daemon as a sibling
 # (resolveDaemonBin), the same layout as this repository.
+# --no-bin-links keeps symlinks out of the bundle: tar.exe on Windows
+# cannot make a symlink without admin rights or Developer Mode, and
+# install.ps1 then fails. The proxy does not use node_modules/.bin.
 release: client/dist/index.js  ## Build memstated for linux/{amd64,arm64}, darwin/{amd64,arm64}, windows/amd64 and the proxy bundle under dist/
 	$(call RM_RF,$(DIST))
 	$(call MKDIR_P,$(DIST))
@@ -200,7 +203,7 @@ release: client/dist/index.js  ## Build memstated for linux/{amd64,arm64}, darwi
 	$(call CP_FILE,.claude/hooks/memstate-persist-reminder.sh,$(BUNDLE_DIR)/hooks/memstate-persist-reminder.sh)
 	$(call CP_FILE,.claude/hooks/memstate-recall.sh,$(BUNDLE_DIR)/hooks/memstate-recall.sh)
 	$(call CP_FILE,scripts/configure-claude-hook.py,$(BUNDLE_DIR)/configure-claude-hook.py)
-	cd $(call P,$(BUNDLE_DIR)/client) && npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+	cd $(call P,$(BUNDLE_DIR)/client) && npm ci --omit=dev --ignore-scripts --no-bin-links --no-audit --no-fund
 	$(call TAR_CZ,$(DIST)/memstate-mcp.tar.gz,$(BUNDLE_DIR))
 	@$(BLANK)
 	@$(call SAY,Release binaries for v$(VERSION) in $(DIST)/:)
