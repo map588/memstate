@@ -6,8 +6,8 @@ database before a task and writes to it after the task.
 
 The server speaks MCP to Claude Code, Cursor, or any MCP-capable
 client. The backing store is one SQLite file on your machine. No API
-keys. No hosted service. No daemon to manage. The daemon starts when
-your agent starts and stops when your agent stops.
+keys. No hosted service. No daemon to manage. The first agent starts
+the daemon, and all later agents on the same machine use it.
 
 ## Install
 
@@ -54,7 +54,7 @@ does not depend on PATH. Your memories stay in `~/.memstate/`.
 
 Set these environment variables to change what the script does:
 
-- `MEMSTATE_VERSION=v0.7.8` installs that release, not the newest one.
+- `MEMSTATE_VERSION=v0.8.0` installs that release, not the newest one.
 - `MEMSTATE_INSTALL_DIR` changes the directory for the links (macOS, Linux).
 - `MEMSTATE_SETUP=0` or `1` skips or runs `memstate-mcp setup` with no prompt.
 - `MEMSTATE_INSTALL_SKILL=0` or `1` skips or installs the skill with no prompt.
@@ -76,7 +76,7 @@ To uninstall on macOS or Linux:
 
 ```bash
 python3 ~/.local/share/memstate/configure-claude-hook.py uninstall   # removes the hooks from settings.json
-rm -rf ~/.local/share/memstate ~/.claude/skills/memstate ~/.claude/hooks/memstate-*.sh
+rm -rf ~/.local/share/memstate ~/.claude/skills/memstate ~/.claude/skills/memstate-precompact ~/.claude/hooks/memstate-*.sh
 rm -f ~/.local/bin/memstated ~/.local/bin/memstate ~/.local/bin/memstate-mcp
 claude mcp remove memstate --scope user
 ```
@@ -85,7 +85,7 @@ To uninstall on Windows:
 
 ```powershell
 python "$env:LOCALAPPDATA\Programs\memstate\configure-claude-hook.py" uninstall
-Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Programs\memstate", "$HOME\.claude\skills\memstate", "$HOME\.claude\hooks\memstate-*.sh"
+Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Programs\memstate", "$HOME\.claude\skills\memstate", "$HOME\.claude\skills\memstate-precompact", "$HOME\.claude\hooks\memstate-*.sh"
 claude mcp remove memstate --scope user
 ```
 
@@ -109,13 +109,13 @@ This puts two programs on your PATH:
 
 `make uninstall` removes both. `make build` compiles in place and does
 not touch PATH. `make test` runs the Go tests, the end-to-end smoke
-test, and the MCP regression suite (`client/test/regression.mjs`), which
-calls each tool through the real proxy and daemon against a temporary
-database.
+test, and the MCP regression suite (`client/test/regression.mjs`). The
+regression suite calls each tool through the real proxy and daemon
+against a temporary database.
 
 On Windows the same `make` targets run from cmd.exe or PowerShell with
-GNU make (for example `choco install make`), Go, Node and Python on PATH;
-no bash and no coreutils are needed. The build produces `memstated.exe`,
+GNU make (for example `choco install make`), Go, Node and Python on PATH.
+You do not need bash or coreutils. The build produces `memstated.exe`,
 and `make install` copies it to GOBIN as `memstated.exe` and
 `memstate.exe` instead of a symlink. Git Bash and WSL work too. The hook
 scripts that `make install-skill` copies are bash scripts and need Git
@@ -131,7 +131,7 @@ ollama pull nomic-embed-text
 ```
 
 Any Ollama embedding model works. Select one with `MEMSTATE_EMBED_MODEL`
-or `memstated --embed-model NAME`; for example:
+or `memstated --embed-model NAME`. For example:
 
 ```bash
 ollama pull qwen3-embedding:4b
@@ -162,6 +162,10 @@ When the server rejects a long memory ("context length" from Ollama,
 "too large to process" from llama.cpp), the daemon halves the text and
 tries again.
 
+The daemon sends at most four embedding calls to the server at the same
+time. Content embeds, query embeds and the backfill share this limit, so
+many agents cannot overload one local model server.
+
 ### Claude Code skill and hook (optional)
 
 If you use Claude Code, the install script asks whether to install the
@@ -175,10 +179,13 @@ UserPromptSubmit hooks are added:
 - `memstate-recall.sh` runs `memstated recall`. It searches the
   current repository's memories with the prompt text (hybrid mode)
   and injects up to three hits the model has not seen in this
-  session. It needs a shared daemon: set `MEMSTATE_ADDR`, or start
-  `memstated --addr HOST:PORT`, which records its address in
-  `~/.memstate/daemon.addr`. Without one the hook prints nothing.
-  Set `MEMSTATE_NO_RECALL=1` to turn it off.
+  session. It finds the shared daemon through `MEMSTATE_ADDR` or
+  `~/.memstate/daemon.addr` (see "One daemon for all agents"). A
+  private daemon (`MEMSTATE_CHILD=1`) is not visible to the hook, and
+  the hook then prints nothing. When the daemon runs a different
+  version or build than the hook, the hook prints a notice one time
+  and asks you to restart the daemon. Set `MEMSTATE_NO_RECALL=1` to
+  turn the hook off.
 
 The skill scripts need Python 3. The hooks are bash scripts. On Windows,
 Claude Code runs hooks with Git Bash, so the install script adds the
@@ -219,8 +226,9 @@ Claude Desktop, and more):
 }
 ```
 
-Restart the agent. The first tool call starts the storage daemon on a
-random loopback port. The daemon exits when the agent exits.
+Restart the agent. The first proxy starts the shared storage daemon on
+`127.0.0.1:8765`. Later proxies attach to it. The daemon continues
+to run after the agent exits (see "One daemon for all agents").
 
 ### Without a global install
 
@@ -246,8 +254,9 @@ memstate-mcp --test
 
 From a clone without `make install`, run `node client/dist/index.js --test`.
 
-Expected result: the proxy spawns a daemon, prints the daemon address
-and the seven tool names, and exits cleanly.
+Expected result: the proxy attaches to the shared daemon or starts one.
+It prints the daemon address, the daemon mode (`shared`, `attach` or
+`child`), and the seven tool names. Then it exits.
 
 ## The seven tools
 
@@ -271,7 +280,8 @@ A useful agent loop:
 - At task start, call `memstate_get()` to load the tree. The proxy derives the project id from the repository name. The response also carries the user scope under `user`. Call `memstate_search(query=...)` when you do not know the exact keypath.
 - At task end, call `memstate_remember(content="## Summary\n...\n## Decisions\n...")` and let the server extract the sections.
 - Facts about the user or this machine, not about the code, go to `scope="user"`: `preferences.*`, `profile.*`, `host.<host_slug>.env.*`, `host.<host_slug>.tools.*`. The daemon rejects any other keypath there, so decisions and task summaries cannot leak into a shared store.
-- When the prompt is clearly about another subject than the directory (for example an nginx config asked from the home directory), pin the session once with `project_name`. Prefer an existing id. A new id needs `new_project=true` too and is refused when it looks like an existing one. The recall hook's first-prompt `<memstate-scope>` block shows the cwd project, whether it exists, and the other projects the prompt matches. A write never creates a project unless it targets the git repository you are in or carries `new_project=true`; this covers the cwd project, an explicit `project_id` and a soft-deleted project; a name that resembles an existing project is refused outright, and so is the name of your home directory. Ids that start with `_` are reserved for the user scope. The recall hook follows a session pin through a per-process pin file. From the home directory the proxy refuses writes to the default project altogether: pin a project or use the user scope. The Python scripts apply the same rule with `--new-project`.
+- When the prompt is clearly about another subject than the directory (for example an nginx config asked from the home directory), pin the session once with `project_name`. Prefer an existing id. A new id also needs `new_project=true`. The proxy refuses a new id that looks like an existing one. On the first prompt, the recall hook prints a `<memstate-scope>` block. It shows the cwd project, whether it exists, and the other projects that the prompt matches. The recall hook follows a session pin through a per-process pin file.
+- A write creates a project only when it targets the git repository you are in, or when it carries `new_project=true`. This rule applies to the cwd project outside a repository, to an explicit `project_id`, and to a soft-deleted project. The proxy always refuses a name that resembles an existing project, and the name of your home directory. From the home directory, the proxy refuses all writes to the default project. Pin a project or use the user scope. Ids that start with `_` are reserved for the user scope. The Python scripts apply the same rule with `--new-project`.
 - Never save a denied prompt. A denied prompt is a tool call that the user or a permission check denied.
 
 `node client/dist/index.js init` writes rule files for several agents
@@ -282,7 +292,7 @@ encode this loop.
 
 The tool returns `{ method, items: [{keypath, action, stored, superseded?}] }`
 for both the explicit-keypath mode and the heading-extract mode. `stored`
-and `superseded` name the versions and carry no content; `superseded` has
+and `superseded` name the versions and carry no content. `superseded` has
 a 40-word `preview`. Search hits carry a `preview` too, and the agent reads
 the keypaths it wants with `memstate_get`.
 
@@ -294,9 +304,10 @@ the keypaths it wants with `memstate_get`.
 
 ### `memstate_search`: hybrid mode
 
-`mode="hybrid"` is the default. The daemon runs two searches and merges
-them with reciprocal rank fusion (k=60): an FTS5 match where any query
-word may hit, ranked by bm25, and the semantic search described below.
+`mode="hybrid"` is the default. The daemon runs two searches. The first
+is an FTS5 match where any query word may hit, ranked by bm25. The
+second is the semantic search described below. Reciprocal rank fusion
+(k=60) merges the two lists.
 A keypath found by both searches outranks one found by only one. Each
 result carries `score` (the fused score) and `sources` (`fts`,
 `semantic`, or both). When the embedder is not configured or the query
@@ -305,12 +316,13 @@ names the reason. Hybrid search never fails because Ollama is down.
 
 ### `memstate_search`: semantic mode
 
-In `mode="semantic"`, the daemon embeds the query with Ollama. It
+In `mode="semantic"`, the daemon embeds the query with the embedding
+server (Ollama by default). It
 ranks results by cosine similarity against the embedding of the
 **current content** at each keypath. One embedding row exists per
 unique `(project, keypath, model)`, and the daemon recomputes it when
-the content changes. Results below `threshold` (default 0.5) are
-dropped. Set the threshold in the request or with
+the content changes. The daemon drops results below `threshold`
+(default 0.5). Set the threshold in the request or with
 `MEMSTATE_SEMANTIC_THRESHOLD`. Each result pairs the keypath with the
 current non-tombstoned memory and the similarity score. With
 nomic-embed models, the daemon adds the `search_query:` and
@@ -320,8 +332,8 @@ sends documents as raw text. Other models get raw text on both sides.
 
 ### Embedding models
 
-Vectors are stored per model name, so a model switch does not destroy the
-old set. The daemon reports its model in `/health` as `embed_model`, and
+The daemon keys vectors by model name, so a model switch does not
+destroy the old set. The daemon reports its model in `/health` as `embed_model`, and
 the proxy warns when its own `MEMSTATE_EMBED_MODEL` differs from that of
 a daemon it attached to. After a switch, the daemon fills in the new
 model's vectors on its next start. Use the `embed` subcommand to inspect
@@ -335,12 +347,12 @@ memstated embed prune --keep qwen3-embedding:4b      # delete every other model'
 
 `embed status` shows, per model, a coverage bar of current keypaths
 with a vector, the vector dimension, storage size, and row count. It
-also shows how many keypaths exceed the embed cap (only their head is
-embedded), a histogram of pairwise cosine scores for the configured
-model, the nearest-neighbour percentiles, and the share of pairs that
-pass the current threshold. Use the last two to set
-`MEMSTATE_SEMANTIC_THRESHOLD` for a new model: raise it until few pairs
-pass but most nearest neighbours still do. `--watch` redraws every two
+also shows how many keypaths exceed the embed cap. The daemon embeds
+only the head of such a keypath. For the configured model, it shows a
+histogram of pairwise cosine scores, the nearest-neighbor percentiles,
+and the share of pairs that pass the current threshold. Use the last
+two to set `MEMSTATE_SEMANTIC_THRESHOLD` for a new model. Raise it
+until few pairs pass but most nearest neighbors still do. `--watch` redraws every two
 seconds while a backfill runs. `--probe` times one live Ollama call.
 
 `rebuild` is the tool for a change in embedding structure under the same
@@ -356,7 +368,7 @@ Data is a versioned keypath tree, one tree per project:
 project_id = "my_app"
 ├── auth.provider        v1: "JWT"              v2: "SuperTokens"   v3: tombstone
 ├── db.engine            v1: "Postgres 16"
-└── task.summary.2026-04-21  v1: "## Refactor auth middleware …"
+└── task.summary.2026_04_21  v1: "## Refactor auth middleware …"
 ```
 
 Each write appends a new version. If a prior version existed, the
@@ -377,8 +389,8 @@ On each startup, the daemon backfills missing vectors in the
 background, one Ollama call at a time. An embedding-model switch or a
 period of Ollama downtime heals itself on the next start.
 
-A soft-deleted project blocks reads. Any write to the project revives
-it. A deleted keypath loses its embedding row and no longer appears in
+A soft-deleted project blocks reads. A write to the project revives
+it. Through MCP, that write also needs `new_project=true`. A deleted keypath loses its embedding row and no longer appears in
 search, but its full version history stays readable.
 
 ## Where your data lives
@@ -387,7 +399,8 @@ search, but its full version history stays readable.
 |---|---|
 | SQLite DB | `~/.memstate/memstate.db` (override with `MEMSTATE_DB`, and `~/` is expanded) |
 | Daemon log | `memstated.log` next to the DB (default `~/.memstate/memstated.log`) |
-| Embedding URL | `http://127.0.0.1:11434` (override with `MEMSTATE_EMBEDDING_URL` or `--embedding-url`; a URL that ends in `/v1` selects an OpenAI-compatible API) |
+| Shared daemon address | `~/.memstate/daemon.addr`, next to the DB. A `--addr` daemon writes it at startup and removes it at shutdown. |
+| Embedding URL | `http://127.0.0.1:11434` (override with `MEMSTATE_EMBEDDING_URL` or `--embedding-url`). A URL that ends in `/v1` selects an OpenAI-compatible API. |
 | Embed model | `nomic-embed-text` (override with `MEMSTATE_EMBED_MODEL` or `--embed-model`) |
 | Embed timeout | `60s` per Ollama call (override with `MEMSTATE_EMBED_TIMEOUT` or `--embed-timeout`). Must cover a cold model load: a 4B model needs about 20s on first use. |
 | Semantic threshold | `0.5` (override with `MEMSTATE_SEMANTIC_THRESHOLD` or per request) |
@@ -456,21 +469,25 @@ memstated stop   --addr 127.0.0.1:8765               # POST /admin/shutdown
 memstated status --addr 127.0.0.1:8765               # GET /health
 ```
 
-Concurrent writers to the same database file are safe. SQLite WAL
-serializes them.
+Concurrent writers to the same database file are safe. The daemon uses
+SQLite in WAL mode with a small connection pool. Each write takes the
+write lock when its transaction starts, so other writers wait in a
+queue and do not fail. Reads run on the other connections during a
+write.
 
 ## Python CLI (for skills, hooks, scripts)
 
 `client/skill/scripts/` contains a Python CLI for each tool. The CLI
-uses the same child-or-attach model as the MCP proxy. Without
-`MEMSTATE_ADDR` set, each invocation spawns its own short-lived daemon
-and stops it on exit.
+finds a daemon the same way as the MCP proxy: `MEMSTATE_ADDR` first,
+then `~/.memstate/daemon.addr`. The scripts never start a shared
+daemon. When no shared daemon answers, or `MEMSTATE_CHILD=1` is set,
+each invocation starts its own short-lived daemon and stops it on exit.
 
 ```bash
 # Explicit keypath
 python3 client/skill/scripts/memstate_remember.py \
   --project my_app \
-  --keypath task.summary.2026-04-21 \
+  --keypath task.summary.2026_04_21 \
   --content "## Auth migration done"
 
 # Or omit --keypath to extract one memory per heading
@@ -508,8 +525,8 @@ memstate projects                      # every live project
 
 `--project ID` reaches another project, `--user` the reserved user scope,
 `--all` (search) the whole store. Flags may follow positionals. Without a
-shared daemon, reads still work and `search` degrades to FTS; `set`, `edit`
-and `rm` tell you how to start one.
+shared daemon, reads still work and `search` falls back to FTS. `set`,
+`edit` and `rm` need the daemon and tell you how to start one.
 
 ## How the pieces fit
 
@@ -520,16 +537,17 @@ Claude Code ──stdio──> client/dist/index.js ──HTTP loopback──> s
 
 The TypeScript proxy exists only to speak MCP. Each tool call becomes
 one HTTP POST. All logic (keypath versioning, FTS, conflict detection,
-tombstones) lives in the Go daemon.
+tombstones, embeddings) lives in the Go daemon.
 
-Lifetime:
+The proxy selects one of three modes at startup:
 
-- The daemon listens on `127.0.0.1:0` by default (an OS-picked port) and prints `MEMSTATE_READY addr=127.0.0.1:<port>` on stderr.
-- The proxy reads the banner and passes its own PID with `--owner-pid`.
-- On a clean exit, the proxy sends SIGTERM to the daemon. After a SIGKILL, the daemon's `kill(owner_pid, 0)` poll notices within about 2 seconds, and the daemon exits on its own.
+- **Shared** (the default): the proxy reads `daemon.addr` next to the DB and attaches when `/health` answers there. For the default DB, it then tries `127.0.0.1:8765`. When nothing answers, it starts a detached daemon there.
+- **Attach** (`MEMSTATE_ADDR` set): the proxy attaches to that address, or starts a detached daemon there. It stops with an error when a program that is not memstate holds the port.
+- **Child** (`MEMSTATE_CHILD=1`, a custom `MEMSTATE_DB` with no daemon, or a foreign program on port 8765): the proxy starts a private daemon on `127.0.0.1:0` (an OS-picked port) and passes its own PID with `--owner-pid`. The daemon prints `MEMSTATE_READY addr=127.0.0.1:<port>` on stderr, and the proxy reads it.
 
-This is the child mode. The `--addr` flag (above) is the only other
-mode.
+In child mode, the proxy sends SIGTERM to the daemon on a clean exit.
+After a SIGKILL, the daemon's `kill(owner_pid, 0)` poll notices within
+about 2 seconds, and the daemon exits on its own.
 
 ## Not done yet
 
