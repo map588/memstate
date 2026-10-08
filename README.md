@@ -162,9 +162,10 @@ When the server rejects a long memory ("context length" from Ollama,
 "too large to process" from llama.cpp), the daemon halves the text and
 tries again.
 
-The daemon sends at most four embedding calls to the server at the same
-time. Content embeds, query embeds and the backfill share this limit, so
-many agents cannot overload one local model server.
+The daemon limits the embedding calls that it sends to the server at the
+same time: two for content embeds and the backfill, four for search
+queries. Many agents cannot overload one local model server, and a burst
+of writes does not make searches wait.
 
 ### Claude Code skill and hook (optional)
 
