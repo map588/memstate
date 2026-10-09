@@ -92,7 +92,9 @@ func TestMigrateFTSProjectColumn(t *testing.T) {
 		t.Fatalf("search after migrate: hits=%+v err=%v", hits, err)
 	}
 	// A second open is a no-op.
-	if _, err := OpenStore(path); err != nil {
+	again, err := OpenStore(path)
+	if err != nil {
 		t.Fatal(err)
 	}
+	again.Close()
 }
