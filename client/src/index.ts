@@ -161,7 +161,9 @@ function systemDirReason(dir: string): string {
   if (win && r.toLowerCase().startsWith(path.resolve(win).toLowerCase())) {
     return "the Windows system directory";
   }
-  if (/^\/(usr|bin|sbin|etc|lib|lib64|opt|var|proc|sys|dev|boot|tmp)(\/|$)/.test(r)) {
+  // Not /tmp or /var: scratch and data trees hold real work (and CI runs
+  // these tests from /tmp).
+  if (/^\/(usr|bin|sbin|etc|lib|lib64|opt|proc|sys|dev|boot)(\/|$)/.test(r)) {
     return "a system directory";
   }
   return "";

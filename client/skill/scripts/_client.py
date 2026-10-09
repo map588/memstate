@@ -324,7 +324,7 @@ def system_dir_reason() -> str:
     win = os.environ.get("SystemRoot") or os.environ.get("windir")
     if win and str(cwd).lower().startswith(str(Path(win).resolve()).lower()):
         return "the Windows system directory"
-    if re.match(r"^/(usr|bin|sbin|etc|lib|lib64|opt|var|proc|sys|dev|boot|tmp)(/|$)", cwd.as_posix()):
+    if re.match(r"^/(usr|bin|sbin|etc|lib|lib64|opt|proc|sys|dev|boot)(/|$)", cwd.as_posix()):
         return "a system directory"
     return ""
 
