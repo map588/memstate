@@ -468,6 +468,7 @@ Start, stop, or inspect the daemon manually:
 memstated --addr 127.0.0.1:8765 --idle-timeout 30m   # foreground
 memstated stop   --addr 127.0.0.1:8765               # POST /admin/shutdown
 memstated status --addr 127.0.0.1:8765               # GET /health
+memstated restart --addr 127.0.0.1:8765              # stop + start detached with the same config
 ```
 
 Concurrent writers to the same database file are safe. The daemon uses

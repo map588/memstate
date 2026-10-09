@@ -161,6 +161,8 @@ func main() {
 			os.Exit(cmdCLI(os.Args[1:]))
 		case "stop":
 			os.Exit(cmdStop(os.Args[2:]))
+		case "restart":
+			os.Exit(cmdRestart(os.Args[2:]))
 		case "status":
 			os.Exit(cmdStatus(os.Args[2:]))
 		case "export":
@@ -411,6 +413,8 @@ func printUsage() {
   memstated --embed-timeout 60s    max time per Ollama embed call (cold load included)
   memstated stop   [--addr HOST:PORT]   send a shutdown request to a running daemon
   memstated status [--addr HOST:PORT]   query /health
+  memstated restart [--addr HOST:PORT]  stop the shared daemon and start it again,
+                                   detached, with the same config it reported
 
   memstated projects [--db PATH]   list live projects with memory counts
   memstated dump [--keys] [--db PATH] PROJECT [KEYPATH]
@@ -782,6 +786,36 @@ func runningEmbedConfig(addr string) healthResponse {
 		return healthResponse{}
 	}
 	return *h
+}
+
+// cmdRestart stops the shared daemon at addr, when one answers, and starts
+// a detached one with the config it reported in /health (restartPlan), so
+// no terminal is tied to the daemon. With nothing running it just starts
+// one on addr with the environment's defaults. Same path `upgrade` uses.
+func cmdRestart(args []string) int {
+	addr := subAddr(args)
+	exePath, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "memstated restart: %v\n", err)
+		return 1
+	}
+	prev, err := fetchHealth(addr)
+	if err == nil && prev.Service == healthServiceName {
+		if err := stopAndWait(addr, 5*time.Second); err != nil {
+			fmt.Fprintf(os.Stderr, "memstated restart: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "memstated restart: stopped %s\n", addr)
+	} else {
+		prev = nil
+		fmt.Fprintf(os.Stderr, "memstated restart: nothing running at %s, starting fresh\n", addr)
+	}
+	if err := startDetachedDaemon(exePath, addr, prev); err != nil {
+		fmt.Fprintf(os.Stderr, "memstated restart: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "memstated restart: daemon answering at %s\n", addr)
+	return 0
 }
 
 func cmdStop(args []string) int {
