@@ -166,6 +166,10 @@ const { id: DEFAULT_PROJECT, inRepo: CWD_IN_REPO } = deriveProjectId();
 // target (see checkWriteTarget). Reads stay open so old data can migrate.
 const CWD_IS_HOME = path.resolve(process.cwd()) === path.resolve(os.homedir());
 const HOME_SLUG = slugName(path.basename(os.homedir()));
+// MEMSTATE_REQUIRE_PROJECT=1 removes the cwd default for writes, also in a
+// git repository: a write needs project_id or a session pin. Reads keep the
+// cwd default. The Python scripts read the same variable.
+const REQUIRE_PROJECT = process.env.MEMSTATE_REQUIRE_PROJECT === "1";
 
 // USER_PROJECT is the daemon's one reserved project for facts about the
 // user and the host. The daemon rejects writes there outside a short
@@ -399,6 +403,14 @@ const knownProjects = new Set<string>();
 // and finds the project.
 async function checkWriteTarget(id: string, a: ToolArgs, explicit: boolean): Promise<void> {
   if (!explicit) {
+    if (REQUIRE_PROJECT) {
+      throw new Error(
+        "MEMSTATE_REQUIRE_PROJECT=1: a write needs a project. Pin one with " +
+          `project_name (for this directory "${DEFAULT_PROJECT}", an id from ` +
+          "memstate_get(list_projects=true), or a new id with new_project=true), " +
+          'pass project_id, or use scope="user" for facts about this machine'
+      );
+    }
     if (CWD_IN_REPO) return;
     if (CWD_IS_HOME) {
       throw new Error(
@@ -455,7 +467,7 @@ function checkNewProjectFlag(a: ToolArgs, write: boolean): void {
   if (a.scope === "user") {
     throw new Error('new_project has no effect with scope="user": the user scope always exists');
   }
-  if (!a.project_id && !sessionProject && CWD_IN_REPO) {
+  if (!a.project_id && !sessionProject && CWD_IN_REPO && !REQUIRE_PROJECT) {
     throw new Error(
       `new_project has no effect here: the project of the git repository you are in ` +
         `("${DEFAULT_PROJECT}") is created without it`

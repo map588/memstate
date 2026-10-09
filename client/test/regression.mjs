@@ -821,6 +821,32 @@ async function main() {
       pr.status !== 0 && pr.stderr.includes("no effect"),
       JSON.stringify({ code: pr.status, err: pr.stderr }));
 
+    // MEMSTATE_REQUIRE_PROJECT=1: a write must name its project, also in a
+    // git repository. Reads keep the cwd default; a pin or project_id writes.
+    const reqEnv = { ...env, MEMSTATE_REQUIRE_PROJECT: "1" };
+    await withProxy(reqEnv, repoCwd, async (req) => {
+      let f = await call(req, "memstate_set", { keypath: "notes.req", value: "v" });
+      check("require project: a write without a project is refused in a git repository",
+        f.isError && f.message.includes("MEMSTATE_REQUIRE_PROJECT"),
+        JSON.stringify(f));
+      f = await call(req, "memstate_set", { keypath: "notes.req", value: "v", new_project: true });
+      check("require project: new_project does not replace a project name",
+        f.isError && f.message.includes("MEMSTATE_REQUIRE_PROJECT"),
+        JSON.stringify(f));
+      f = await call(req, "memstate_get", {});
+      check("require project: a read keeps the cwd default",
+        !f.isError,
+        JSON.stringify(f));
+      f = await call(req, "memstate_set", { project_name: "other_proj", keypath: "notes.req", value: "v" });
+      check("require project: a pinned session writes",
+        !f.isError && f.data.stored.project_id === "other_proj",
+        JSON.stringify(f));
+    });
+    const rq = spawnSync(PY, [SET_PY, "--keypath", "notes.req", "--value", "v"], { cwd: repoCwd, env: reqEnv, encoding: "utf8" });
+    check("require project (python): a write without --project is refused in a git repository",
+      rq.status !== 0 && rq.stderr.includes("MEMSTATE_REQUIRE_PROJECT"),
+      JSON.stringify({ code: rq.status, err: rq.stderr }));
+
     const after = await call(client, "memstate_get", { list_projects: true });
     const afterIds = after.data.projects.map((p) => p.id);
     check("gate: refused writes created no project",
