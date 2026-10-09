@@ -705,13 +705,16 @@ func cmdEmbed(args []string) int {
 	// The daemon's own model and threshold are the truth for what search
 	// uses. Without --model, prefer them over the shell environment, which
 	// may be empty when the model was given as a daemon flag.
-	liveModel, liveThreshold := runningEmbedConfig(*addr)
+	live := runningEmbedConfig(*addr)
 	if *model == "" {
-		*model = liveModel
+		*model = live.EmbedModel
+	}
+	if embeddingURL == "" && os.Getenv("MEMSTATE_EMBEDDING_URL") == "" {
+		embeddingURL = live.EmbeddingURL
 	}
 	threshold := envThreshold()
-	if liveThreshold > 0 && os.Getenv("MEMSTATE_SEMANTIC_THRESHOLD") == "" {
-		threshold = liveThreshold
+	if live.SemanticThreshold > 0 && os.Getenv("MEMSTATE_SEMANTIC_THRESHOLD") == "" {
+		threshold = live.SemanticThreshold
 	}
 	store, _, err := openStoreCLI(*db)
 	if err != nil {
@@ -763,10 +766,11 @@ func cmdEmbed(args []string) int {
 	return 2
 }
 
-// runningEmbedConfig returns the embed_model and semantic_threshold a
-// live daemon reports in /health, or zero values when none answers within
-// 500ms. addr "" means MEMSTATE_ADDR, then the default shared address.
-func runningEmbedConfig(addr string) (string, float32) {
+// runningEmbedConfig returns the /health document of a live daemon (its
+// embed_model, embedding_url and semantic_threshold are what search uses),
+// or an empty document when none answers within 500ms. addr "" means
+// MEMSTATE_ADDR, then the default shared address.
+func runningEmbedConfig(addr string) healthResponse {
 	if addr == "" {
 		addr = os.Getenv("MEMSTATE_ADDR")
 	}
@@ -775,9 +779,9 @@ func runningEmbedConfig(addr string) (string, float32) {
 	}
 	h, err := fetchHealth(addr)
 	if err != nil {
-		return "", 0
+		return healthResponse{}
 	}
-	return h.EmbedModel, h.SemanticThreshold
+	return *h
 }
 
 func cmdStop(args []string) int {
