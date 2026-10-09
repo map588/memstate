@@ -21,7 +21,7 @@ def is_memstate_hook(hook: dict) -> bool:
 
 def load() -> dict:
     if SETTINGS.exists():
-        return json.loads(SETTINGS.read_text() or "{}")
+        return json.loads(SETTINGS.read_text(encoding="utf-8") or "{}")
     return {}
 
 
@@ -30,7 +30,7 @@ def save(data: dict) -> None:
     if SETTINGS.exists():
         shutil.copy2(SETTINGS, SETTINGS.with_suffix(".json.bak"))
     tmp = SETTINGS.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     tmp.replace(SETTINGS)
 
 

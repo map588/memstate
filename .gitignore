@@ -4,6 +4,7 @@ node_modules
 
 # Go build output
 /server/memstated
+/server/memstated.exe
 
 # Release artifacts
 /dist/
