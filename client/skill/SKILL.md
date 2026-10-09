@@ -140,7 +140,11 @@ revives. A name that resembles an existing project is refused outright;
 use the existing project, or create the new one with the `memstate` CLI,
 which is the human escape. The home directory has no default project for
 writes, and its name is never accepted as a project: pin a project or use
-the user scope. Ids that start with `_` are reserved; the user scope is
+the user scope. A system directory (a filesystem root, `C:\WINDOWS\...`, or
+`/usr`, `/etc` and the like) is treated the same way; a desktop app that is
+not running in a project starts its MCP servers from one, so a session that
+sees "no default project" in a write error passes `project_name` once, using
+the project the recall hook's `<memstate-scope cwd_project>` names. Ids that start with `_` are reserved; the user scope is
 `--scope user`, never `--project`, and `--list-projects` does not show it.
 `--new-project` is an error where nothing can be created (`--scope user`,
 or the git repository you are in). Reads are never gated. These scripts

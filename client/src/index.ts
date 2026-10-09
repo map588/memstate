@@ -23,6 +23,7 @@ import * as fs from "fs";
 import * as net from "net";
 import * as os from "os";
 import * as path from "path";
+import { fileURLToPath } from "url";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -126,16 +127,16 @@ let daemonAddr = ""; // resolved after ensureDaemon()
 let baseURL = "";
 let managedChild: ChildProcess | null = null;
 
-// deriveProjectId computes the session's default project_id from the git
-// repo name (or the working directory's basename outside a repo), slugged
-// to lowercase snake_case. MCP clients spawn this proxy in the project
-// directory, so this pins one stable id per repo and stops callers from
-// inventing near-duplicate ids. Outside a repository the id is a guess,
-// which checkDefaultWrite gates; inRepo records which case this is.
-function deriveProjectId(): { id: string; inRepo: boolean } {
+// deriveProjectId computes the default project_id of a directory: the git
+// repo name when dir is inside a repository, else the directory's basename,
+// slugged to lowercase snake_case. One stable id per repo stops callers
+// from inventing near-duplicate ids. Outside a repository the id is a
+// guess, which checkWriteTarget gates; inRepo records which case this is.
+function deriveProjectId(dir: string): { id: string; inRepo: boolean } {
   let base = "";
   try {
     const top = execSync("git rev-parse --show-toplevel", {
+      cwd: dir,
       stdio: ["ignore", "pipe", "ignore"],
     })
       .toString()
@@ -145,8 +146,25 @@ function deriveProjectId(): { id: string; inRepo: boolean } {
     /* not a git repo */
   }
   const inRepo = base !== "";
-  if (!base) base = path.basename(process.cwd());
+  if (!base) base = path.basename(dir);
   return { id: slugName(base), inRepo };
+}
+
+// systemDirReason says why dir can name no project: a filesystem root, the
+// Windows directory (a desktop app that is not started from a project runs
+// its MCP servers from C:\WINDOWS\system32), or a Unix system tree. "" for
+// an ordinary directory.
+function systemDirReason(dir: string): string {
+  const r = path.resolve(dir);
+  if (r === path.parse(r).root) return "a filesystem root";
+  const win = process.env.SystemRoot || process.env.windir;
+  if (win && r.toLowerCase().startsWith(path.resolve(win).toLowerCase())) {
+    return "the Windows system directory";
+  }
+  if (/^\/(usr|bin|sbin|etc|lib|lib64|opt|var|proc|sys|dev|boot|tmp)(\/|$)/.test(r)) {
+    return "a system directory";
+  }
+  return "";
 }
 
 // slugName is the shared id rule: lowercase, runs of other characters
@@ -160,12 +178,45 @@ function slugName(name: string): string {
   return slug || "default";
 }
 
-const { id: DEFAULT_PROJECT, inRepo: CWD_IN_REPO } = deriveProjectId();
-// The home directory names the user, not a project: no write lands in its
-// project, and its name is never accepted as a pin or an explicit write
-// target (see checkWriteTarget). Reads stay open so old data can migrate.
-const CWD_IS_HOME = path.resolve(process.cwd()) === path.resolve(os.homedir());
+// The workspace is the directory this session works in: the process cwd,
+// replaced by the MCP client's first workspace root when the client offers
+// roots (applyWorkspace runs once more after initialize). Everything that
+// scopes a call reads these, and only applyWorkspace assigns them.
+let WORKSPACE_DIR = process.cwd();
+let DEFAULT_PROJECT = "";
+let CWD_IN_REPO = false;
+// The home directory names the user, not a project, and a system directory
+// names nothing: no write lands in their project, and their names are never
+// accepted as a pin or an explicit write target (see checkWriteTarget).
+// Reads stay open so old data can migrate.
+let CWD_IS_HOME = false;
+let CWD_SYSTEM_REASON = "";
 const HOME_SLUG = slugName(path.basename(os.homedir()));
+
+function applyWorkspace(dir: string): void {
+  WORKSPACE_DIR = dir;
+  ({ id: DEFAULT_PROJECT, inRepo: CWD_IN_REPO } = deriveProjectId(dir));
+  CWD_IS_HOME = path.resolve(dir) === path.resolve(os.homedir());
+  CWD_SYSTEM_REASON = CWD_IN_REPO ? "" : systemDirReason(dir);
+}
+applyWorkspace(process.cwd());
+
+// noDefaultReason says, for error text, why the workspace has no default
+// project for writes; "" when it has one.
+function noDefaultReason(): string {
+  if (CWD_IS_HOME) return "your home directory";
+  if (CWD_SYSTEM_REASON) {
+    return `${CWD_SYSTEM_REASON} (${WORKSPACE_DIR}) that the MCP client started this proxy in`;
+  }
+  return "";
+}
+
+function systemNameError(name: string): Error {
+  return new Error(
+    `"${name}" is the name of ${CWD_SYSTEM_REASON} this proxy was started in, not a ` +
+      "project; pass the project you work in as project_id, or pin it with project_name"
+  );
+}
 
 // USER_PROJECT is the daemon's one reserved project for facts about the
 // user and the host. The daemon rejects writes there outside a short
@@ -322,7 +373,7 @@ function writePinFile(project: string): void {
   try {
     fs.mkdirSync(path.dirname(PIN_FILE), { recursive: true });
     const tmp = `${PIN_FILE}.tmp`;
-    fs.writeFileSync(tmp, `${process.cwd()}\n${project}\n`);
+    fs.writeFileSync(tmp, `${WORKSPACE_DIR}\n${project}\n`);
     fs.renameSync(tmp, PIN_FILE);
     if (!pinFileWritten) {
       pinFileWritten = true;
@@ -354,6 +405,7 @@ async function pinSession(a: ToolArgs): Promise<void> {
     );
   }
   if (name === HOME_SLUG) throw homeNameError(name);
+  if (CWD_SYSTEM_REASON && name === DEFAULT_PROJECT) throw systemNameError(name);
   if (sessionProject && name !== sessionProject) {
     throw new Error(
       `this session is pinned to "${sessionProject}"; pass project_id to reach another project`
@@ -400,16 +452,22 @@ const knownProjects = new Set<string>();
 async function checkWriteTarget(id: string, a: ToolArgs, explicit: boolean): Promise<void> {
   if (!explicit) {
     if (CWD_IN_REPO) return;
-    if (CWD_IS_HOME) {
+    const why = noDefaultReason();
+    if (why) {
       throw new Error(
-        "the working directory is your home directory, which has no default " +
+        `the working directory is ${why}, which has no default ` +
           "project for writes. Pin a project with project_name (an id from " +
           "memstate_get(list_projects=true), or a new id with new_project=true), " +
-          'or use scope="user" for facts about this machine'
+          'or use scope="user" for facts about this machine' +
+          (CWD_SYSTEM_REASON
+            ? ". The recall hook's <memstate-scope cwd_project> names the project of the directory you work in"
+            : "")
       );
     }
   } else if (id === HOME_SLUG) {
     throw homeNameError(id);
+  } else if (CWD_SYSTEM_REASON && id === DEFAULT_PROJECT) {
+    throw systemNameError(id);
   }
   if (knownProjects.has(id)) return;
   const ids = await listProjectIds();
@@ -1307,7 +1365,12 @@ const DEFAULT_ORIGIN = CWD_IN_REPO
   ? "derived from the git repository name"
   : CWD_IS_HOME
     ? "derived from the home directory, which has no default project for writes; see Session project"
-    : "derived from the directory name, which is not a git repository; see Session project";
+    : CWD_SYSTEM_REASON
+      ? `derived from ${CWD_SYSTEM_REASON} (${WORKSPACE_DIR}) that the MCP client started this ` +
+        "proxy in, which has no default project for writes. On your first call pass " +
+        "project_name=<the project the recall hook's <memstate-scope cwd_project> names>, " +
+        "or project_id on every call; see Session project"
+      : "derived from the directory name, which is not a git repository; see Session project";
 
 const INSTRUCTIONS = `memstate — persistent memory across sessions, scoped per project.
 
@@ -1447,7 +1510,37 @@ async function main(): Promise<void> {
     })),
   }));
 
+  // Workspace roots: a client that offers them names the directory the
+  // session works in, which beats the process cwd (a desktop app may start
+  // this proxy from a system directory). Asked once after initialize; the
+  // first tool call waits for the answer, two seconds at most.
+  let settleRoots: () => void = () => {};
+  const rootsReady = new Promise<void>((resolve) => {
+    settleRoots = resolve;
+  });
+  server.oninitialized = () => {
+    void (async () => {
+      try {
+        if (server.getClientCapabilities()?.roots) {
+          const { roots } = await server.listRoots();
+          const first = roots.find((r) => r.uri.startsWith("file:"));
+          if (first) applyWorkspace(fileURLToPath(first.uri));
+        }
+      } catch (err) {
+        process.stderr.write(`memstate: roots/list failed, keeping the cwd: ${String(err)}\n`);
+      } finally {
+        process.stderr.write(
+          `memstate: workspace ${WORKSPACE_DIR} -> project ${DEFAULT_PROJECT}` +
+            (CWD_IN_REPO ? " (git repository)" : noDefaultReason() ? " (no default for writes)" : " (not a repository)") +
+            "\n"
+        );
+        settleRoots();
+      }
+    })();
+  };
+
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    await Promise.race([rootsReady, new Promise((r) => setTimeout(r, 2000))]);
     const tool = TOOLS.find((t) => t.name === request.params.name);
     if (!tool) {
       return {

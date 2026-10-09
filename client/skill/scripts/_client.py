@@ -314,6 +314,21 @@ def is_home_dir() -> bool:
         return False
 
 
+def system_dir_reason() -> str:
+    """Why the cwd can name no project: a filesystem root, the Windows
+    directory, or a Unix system tree. "" for an ordinary directory. Same
+    rule as the TS proxy (systemDirReason)."""
+    cwd = Path.cwd().resolve()
+    if cwd == Path(cwd.anchor):
+        return "a filesystem root"
+    win = os.environ.get("SystemRoot") or os.environ.get("windir")
+    if win and str(cwd).lower().startswith(str(Path(win).resolve()).lower()):
+        return "the Windows system directory"
+    if re.match(r"^/(usr|bin|sbin|etc|lib|lib64|opt|var|proc|sys|dev|boot|tmp)(/|$)", cwd.as_posix()):
+        return "a system directory"
+    return ""
+
+
 def slug_name(name: str) -> str:
     """Shared id rule: lowercase, runs of other characters become "_",
     edge underscores trimmed. Same rule as the TS proxy and the Go daemon."""
@@ -453,9 +468,10 @@ def check_write_target(args, project: str) -> None:
                     "Error: --new-project has no effect here: the project of the git "
                     f'repository you are in ("{project}") is created without it')
             return
-        if is_home_dir():
+        why = "your home directory" if is_home_dir() else system_dir_reason()
+        if why:
             raise SystemExit(
-                "Error: the working directory is your home directory, which has no "
+                f"Error: the working directory is {why}, which has no "
                 "default project for writes. Pass --project ID (an id from "
                 "memstate_get.py --list-projects, or a new id with --new-project), "
                 "or --scope user for facts about this machine")

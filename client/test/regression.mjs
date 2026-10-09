@@ -24,9 +24,10 @@ import * as fs from "fs";
 import * as http from "http";
 import * as os from "os";
 import * as path from "path";
-import { fileURLToPath } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { ListRootsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROXY = path.resolve(__dirname, "..", "dist", "index.js");
@@ -673,6 +674,66 @@ async function main() {
         !f.isError && f.data.stored.project_id === PROJECT && f.data.session_project === PROJECT,
         JSON.stringify(f));
     });
+    // ---- system directory ------------------------------------------------------
+    // A desktop app that is not started from a project runs its MCP servers
+    // from C:\WINDOWS\system32. Such a directory names no project: writes to
+    // the default are refused with the way out, reads and explicit ids work.
+    // The real system directory: a faked SystemRoot never reaches a child on
+    // Windows (libuv puts the real one back), and running the proxy from
+    // there writes nothing there.
+    const sysCwd = process.platform === "win32"
+      ? path.join(process.env.SystemRoot || process.env.windir || "C:\\Windows", "System32")
+      : "/usr";
+    const sysSlug = process.platform === "win32" ? "system32" : "usr";
+    const sysEnv = env;
+    await withProxy(sysEnv, sysCwd, async (s) => {
+      let f = await call(s, "memstate_set", { keypath: "notes.a", value: "v" });
+      check("system dir: a write to the default project is refused",
+        f.isError && f.message.includes("system directory") && f.message.includes("project_name"),
+        JSON.stringify(f));
+      f = await call(s, "memstate_set", { keypath: "notes.a", value: "v", new_project: true });
+      check("system dir: new_project does not open it",
+        f.isError && f.message.includes("system directory"),
+        JSON.stringify(f));
+      f = await call(s, "memstate_set", { project_id: sysSlug, keypath: "notes.a", value: "v" });
+      check("system dir: its name is refused as an explicit target",
+        f.isError && f.message.includes("not a project"),
+        JSON.stringify(f));
+      f = await call(s, "memstate_set", { project_id: PROJECT, keypath: "config.sys", value: "explicit" });
+      check("system dir: an explicit project_id works",
+        !f.isError && f.data.stored.project_id === PROJECT,
+        JSON.stringify(f));
+      f = await call(s, "memstate_set", { project_name: PROJECT, keypath: "config.sys2", value: "pinned" });
+      check("system dir: pinning an existing project works",
+        !f.isError && f.data.stored.project_id === PROJECT,
+        JSON.stringify(f));
+    });
+    // A client that offers workspace roots names the directory the session
+    // works in; the proxy derives the default from it, not from its cwd.
+    const rootDir = path.join(tmp, "roots_proj");
+    fs.mkdirSync(rootDir);
+    {
+      const transport = new StdioClientTransport({
+        command: process.execPath, args: [PROXY], env: sysEnv, cwd: sysCwd, stderr: "ignore",
+      });
+      const rc = new Client({ name: "regression-roots", version: "0.0.0" }, { capabilities: { roots: {} } });
+      rc.setRequestHandler(ListRootsRequestSchema, async () => ({
+        roots: [{ uri: pathToFileURL(rootDir).href, name: "roots_proj" }],
+      }));
+      await rc.connect(transport);
+      try {
+        const f = await call(rc, "memstate_get", {});
+        check("roots: the default project follows the client's workspace root",
+          !f.isError && f.data.project_id === "roots_proj",
+          JSON.stringify(f));
+        const w = await call(rc, "memstate_set", { keypath: "notes.r", value: "v", new_project: true });
+        check("roots: a write creates the root's project, not the cwd's",
+          !w.isError && w.data.stored.project_id === "roots_proj",
+          JSON.stringify(w));
+      } finally {
+        await rc.close();
+      }
+    }
     // Skipped when the home directory itself is a git repository.
     let homeIsRepo = true;
     try {
