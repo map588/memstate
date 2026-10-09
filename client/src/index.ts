@@ -12,7 +12,8 @@
  *  - "attach" (MEMSTATE_ADDR set): talk to a daemon someone else started,
  *    or lazy-spawn a detached daemon on that addr if nothing is listening.
  *
- * Environment:
+ * Environment (every name may also live in ~/.memstate/config.env, see
+ * config.ts; the environment wins over the file):
  *   MEMSTATE_ADDR        attach to this host:port; spawn detached if empty
  *   MEMSTATE_BIN         path to memstated (default: sibling build / PATH)
  *   MEMSTATE_LOCAL_URL   full base URL override
@@ -28,9 +29,14 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { loadConfigFile } from "./config.js";
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { version: VERSION } = require("../package.json") as { version: string };
+
+// The settings file goes into process.env before anything below reads it,
+// and the daemon this proxy spawns inherits the result.
+const CONFIG_FILE = loadConfigFile();
 
 const ATTACH_ADDR = process.env.MEMSTATE_ADDR ?? "";
 // MEMSTATE_CHILD=1 asks for a private daemon that lives and dies with this
@@ -101,6 +107,12 @@ export function embedDaemonArgs(opts: EmbedOptions): string[] {
 }
 
 const EMBED_OPTS = parseEmbedOptions(process.argv.slice(2), process.env);
+// Only flags given to the proxy itself become daemon flags. Values from
+// the environment (config.env included) are NOT turned into flags: the
+// daemon inherits the environment and reads config.env on its own, and a
+// flag would pin the value so that `memstated restart`, which replays
+// flags, could never pick up an edited setting.
+const DAEMON_EMBED_ARGS = embedDaemonArgs(parseEmbedOptions(process.argv.slice(2), {}));
 if (EMBED_OPTS.legacy) {
   process.stderr.write(
     `memstate: ${EMBED_OPTS.legacy} is deprecated, use ` +
@@ -711,7 +723,7 @@ async function attach(addr: string, sameDB = false): Promise<void> {
       process.stderr.write(
         `memstate: warning — embed model ${wantModel} is ignored; ` +
           `the daemon at ${addr} embeds with ${daemonEmbedModel}. ` +
-          `Restart it with --embed-model ${wantModel} to switch.\n`
+          `\`memstated config\` shows both; \`memstated restart\` applies the config.\n`
       );
     }
   }
@@ -729,7 +741,7 @@ async function spawnDetached(addr: string): Promise<void> {
   const bin = resolveDaemonBin();
   const { logFD, logPath } = openDaemonLog();
 
-  const child = spawn(bin, ["--addr", addr, ...embedDaemonArgs(EMBED_OPTS)], {
+  const child = spawn(bin, ["--addr", addr, ...DAEMON_EMBED_ARGS], {
     detached: true,
     stdio: ["ignore", logFD ?? "ignore", logFD ?? "ignore"],
   });
@@ -769,7 +781,7 @@ async function spawnChild(): Promise<void> {
   const bin = resolveDaemonBin();
   const { logFD, logPath } = openDaemonLog();
 
-  const child = spawn(bin, ["--owner-pid", String(process.pid), ...embedDaemonArgs(EMBED_OPTS)], {
+  const child = spawn(bin, ["--owner-pid", String(process.pid), ...DAEMON_EMBED_ARGS], {
     // Not detached: keeps the child in our process group so a terminal SIGINT
     // reaches it and .kill() is authoritative.
     detached: false,
@@ -1414,6 +1426,7 @@ async function main(): Promise<void> {
     process.stdout.write(
       `✓ daemon reachable at http://${daemonAddr} (${JSON.stringify(body)}) mode=${daemonMode}\n`
     );
+    process.stdout.write(`✓ config file: ${CONFIG_FILE ?? "(none)"}\n`);
     process.stdout.write(`✓ ${TOOLS.length} tools:\n`);
     for (const t of TOOLS) process.stdout.write(`    ${t.name}\n`);
     // In child mode, the --test exit will trigger our cleanup handler and

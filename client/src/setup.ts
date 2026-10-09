@@ -12,26 +12,35 @@ import * as path from "path";
 import * as os from "os";
 import * as readline from "readline";
 import { execSync } from "child_process";
+import { configFilePath, writeConfigValue } from "./config.js";
 
 /**
  * The config entry written into each agent. Runs the MCP proxy.
  * The proxy resolves the Go binary at runtime via MEMSTATE_BIN or the
  * sibling `server/memstated` path, so this config is machine-agnostic.
- * The embed model, when chosen, travels as a proxy flag so the proxy
- * passes it to every daemon it starts.
+ * Settings (embedding server, model, threshold) do NOT live here: they go
+ * to ~/.memstate/config.env, which the proxy, the daemon and the scripts
+ * all read, so rerunning setup or an installer never loses them.
  */
-function mcpConfigTemplate(entryPath: string, embedModel: string): Record<string, unknown> {
+function mcpConfigTemplate(entryPath: string): Record<string, unknown> {
   return {
     command: "node",
-    args: proxyArgs(entryPath, embedModel),
+    args: [entryPath],
   };
 }
 
-function proxyArgs(entryPath: string, embedModel: string): string[] {
-  return embedModel ? [entryPath, "--embed-model", embedModel] : [entryPath];
-}
-
 const DEFAULT_EMBED_MODEL = "nomic-embed-text";
+const DEFAULT_EMBEDDING_URL = "http://127.0.0.1:11434";
+
+/** embeddingURL is the server setup lists models from and writes to config.env. */
+function embeddingURL(flagValue: string | undefined): string {
+  return (
+    flagValue ||
+    process.env.MEMSTATE_EMBEDDING_URL ||
+    process.env.MEMSTATE_OLLAMA_URL ||
+    DEFAULT_EMBEDDING_URL
+  ).replace(/\/+$/, "");
+}
 
 /**
  * listEmbeddingModels returns the model names the local embedding server
@@ -39,12 +48,7 @@ const DEFAULT_EMBED_MODEL = "nomic-embed-text";
  * (or the old MEMSTATE_OLLAMA_URL). Ollama answers GET /api/tags; a base
  * that ends in /v1 is an OpenAI-compatible server and answers GET /models.
  */
-async function listEmbeddingModels(): Promise<string[]> {
-  const base = (
-    process.env.MEMSTATE_EMBEDDING_URL ||
-    process.env.MEMSTATE_OLLAMA_URL ||
-    "http://127.0.0.1:11434"
-  ).replace(/\/+$/, "");
+async function listEmbeddingModels(base: string): Promise<string[]> {
   const openai = base.endsWith("/v1");
   try {
     const controller = new AbortController();
@@ -64,26 +68,28 @@ async function listEmbeddingModels(): Promise<string[]> {
 }
 
 /**
- * chooseEmbedModel picks the embedding model for the generated config.
- * A --embed-model flag on the setup command wins. Otherwise the user
- * picks from the models Ollama serves (embedding models listed first),
- * or types a name when Ollama is not running. Empty input keeps the
- * daemon default.
+ * chooseEmbedModel picks the embedding model to persist. A --embed-model
+ * flag on the setup command wins. Otherwise the user picks from the models
+ * the embedding server at `base` serves (embedding models listed first),
+ * or types a name when no server answers. Empty input keeps what is
+ * configured now; "" means the daemon default, so nothing is written.
  */
-async function chooseEmbedModel(rl: Prompt, flagValue: string | undefined): Promise<string> {
+async function chooseEmbedModel(rl: Prompt, flagValue: string | undefined, base: string): Promise<string> {
   if (flagValue !== undefined) return flagValue;
   const current = process.env.MEMSTATE_EMBED_MODEL || DEFAULT_EMBED_MODEL;
-  const models = await listEmbeddingModels();
+  const models = await listEmbeddingModels(base);
   const embedFirst = [
     ...models.filter((m) => m.includes("embed")),
     ...models.filter((m) => !m.includes("embed")),
   ];
-  console.log("\nEmbedding model for semantic search (needs Ollama).");
+  console.log(`\nEmbedding server: ${base}${base.endsWith("/v1") ? " (OpenAI-compatible)" : " (Ollama)"}`);
+  console.log("  change it with: memstate-mcp setup --embedding-url http://host:port[/v1]");
+  console.log("Embedding model for semantic search:");
   if (embedFirst.length === 0) {
-    console.log("Ollama not reachable; type a model name, or press Enter to keep the default.");
+    console.log("  no server answered there; type a model name, or press Enter to keep the current one.");
   } else {
     embedFirst.forEach((m, i) => console.log(`  ${i + 1}. ${m}`));
-    console.log("Pick a number, type a model name, or press Enter to keep the default.");
+    console.log("  pick a number, type a model name, or press Enter to keep the current one.");
   }
   const answer = (await rl.ask(`Model [${current}]: `)).trim();
   if (answer === "") return current === DEFAULT_EMBED_MODEL ? "" : current;
@@ -117,15 +123,14 @@ function claudeCliAvailable(): boolean {
   }
 }
 
-function installViaClaudeCli(entryPath: string, embedModel: string): { success: boolean; message: string } {
+function installViaClaudeCli(entryPath: string): { success: boolean; message: string } {
   try {
     try {
       execSync("claude mcp remove memstate --scope user", { stdio: "ignore" });
     } catch {
       // not present, fine
     }
-    const args = proxyArgs(entryPath, embedModel).map((a) => JSON.stringify(a)).join(" ");
-    execSync(`claude mcp add --scope user -- memstate node ${args}`, {
+    execSync(`claude mcp add --scope user -- memstate node ${JSON.stringify(entryPath)}`, {
       stdio: "pipe",
     });
     return { success: true, message: "✓ Configured via `claude mcp add` (user scope)" };
@@ -204,11 +209,10 @@ function writeJsonConfig(filePath: string, config: Record<string, unknown>): voi
 
 function configureAgent(
   agent: AgentConfig,
-  entryPath: string,
-  embedModel: string
+  entryPath: string
 ): { success: boolean; path: string; message: string } {
   if (agent.useCli && claudeCliAvailable()) {
-    const result = installViaClaudeCli(entryPath, embedModel);
+    const result = installViaClaudeCli(entryPath);
     return { ...result, path: "~/.claude.json (via claude CLI)" };
   }
 
@@ -219,7 +223,7 @@ function configureAgent(
   try {
     const config = readJsonConfig(expandedPath);
     const mcpServers = (config[agent.configKey] as Record<string, unknown>) || {};
-    mcpServers["memstate"] = mcpConfigTemplate(entryPath, embedModel);
+    mcpServers["memstate"] = mcpConfigTemplate(entryPath);
     config[agent.configKey] = mcpServers;
     writeJsonConfig(expandedPath, config);
     return { success: true, path: expandedPath, message: "✓ Configured" };
@@ -274,13 +278,15 @@ class Prompt {
   }
 }
 
-/** setupFlags reads `--embed-model NAME` (or `--embed-model=NAME`) from the setup argv. */
-function setupFlags(argv: string[]): { embedModel?: string } {
-  const out: { embedModel?: string } = {};
+/** setupFlags reads `--embed-model NAME` and `--embedding-url URL` (also `=` forms) from the setup argv. */
+function setupFlags(argv: string[]): { embedModel?: string; embeddingUrl?: string } {
+  const out: { embedModel?: string; embeddingUrl?: string } = {};
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--embed-model") out.embedModel = argv[++i] ?? "";
     else if (arg.startsWith("--embed-model=")) out.embedModel = arg.slice("--embed-model=".length);
+    else if (arg === "--embedding-url" || arg === "--ollama-url") out.embeddingUrl = argv[++i] ?? "";
+    else if (arg.startsWith("--embedding-url=")) out.embeddingUrl = arg.slice("--embedding-url=".length);
   }
   return out;
 }
@@ -305,11 +311,32 @@ export async function main(): Promise<void> {
   const allAgents = getAgentConfigs();
   const detected = detectInstalledAgents(allAgents);
 
-  const embedModel = await chooseEmbedModel(rl, flags.embedModel);
+  const base = embeddingURL(flags.embeddingUrl);
+  const embedModel = await chooseEmbedModel(rl, flags.embedModel, base);
+
+  // Settings go to config.env, never into the agent's args: that is what
+  // lets an installer or a second `setup` run keep them.
+  const configFile = configFilePath();
+  const written: string[] = [];
+  if (flags.embeddingUrl) {
+    writeConfigValue(configFile, "MEMSTATE_EMBEDDING_URL", base);
+    written.push(`MEMSTATE_EMBEDDING_URL=${base}`);
+  }
+  if (embedModel) {
+    writeConfigValue(configFile, "MEMSTATE_EMBED_MODEL", embedModel);
+    written.push(`MEMSTATE_EMBED_MODEL=${embedModel}`);
+  }
+  if (written.length > 0) {
+    console.log(`\nSaved to ${configFile}:`);
+    for (const line of written) console.log(`  ${line}`);
+  } else {
+    console.log(`\nNothing to save; settings live in ${configFile}.`);
+  }
+  console.log("`memstated config` shows every setting with its source.");
 
   if (detected.length === 0) {
-    console.log("No agents auto-detected. Add an entry like this to your agent's MCP config:\n");
-    console.log(JSON.stringify({ "memstate": mcpConfigTemplate(entryPath, embedModel) }, null, 2));
+    console.log("\nNo agents auto-detected. Add an entry like this to your agent's MCP config:\n");
+    console.log(JSON.stringify({ "memstate": mcpConfigTemplate(entryPath) }, null, 2));
     rl.close();
     return;
   }
@@ -326,20 +353,21 @@ export async function main(): Promise<void> {
 
   for (const agent of detected) {
     process.stdout.write(`  ${agent.name.padEnd(20)} `);
-    const result = configureAgent(agent, entryPath, embedModel);
+    const result = configureAgent(agent, entryPath);
     console.log(result.message);
   }
 
   console.log(
     "\nDone.\n\n" +
-      "Next steps:\n" +
+      "How it runs:\n" +
       "  1. Restart your agent so it picks up the new MCP server.\n" +
-      "  2. The proxy starts memstated from MEMSTATE_BIN when it is set, else from ../server\n" +
-      "     next to the proxy (the install script and a repository build put it there),\n" +
-      "     else from PATH.\n" +
-      "  3. First tool call auto-spawns the daemon; logs at memstated.log next to the DB (default ~/.memstate/memstated.log).\n" +
+      "  2. The agent starts the proxy (node dist/index.js). The proxy starts memstated,\n" +
+      "     from MEMSTATE_BIN when it is set, else from ../server next to the proxy, else\n" +
+      "     from PATH, as one shared daemon on 127.0.0.1:8765 that later sessions reuse.\n" +
+      `  3. Both read ${configFile}; a running daemon applies a change after \`memstated restart\`.\n` +
+      "  4. Daemon log: memstated.log next to the DB (default ~/.memstate/memstated.log).\n" +
       (embedModel
-        ? `  4. Semantic search uses ${embedModel}; run \`ollama pull ${embedModel}\` if needed.\n\n`
+        ? `  5. Semantic search uses ${embedModel} at ${base}; the server must serve that name.\n\n`
         : "\n") +
       "Convention: use snake_case for project_id and keypath segments\n" +
       "(e.g. `memstate_mcp`, not `memstate-mcp` or `MemstateMCP`).\n"

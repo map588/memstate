@@ -38,38 +38,49 @@ func TestReleaseAssetName(t *testing.T) {
 }
 
 func TestRestartPlan(t *testing.T) {
-	args, env := restartPlan(nil, "127.0.0.1:1")
-	if strings.Join(args, " ") != "--addr 127.0.0.1:1" || len(env) != 0 {
-		t.Fatalf("nil report: %v %v", args, env)
+	if got := strings.Join(restartPlan(nil, "127.0.0.1:1"), " "); got != "--addr 127.0.0.1:1" {
+		t.Fatalf("nil report: %q", got)
 	}
+	// The old daemon's flags come back verbatim, on the new addr, and
+	// nothing from its reported values is pinned: those come from env and
+	// config.env at the next start.
 	prev := &healthResponse{
-		EmbedModel: "qwen3-embedding:4b", SemanticThreshold: 0.45,
-		EmbeddingURL: "http://127.0.0.1:11434", EmbedTimeout: "1m0s", IdleTimeout: "30m0s",
+		Args:       []string{"--addr", "127.0.0.1:1", "--embed-model", "qwen3-embedding:4b", "-addr=x", "--idle-timeout", "30m"},
+		EmbedModel: "qwen3-embedding:4b", SemanticThreshold: 0.45, EmbeddingURL: "http://127.0.0.1:11434",
 	}
-	args, env = restartPlan(prev, "127.0.0.1:8765")
-	want := "--addr 127.0.0.1:8765 --embed-model qwen3-embedding:4b --embedding-url http://127.0.0.1:11434 --embed-timeout 1m0s --idle-timeout 30m0s"
-	if strings.Join(args, " ") != want {
-		t.Fatalf("args: %q", strings.Join(args, " "))
+	want := "--addr 127.0.0.1:8765 --embed-model qwen3-embedding:4b --idle-timeout 30m"
+	if got := strings.Join(restartPlan(prev, "127.0.0.1:8765"), " "); got != want {
+		t.Fatalf("args: %q", got)
 	}
-	if len(env) != 1 || env[0] != "MEMSTATE_SEMANTIC_THRESHOLD=0.45" {
-		t.Fatalf("env: %v", env)
+}
+
+func TestReportRestartDiff(t *testing.T) {
+	prev := &healthResponse{EmbedModel: "a", EmbeddingURL: "u", EmbedTimeout: "1m0s", SemanticThreshold: 0.5}
+	next := &healthResponse{EmbedModel: "b", EmbeddingURL: "u", EmbedTimeout: "60s", SemanticThreshold: 0.5}
+	var out strings.Builder
+	reportRestartDiff(&out, prev, next)
+	if got := out.String(); !strings.Contains(got, `embed_model changed: "a" -> "b"`) ||
+		!strings.Contains(got, "MEMSTATE_EMBED_MODEL") || strings.Contains(got, "embed_timeout") {
+		t.Fatalf("diff: %q", got)
 	}
 }
 
 // TestUpgradeRestartKeepsConfig runs the real binary the way `memstated
-// upgrade` restarts it and checks that /health on the new daemon reports
-// the config of the old one.
+// upgrade` and `memstated restart` start it: the old daemon's flags are
+// replayed, and env (here standing in for config.env, which main exports
+// into env) supplies the rest.
 func TestUpgradeRestartKeepsConfig(t *testing.T) {
 	bin := buildDaemon(t)
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("MEMSTATE_CONFIG", "off")
 	t.Setenv("MEMSTATE_DB", filepath.Join(t.TempDir(), "up.db"))
 	t.Setenv("MEMSTATE_NO_UPDATE_CHECK", "1")
-	t.Setenv("MEMSTATE_SEMANTIC_THRESHOLD", "")
+	t.Setenv("MEMSTATE_SEMANTIC_THRESHOLD", "0.37")
+	t.Setenv("MEMSTATE_EMBEDDING_URL", "http://127.0.0.1:9")
 	addr := reserveAndRelease(t)
 	prev := &healthResponse{
 		Service: healthServiceName, Version: healthVersion,
-		EmbedModel: "keep-me", SemanticThreshold: 0.37,
-		EmbeddingURL: "http://127.0.0.1:9", EmbedTimeout: "7s", IdleTimeout: "20m0s",
+		Args:    []string{"--addr", "127.0.0.1:1", "--embed-model", "keep-me", "--embed-timeout", "7s", "--idle-timeout", "20m"},
 	}
 	if err := startDetachedDaemon(bin, addr, prev); err != nil {
 		t.Fatal(err)
@@ -80,7 +91,8 @@ func TestUpgradeRestartKeepsConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	if h.EmbedModel != "keep-me" || h.SemanticThreshold != 0.37 || h.EmbeddingURL != "http://127.0.0.1:9" ||
-		h.EmbedTimeout != "7s" || h.IdleTimeout != "20m0s" {
+		h.EmbedTimeout != "7s" || h.IdleTimeout != "20m0s" || h.Pid == 0 ||
+		strings.Join(h.Args, " ") != "--addr "+addr+" --embed-model keep-me --embed-timeout 7s --idle-timeout 20m" {
 		t.Fatalf("restarted daemon lost config: %+v", h)
 	}
 }

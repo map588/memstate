@@ -40,6 +40,36 @@ from typing import Optional
 READY_RE = re.compile(r"MEMSTATE_READY addr=(\S+)")
 _READY_TIMEOUT = 5.0
 
+
+def _load_config_file() -> None:
+    """Export ~/.memstate/config.env into os.environ for keys the environment
+    does not already set: the daemon's rule (server/config.go), so the
+    scripts, the proxy and the daemon see one configuration. MEMSTATE_CONFIG
+    names another file; MEMSTATE_CONFIG=off skips it."""
+    raw = os.environ.get("MEMSTATE_CONFIG", "")
+    if raw == "off":
+        return
+    path = Path(os.path.expanduser(raw)) if raw else Path.home() / ".memstate" / "config.env"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key, value = key.strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if key.startswith("MEMSTATE_") and not os.environ.get(key):
+            os.environ[key] = value
+
+
+_load_config_file()
+
 _child: Optional[subprocess.Popen] = None
 _base_url: Optional[str] = None
 _started_lock = threading.Lock()

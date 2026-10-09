@@ -79,6 +79,7 @@ async function main() {
   // private child daemon, so the suite never touches a user's daemon.
   env.MEMSTATE_DB = path.join(tmp, "regress.db");
   env.MEMSTATE_NO_UPDATE_CHECK = "1";
+  env.MEMSTATE_CONFIG = "off"; // never read the developer's config.env
   env.MEMSTATE_EMBEDDING_URL = "http://127.0.0.1:9"; // closed port: no network
 
   const transport = new StdioClientTransport({
@@ -1084,7 +1085,7 @@ async function noDaemonForRemoteAddr() {
 // closes (libuv assertion in src\win\async.c), and the smoke test `--test`
 // shows the same with any daemon.
 async function runProxy(addr, home) {
-  const env = { ...process.env, MEMSTATE_ADDR: addr, HOME: home, MEMSTATE_NO_UPDATE_CHECK: "1" };
+  const env = { ...process.env, MEMSTATE_ADDR: addr, HOME: home, MEMSTATE_NO_UPDATE_CHECK: "1", MEMSTATE_CONFIG: "off" };
   delete env.MEMSTATE_DB;
   const proxy = spawn(process.execPath, [PROXY, "--test"], {
     env,

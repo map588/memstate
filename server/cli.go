@@ -149,6 +149,9 @@ writes go through the shared daemon (MEMSTATE_ADDR, else daemon.addr).
                                            tombstone a keypath or a subtree
   memstate projects                        live projects with memory counts
   memstate status   [--addr HOST:PORT]     daemon health
+  memstate config   [set KEY VALUE|unset KEY|path]
+                                           settings, their sources, and whether the
+                                           running daemon matches (~/.memstate/config.env)
 
 Flags on every verb:
   --project ID   a project other than this repository's
@@ -188,6 +191,8 @@ func cmdCLI(args []string) int {
 		return cmdProjects(rest)
 	case "status":
 		return cmdStatus(rest)
+	case "config":
+		return cmdConfig(rest)
 	case "-h", "--help", "help":
 		printCLIUsage(cliOut)
 		return 0

@@ -161,7 +161,7 @@ func TestRunningEmbedConfig(t *testing.T) {
 	if h := runningEmbedConfig(addr); h.EmbedModel != "live-model" || h.SemanticThreshold != 0.6 || h.EmbeddingURL != "http://live:8081/v1" {
 		t.Fatalf("live daemon: got %+v", h)
 	}
-	if h := runningEmbedConfig("127.0.0.1:9"); h != (healthResponse{}) {
+	if h := runningEmbedConfig("127.0.0.1:9"); h.EmbedModel != "" || h.EmbeddingURL != "" || h.SemanticThreshold != 0 {
 		t.Fatalf("closed port must give an empty document, got %+v", h)
 	}
 }

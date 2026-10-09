@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -37,6 +38,12 @@ type healthResponse struct {
 	EmbeddingURL string `json:"embedding_url,omitempty"`
 	EmbedTimeout string `json:"embed_timeout,omitempty"` // Go duration
 	IdleTimeout  string `json:"idle_timeout,omitempty"`  // Go duration, absent when disabled
+	// Pid, Args and ConfigFile say what is running and how it was started:
+	// `memstated config` prints them, and restart/upgrade replay Args so
+	// a daemon keeps the flags it was given.
+	Pid        int      `json:"pid,omitempty"`
+	Args       []string `json:"args,omitempty"`
+	ConfigFile string   `json:"config_file,omitempty"`
 }
 
 // daemonIdleTimeout is the --idle-timeout in force, reported in /health.
@@ -63,6 +70,9 @@ func newRouter(store *Store, shutdown func(), embedder *Embedder) http.Handler {
 			Version:         healthVersion,
 			Build:           buildID(),
 			LatestAvailable: updateAvailable(),
+			Pid:             os.Getpid(),
+			Args:            os.Args[1:],
+			ConfigFile:      configFileLoaded,
 		}
 		if embedder != nil {
 			h.EmbedModel = embedder.Model

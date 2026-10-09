@@ -123,37 +123,41 @@ Bash to run.
 
 ### Embeddings (optional)
 
-Semantic search needs a local [Ollama](https://ollama.com) with an
-embedding model pulled:
+Semantic search needs a local embedding server. Two kinds work:
+
+- [Ollama](https://ollama.com), the default, at `http://127.0.0.1:11434`.
+- Any server with an OpenAI-compatible embeddings API, for example the
+  llama.cpp server, LM Studio, or vLLM. Its base URL ends in `/v1`, and
+  the daemon then sends `POST {url}/embeddings` with `{"model", "input"}`
+  instead of Ollama's `/api/embeddings`.
+
+Pick the server and model once, in the settings file (see
+[Configuration](#configuration)); every later install, upgrade or
+restart keeps them:
 
 ```bash
-ollama pull nomic-embed-text
-```
-
-Any Ollama embedding model works. Select one with `MEMSTATE_EMBED_MODEL`
-or `memstated --embed-model NAME`. For example:
-
-```bash
+# Ollama
 ollama pull qwen3-embedding:4b
-memstated --addr 127.0.0.1:8765 --embed-model qwen3-embedding:4b
+memstated config set MEMSTATE_EMBED_MODEL qwen3-embedding:4b
+
+# llama.cpp server
+llama-server -m Qwen3-Embedding-4B-Q8_0.gguf --embeddings --pooling last --alias qwen3-embedding-4b --port 8081
+memstated config set MEMSTATE_EMBEDDING_URL http://127.0.0.1:8081/v1
+memstated config set MEMSTATE_EMBED_MODEL qwen3-embedding-4b
+
+memstated restart     # a running daemon applies the change
+memstated config      # shows what is in effect, and whether the daemon matches
 ```
 
-If Ollama does not run, memstate still works. Writes and FTS search
+`memstate-mcp setup --embedding-url URL` writes the same keys after
+listing the models that server serves. The model name must be the one
+the server answers to (Ollama: `qwen3-embedding:4b`; llama.cpp:
+whatever `--alias` says).
+
+If the server does not run, memstate still works. Writes and FTS search
 are not affected. The default hybrid search returns FTS hits alone and
 sets `degraded` in the response. Explicit semantic search returns 503
 until the embedder is available.
-
-A server with an OpenAI-compatible embeddings API also works, for
-example the llama.cpp server, LM Studio, or vLLM. Set
-`MEMSTATE_EMBEDDING_URL` (or `--embedding-url`) to its base URL, which
-ends in `/v1`. The daemon then sends `POST {url}/embeddings` with
-`{"model", "input"}` instead of Ollama's `/api/embeddings`. For
-example, with the llama.cpp server and nomic-embed-text:
-
-```bash
-llama-server -m nomic-embed-text-v1.5.Q8_0.gguf --embeddings --pooling mean --alias nomic-embed-text --port 8081
-memstated --addr 127.0.0.1:8765 --embedding-url http://127.0.0.1:8081/v1
-```
 
 `MEMSTATE_OLLAMA_URL` and `--ollama-url` are the old names. They still
 work, print a notice, and will be removed.
@@ -394,18 +398,64 @@ A soft-deleted project blocks reads. A write to the project revives
 it. Through MCP, that write also needs `new_project=true`. A deleted keypath loses its embedding row and no longer appears in
 search, but its full version history stays readable.
 
+## Configuration
+
+Every setting is a `MEMSTATE_*` name. It can come from three places, and
+the first one that sets it wins:
+
+1. a flag on the `memstated` command line (`--embed-model`, `--embedding-url`, `--embed-timeout`, `--idle-timeout`, `--addr`),
+2. the environment of the process,
+3. the settings file `~/.memstate/config.env`, `KEY=VALUE` lines:
+
+```bash
+# ~/.memstate/config.env
+MEMSTATE_EMBEDDING_URL=http://127.0.0.1:8081/v1
+MEMSTATE_EMBED_MODEL=qwen3-embedding-4b
+MEMSTATE_SEMANTIC_THRESHOLD=0.6
+```
+
+The daemon, the MCP proxy, the `memstate` CLI, the recall hook and the
+Python scripts all read the file at startup, so there is one place to
+edit and nothing to pass on the command line. `memstated config` shows
+each setting, its value, where it came from, and whether the running
+daemon matches:
+
+```
+config file   /home/me/.memstate/config.env   (3 settings)
+precedence    daemon flag > environment > config.env > default
+
+SETTING                      VALUE                                    SOURCE
+MEMSTATE_EMBEDDING_URL       http://127.0.0.1:8081/v1                 config.env
+MEMSTATE_EMBED_MODEL         qwen3-embedding-4b                       config.env
+MEMSTATE_EMBED_TIMEOUT       1m0s                                     default
+MEMSTATE_SEMANTIC_THRESHOLD  0.6                                      config.env
+...
+running daemon  127.0.0.1:8765   pid 4242   started as: memstated --addr 127.0.0.1:8765
+  embedding_url        http://127.0.0.1:8081/v1                 ok
+  embed_model          nomic-embed-text                         DIFFERS: config gives qwen3-embedding-4b
+  -> `memstated restart` starts a daemon from the config above; flags it was started with still win
+```
+
+`memstated config set KEY VALUE` and `memstated config unset KEY` edit
+the file; `memstated restart` applies it to a running daemon. A restart
+or upgrade replays the flags the old daemon was started with and reads
+the environment and file afresh, then prints every embedding or idle
+setting that changed. `MEMSTATE_CONFIG` names another file, and
+`MEMSTATE_CONFIG=off` ignores it (the tests do this).
+
 ## Where your data lives
 
 | Thing | Path |
 |---|---|
+| Settings file | `~/.memstate/config.env` (override with `MEMSTATE_CONFIG`; see [Configuration](#configuration)) |
 | SQLite DB | `~/.memstate/memstate.db` (override with `MEMSTATE_DB`, and `~/` is expanded) |
 | Daemon log | `memstated.log` next to the DB (default `~/.memstate/memstated.log`) |
 | Shared daemon address | `~/.memstate/daemon.addr`, next to the DB. A `--addr` daemon writes it at startup and removes it at shutdown. |
 | Embedding URL | `http://127.0.0.1:11434` (override with `MEMSTATE_EMBEDDING_URL` or `--embedding-url`). A URL that ends in `/v1` selects an OpenAI-compatible API. |
 | Embed model | `nomic-embed-text` (override with `MEMSTATE_EMBED_MODEL` or `--embed-model`) |
-| Embed timeout | `60s` per Ollama call (override with `MEMSTATE_EMBED_TIMEOUT` or `--embed-timeout`). Must cover a cold model load: a 4B model needs about 20s on first use. |
+| Embed timeout | `60s` per embedding call (override with `MEMSTATE_EMBED_TIMEOUT` or `--embed-timeout`). Must cover a cold model load: a 4B model needs about 20s on first use. |
 | Semantic threshold | `0.5` (override with `MEMSTATE_SEMANTIC_THRESHOLD` or per request) |
-| Network egress | The daemon binds `127.0.0.1` only. Ollama calls, when enabled, go to the configured Ollama URL, which is usually also loopback. |
+| Network egress | The daemon binds `127.0.0.1` only. Embedding calls, when enabled, go to the configured embedding URL, which is usually also loopback. |
 
 For a per-project database, set `MEMSTATE_DB` in the MCP config's
 `env:` block:
@@ -419,23 +469,11 @@ For a per-project database, set `MEMSTATE_DB` in the MCP config's
 }
 ```
 
-The proxy starts the daemon, so it also decides the embedding model.
-Pass it as a proxy argument, and the proxy hands it to every daemon it
-spawns. A flag wins over the matching environment variable.
-
-```json
-{
-  "memstate": {
-    "command": "memstate-mcp",
-    "args": ["--embed-model", "qwen3-embedding:4b"]
-  }
-}
-```
-
-`memstate-mcp setup` asks for the model, lists what your local Ollama
-serves, and writes the choice into each agent config. Pass
-`--embed-model NAME` to skip the prompt. `--embedding-url` and
-`--embed-timeout` work the same way.
+The proxy still accepts `--embed-model`, `--embedding-url` and
+`--embed-timeout` as its own arguments and hands them to every daemon it
+starts, but the settings file is the place for them: an agent config
+entry gets rewritten by `memstate-mcp setup` and the installers, the
+file does not.
 
 ## One daemon for all agents
 
@@ -540,6 +578,15 @@ Claude Code ──stdio──> client/dist/index.js ──HTTP loopback──> s
 The TypeScript proxy exists only to speak MCP. Each tool call becomes
 one HTTP POST. All logic (keypath versioning, FTS, conflict detection,
 tombstones, embeddings) lives in the Go daemon.
+
+Who starts what: the agent (Claude Code) starts the proxy, `node
+client/dist/index.js`, from its MCP config. The proxy starts `memstated`
+when no daemon is running, and otherwise attaches to the one that is.
+Both read `~/.memstate/config.env` first, so a daemon the proxy starts
+and one you start by hand (`memstated --addr 127.0.0.1:8765`, or
+`memstated restart`) run with the same settings. `memstated config`
+shows which process is serving, its pid, and the flags it was started
+with.
 
 The proxy selects one of three modes at startup:
 

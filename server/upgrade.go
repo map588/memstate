@@ -205,8 +205,7 @@ func cmdUpgrade(args []string) int {
 	if restartAddr == "" {
 		restartAddr = defaultAddr
 	}
-	// Read the running daemon's effective config first, so the restart
-	// keeps its embed model, thresholds and idle timeout.
+	// Read the running daemon's flags first, so the restart replays them.
 	prev, err := fetchHealth(restartAddr)
 	wasRunning := err == nil && prev.Service == healthServiceName
 	if wasRunning {
@@ -233,6 +232,9 @@ func cmdUpgrade(args []string) int {
 			return 1
 		}
 		fmt.Printf("daemon restarted at %s\n", restartAddr)
+		if next, err := fetchHealth(restartAddr); err == nil {
+			reportRestartDiff(os.Stdout, prev, next)
+		}
 	} else {
 		fmt.Println("no running shared daemon found — child-mode daemons pick up the new binary next session")
 	}
@@ -303,43 +305,62 @@ func stopAndWait(addr string, timeout time.Duration) error {
 	return fmt.Errorf("daemon at %s did not exit within %v", addr, timeout)
 }
 
-// restartPlan turns the config a daemon reported in /health into the flags
-// and environment that start an equivalent daemon on addr. A nil or empty
-// report gives just --addr, so the new daemon falls back to its defaults.
-func restartPlan(prev *healthResponse, addr string) (args, env []string) {
-	args = []string{"--addr", addr}
+// restartPlan gives the flags that start the successor of a daemon on addr:
+// --addr plus every flag the old daemon was started with (its /health
+// `args`, minus any --addr). Nothing else is pinned: the new process reads
+// the current environment and config.env itself, so an edited setting
+// takes effect on restart while an explicit flag keeps winning, exactly as
+// it did for the old daemon. A nil report gives just --addr.
+func restartPlan(prev *healthResponse, addr string) []string {
+	args := []string{"--addr", addr}
 	if prev == nil {
-		return args, nil
+		return args
 	}
-	if prev.EmbedModel != "" {
-		args = append(args, "--embed-model", prev.EmbedModel)
+	skip := false
+	for _, a := range prev.Args {
+		switch {
+		case skip:
+			skip = false
+		case a == "--addr" || a == "-addr":
+			skip = true
+		case strings.HasPrefix(a, "--addr=") || strings.HasPrefix(a, "-addr="):
+		default:
+			args = append(args, a)
+		}
 	}
-	if prev.EmbeddingURL != "" {
-		args = append(args, "--embedding-url", prev.EmbeddingURL)
+	return args
+}
+
+// reportRestartDiff prints every embed or idle setting that changed between
+// the old daemon's /health and the new one's, with the config.env key that
+// pins it. Silent when nothing changed. A restart that reverts the model is
+// how settings got "forgotten" before config.env existed; now it is loud.
+func reportRestartDiff(w io.Writer, prev, next *healthResponse) {
+	if prev == nil || next == nil {
+		return
 	}
-	if prev.EmbedTimeout != "" {
-		args = append(args, "--embed-timeout", prev.EmbedTimeout)
+	for _, c := range []struct{ name, key, was, now string }{
+		{"embedding_url", "MEMSTATE_EMBEDDING_URL", prev.EmbeddingURL, next.EmbeddingURL},
+		{"embed_model", "MEMSTATE_EMBED_MODEL", prev.EmbedModel, next.EmbedModel},
+		{"embed_timeout", "MEMSTATE_EMBED_TIMEOUT", prev.EmbedTimeout, next.EmbedTimeout},
+		{"semantic_threshold", "MEMSTATE_SEMANTIC_THRESHOLD", fmt.Sprint(prev.SemanticThreshold), fmt.Sprint(next.SemanticThreshold)},
+		{"idle_timeout", "MEMSTATE_IDLE_TIMEOUT", prev.IdleTimeout, next.IdleTimeout},
+	} {
+		if !sameSetting(c.was, c.now) {
+			fmt.Fprintf(w, "  %s changed: %q -> %q (set %s in config.env to pin it)\n", c.name, c.was, c.now, c.key)
+		}
 	}
-	if prev.IdleTimeout != "" {
-		args = append(args, "--idle-timeout", prev.IdleTimeout)
-	}
-	if prev.SemanticThreshold > 0 {
-		env = append(env, fmt.Sprintf("MEMSTATE_SEMANTIC_THRESHOLD=%g", prev.SemanticThreshold))
-	}
-	return args, env
 }
 
 // startDetachedDaemon launches the (new) binary as a shared daemon in its own
-// session with the config prev reported (see restartPlan), stderr/stdout
-// appended to daemonLogPath() — the same file the MCP proxy tees child-mode
-// daemons into.
+// session with the flags prev was started with (see restartPlan), stderr and
+// stdout appended to daemonLogPath() — the same file the MCP proxy tees
+// child-mode daemons into. The environment is inherited as is.
 func startDetachedDaemon(exePath, addr string, prev *healthResponse) error {
 	logPath := daemonLogPath()
 	_ = os.MkdirAll(filepath.Dir(logPath), 0o755)
 	logF, _ := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
-	args, env := restartPlan(prev, addr)
-	cmd := exec.Command(exePath, args...)
-	cmd.Env = append(os.Environ(), env...)
+	cmd := exec.Command(exePath, restartPlan(prev, addr)...)
 	cmd.SysProcAttr = detachSysProcAttr()
 	if logF != nil {
 		cmd.Stdout = logF

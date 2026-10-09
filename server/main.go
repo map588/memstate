@@ -147,6 +147,10 @@ func expandHome(p string) string {
 }
 
 func main() {
+	// Settings file first, so flags, env and config.env resolve the same
+	// way for the daemon, every subcommand and the `memstate` CLI.
+	loadConfigFile()
+
 	// Invoked through the `memstate` link (make install creates it): the
 	// human CLI only, never the daemon.
 	if prog := strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe"); prog == "memstate" {
@@ -163,6 +167,8 @@ func main() {
 			os.Exit(cmdStop(os.Args[2:]))
 		case "restart":
 			os.Exit(cmdRestart(os.Args[2:]))
+		case "config":
+			os.Exit(cmdConfig(os.Args[2:]))
 		case "status":
 			os.Exit(cmdStatus(os.Args[2:]))
 		case "export":
@@ -198,13 +204,13 @@ func main() {
 		"shut down after this duration with no HTTP requests (0 = disabled). "+
 			"Ignored when --owner-pid is set. Env: MEMSTATE_IDLE_TIMEOUT.")
 	embedModelFlag := fs.String("embed-model", "",
-		"Ollama model for semantic search (default nomic-embed-text). Env: MEMSTATE_EMBED_MODEL.")
+		"embedding model for semantic search (default nomic-embed-text). Env: MEMSTATE_EMBED_MODEL.")
 	var embeddingURLFlag string
 	fs.StringVar(&embeddingURLFlag, "embedding-url", "",
 		"embedding server base URL (default http://127.0.0.1:11434); a URL that ends in /v1 selects an OpenAI-compatible API. Env: MEMSTATE_EMBEDDING_URL.")
 	fs.StringVar(&embeddingURLFlag, "ollama-url", "", "deprecated alias of --embedding-url")
 	embedTimeoutFlag := fs.Duration("embed-timeout", 0,
-		"max time for one Ollama embed call, must cover a cold model load (default 60s). "+
+		"max time for one embedding call, must cover a cold model load (default 60s). "+
 			"Env: MEMSTATE_EMBED_TIMEOUT.")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
@@ -259,8 +265,18 @@ func main() {
 		}
 	})
 	embedder := NewEmbedder(embeddingURLFlag, *embedModelFlag, *embedTimeoutFlag)
+	// Say what is in effect and where it came from, so the log answers
+	// "which server is it talking to" without a second command.
+	if configFileLoaded != "" {
+		fmt.Fprintf(os.Stderr, "memstated: config %s: %d settings, %d applied (the rest came from env or flags)\n",
+			configFileLoaded, len(configFileValues), len(configApplied))
+	} else {
+		fmt.Fprintf(os.Stderr, "memstated: no config file at %s\n", configFilePath())
+	}
+	fmt.Fprintf(os.Stderr, "memstated: embeddings model=%s url=%s timeout=%s threshold=%g\n",
+		embedder.Model, embedder.URL, embedder.timeout(), envThreshold())
 	// Eagerly repair any missing vectors (post-migration wipe, model switch,
-	// writes made while Ollama was down). Non-blocking; failures just log.
+	// writes made while the embedding server was down). Non-blocking; failures just log.
 	embedder.BackfillEmbeddings(store)
 
 	// Idle-exit is only meaningful for long-lived detached daemons; when
@@ -408,13 +424,18 @@ func printUsage() {
   memstated --addr HOST:PORT       run on an explicit address (shared mode)
   memstated --owner-pid N          shut down when process N disappears
   memstated --idle-timeout 30m     shut down after N of no-request idleness
-  memstated --embed-model NAME     Ollama model for semantic search
+  memstated --embed-model NAME     embedding model for semantic search
   memstated --embedding-url URL    embedding server base URL (Ollama, or an OpenAI-compatible base ending in /v1)
-  memstated --embed-timeout 60s    max time per Ollama embed call (cold load included)
+  memstated --embed-timeout 60s    max time per embedding call (cold load included)
   memstated stop   [--addr HOST:PORT]   send a shutdown request to a running daemon
   memstated status [--addr HOST:PORT]   query /health
   memstated restart [--addr HOST:PORT]  stop the shared daemon and start it again,
-                                   detached, with the same config it reported
+                                   detached, with the same flags plus the current
+                                   environment and config.env
+  memstated config                 every setting with its value and source, and
+                                   whether the running daemon matches
+  memstated config set KEY VALUE   persist a setting in ~/.memstate/config.env
+  memstated config unset KEY       remove it again
 
   memstated projects [--db PATH]   list live projects with memory counts
   memstated dump [--keys] [--db PATH] PROJECT [KEYPATH]
@@ -435,7 +456,7 @@ func printUsage() {
   memstated embed status [--watch] [--probe] [--model NAME] [--addr HOST:PORT] [--db PATH]
                                    coverage bar per model, missing counts, content
                                    sizes, cosine histogram and threshold fit;
-                                   --watch redraws every 2s, --probe times Ollama;
+                                   --watch redraws every 2s, --probe times one embedding call;
                                    --model defaults to the running daemon's model
   memstated embed rebuild [--model NAME] [--embedding-url URL] [--embed-timeout D] [--db PATH]
                                    drop and recompute every vector for one model
@@ -450,6 +471,9 @@ func printUsage() {
 Environment:
   MEMSTATE_ADDR           default for --addr
   MEMSTATE_DB             SQLite file path (default ~/.memstate/memstate.db)
+  MEMSTATE_CONFIG         settings file (default ~/.memstate/config.env; "off" skips it).
+                          Every MEMSTATE_* name below may be set there; flags beat
+                          the environment, which beats the file.
   MEMSTATE_IDLE_TIMEOUT   default for --idle-timeout (e.g. 30m)
   MEMSTATE_EMBED_MODEL    default for --embed-model (nomic-embed-text)
   MEMSTATE_EMBEDDING_URL  default for --embedding-url (http://127.0.0.1:11434; a /v1 URL is OpenAI-compatible)
@@ -699,9 +723,9 @@ func cmdEmbed(args []string) int {
 	var embeddingURL string
 	fs.StringVar(&embeddingURL, "embedding-url", "", "embedding server base URL, or an OpenAI-compatible base ending in /v1 (default MEMSTATE_EMBEDDING_URL or http://127.0.0.1:11434)")
 	fs.StringVar(&embeddingURL, "ollama-url", "", "deprecated alias of --embedding-url")
-	embedTimeout := fs.Duration("embed-timeout", 0, "max time per Ollama call (default MEMSTATE_EMBED_TIMEOUT or 60s)")
+	embedTimeout := fs.Duration("embed-timeout", 0, "max time per embedding call (default MEMSTATE_EMBED_TIMEOUT or 60s)")
 	watch := fs.Bool("watch", false, "status: redraw every 2s until interrupted")
-	probe := fs.Bool("probe", false, "status: time one live Ollama embed call")
+	probe := fs.Bool("probe", false, "status: time one live embedding call")
 	addr := fs.String("addr", "", "running daemon to read the model from (default MEMSTATE_ADDR or 127.0.0.1:8765)")
 	if err := fs.Parse(rest); err != nil {
 		return 2
@@ -806,6 +830,10 @@ func cmdRestart(args []string) int {
 			return 1
 		}
 		fmt.Fprintf(os.Stderr, "memstated restart: stopped %s\n", addr)
+		if flags := restartPlan(prev, addr)[2:]; len(flags) > 0 {
+			fmt.Fprintf(os.Stderr, "memstated restart: replaying flags %s (flags beat env and config.env)\n",
+				strings.Join(flags, " "))
+		}
 	} else {
 		prev = nil
 		fmt.Fprintf(os.Stderr, "memstated restart: nothing running at %s, starting fresh\n", addr)
@@ -815,6 +843,11 @@ func cmdRestart(args []string) int {
 		return 1
 	}
 	fmt.Fprintf(os.Stderr, "memstated restart: daemon answering at %s\n", addr)
+	if next, err := fetchHealth(addr); err == nil {
+		reportRestartDiff(os.Stderr, prev, next)
+		fmt.Fprintf(os.Stderr, "memstated restart: embeddings model=%s url=%s threshold=%g\n",
+			next.EmbedModel, next.EmbeddingURL, next.SemanticThreshold)
+	}
 	return 0
 }
 

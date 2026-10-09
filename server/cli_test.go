@@ -335,7 +335,7 @@ func TestMemstateArgv0(t *testing.T) {
 	if err := os.Symlink(bin, link); err != nil {
 		t.Fatal(err)
 	}
-	env := append(cleanEnv(), "MEMSTATE_DB="+filepath.Join(t.TempDir(), "t.db"))
+	env := append(cleanEnv(), "MEMSTATE_DB="+filepath.Join(t.TempDir(), "t.db"), "MEMSTATE_CONFIG=off")
 
 	cmd := exec.Command(link, "--help")
 	cmd.Env = env

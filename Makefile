@@ -57,7 +57,7 @@ ALIAS_BIN   = copy /Y "$(call P,$1)" "$(call P,$2)"
 SAY         = echo $1
 BLANK       := echo.
 LS          := dir
-SMOKE_ENV   := set "MEMSTATE_ADDR=" && set "MEMSTATE_CHILD=1" && set "MEMSTATE_NO_UPDATE_CHECK=1" && set "MEMSTATE_DB=$(call P,$(SMOKE_DIR)/memstate.db)" &&
+SMOKE_ENV   := set "MEMSTATE_ADDR=" && set "MEMSTATE_CHILD=1" && set "MEMSTATE_NO_UPDATE_CHECK=1" && set "MEMSTATE_CONFIG=off" && set "MEMSTATE_DB=$(call P,$(SMOKE_DIR)/memstate.db)" &&
 MATCH_Q     = findstr /R "$1" >NUL
 XBUILD      = cd server && set "CGO_ENABLED=0" && set "GOOS=$1" && set "GOARCH=$2" && go build -trimpath -ldflags="-s -w" -o ../$(DIST)/$3 .
 VET_OTHER   = cd server && set "GOOS=linux" && go vet ./...
@@ -74,7 +74,7 @@ ALIAS_BIN   = ln -sf "$1" "$2"
 SAY         = echo '$1'
 BLANK       := echo
 LS          := ls -l
-SMOKE_ENV   := env -u MEMSTATE_ADDR MEMSTATE_CHILD=1 MEMSTATE_NO_UPDATE_CHECK=1 MEMSTATE_DB=$(SMOKE_DIR)/memstate.db
+SMOKE_ENV   := env -u MEMSTATE_ADDR MEMSTATE_CHILD=1 MEMSTATE_NO_UPDATE_CHECK=1 MEMSTATE_CONFIG=off MEMSTATE_DB=$(SMOKE_DIR)/memstate.db
 MATCH_Q     = grep -q '$1'
 XBUILD      = cd server && CGO_ENABLED=0 GOOS=$1 GOARCH=$2 go build -trimpath -ldflags="-s -w" -o ../$(DIST)/$3 .
 VET_OTHER   = cd server && GOOS=windows go vet ./...
