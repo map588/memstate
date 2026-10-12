@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -323,6 +324,60 @@ func TestCLIUsageAndUnknownVerb(t *testing.T) {
 	code, _, _ = runCLIErr(t, "--help")
 	if code != 0 {
 		t.Fatalf("--help exit %d", code)
+	}
+}
+
+func TestCLIComplete(t *testing.T) {
+	t.Setenv("MEMSTATE_ADDR", "")
+	t.Setenv("MEMSTATE_DB", filepath.Join(t.TempDir(), "none.db"))
+	db := seedCLIStore(t)
+
+	// lines runs a verb that must succeed silently and returns its sorted
+	// output lines.
+	lines := func(args ...string) string {
+		t.Helper()
+		code, out, errText := runCLIErr(t, args...)
+		if code != 0 || errText != "" {
+			t.Fatalf("%v: exit %d, stderr %q", args, code, errText)
+		}
+		got := strings.Fields(out)
+		slices.Sort(got)
+		return strings.Join(got, " ")
+	}
+	if got := lines("__complete", "keypaths", "--project", "proj", "--db", db); got != "decisions.db todo.a todo.b" {
+		t.Fatalf("keypaths: %q", got)
+	}
+	want := "host." + hostSlug() + ".env.go_bin preferences.commit_style"
+	if got := lines("__complete", "keypaths", "--user", "--db", db); got != want {
+		t.Fatalf("user keypaths must hide other hosts: %q, want %q", got, want)
+	}
+	if got := lines("__complete", "projects", "--db", db); got != "proj" {
+		t.Fatalf("projects must hide reserved ids: %q", got)
+	}
+	if got := lines("__complete", "config_keys"); !strings.Contains(got, "MEMSTATE_EMBED_MODEL") {
+		t.Fatalf("config keys: %q", got)
+	}
+	// Errors print nothing, so Tab shows no noise.
+	if got := lines("__complete", "keypaths", "--user", "--project", "x", "--db", db); got != "" {
+		t.Fatalf("bad flags: %q", got)
+	}
+	if got := lines("__complete", "frobnicate"); got != "" {
+		t.Fatalf("unknown kind: %q", got)
+	}
+
+	code, script := runCLI(t, "completions", "zsh")
+	if code != 0 || !strings.HasPrefix(script, "#compdef memstate\n") {
+		t.Fatalf("completions zsh: exit %d\n%s", code, script)
+	}
+	if zsh, err := exec.LookPath("zsh"); err == nil {
+		cmd := exec.Command(zsh, "-n")
+		cmd.Stdin = strings.NewReader(script)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("zsh -n: %v\n%s", err, out)
+		}
+	}
+	if code, _, _ := runCLIErr(t, "completions", "fish"); code != 2 {
+		t.Fatalf("unsupported shell: exit %d", code)
 	}
 }
 

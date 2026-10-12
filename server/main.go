@@ -161,7 +161,7 @@ func main() {
 	// own simple arg handling and don't spin up the server.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
-		case "tree", "get", "show", "cat", "history", "log", "set", "edit", "rm", "delete":
+		case "tree", "get", "show", "cat", "history", "log", "set", "edit", "rm", "delete", "completions", "__complete":
 			os.Exit(cmdCLI(os.Args[1:]))
 		case "stop":
 			os.Exit(cmdStop(os.Args[2:]))

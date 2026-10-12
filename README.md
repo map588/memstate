@@ -568,6 +568,15 @@ memstate projects                      # every live project
 shared daemon, reads still work and `search` falls back to FTS. `set`,
 `edit` and `rm` need the daemon and tell you how to start one.
 
+Tab completion for zsh completes verbs, flags, project ids, config keys and
+keypaths (one dotted segment at a time, in the project that `--project` or
+`--user` selects). Save the script in a directory on `$fpath` and open a
+new shell:
+
+```bash
+memstate completions zsh > "${fpath[1]}/_memstate"
+```
+
 ## How the pieces fit
 
 ```
