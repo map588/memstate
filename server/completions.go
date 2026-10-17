@@ -46,7 +46,7 @@ func cliComplete(args []string) int {
 			return 0
 		}
 		for _, p := range ps {
-			// --user reaches _user; --project never takes a reserved id.
+			// --shared reaches _shared; --project never takes a reserved id.
 			if !strings.HasPrefix(p.ID, "_") {
 				fmt.Fprintln(cliOut, p.ID)
 			}
@@ -70,7 +70,7 @@ func cliComplete(args []string) int {
 		}
 		host := hostSlug()
 		for _, m := range mems {
-			if o.user && isOtherHost(m.Keypath, host) {
+			if o.shared && isOtherHost(m.Keypath, host) {
 				continue
 			}
 			fmt.Fprintln(cliOut, m.Keypath)
@@ -97,7 +97,7 @@ _memstate_projects() {
 
 _memstate_keypaths() {
   local -a expl scope kps
-  (( $+opt_args[--user] )) && scope+=(--user)
+  (( $+opt_args[--shared] )) && scope+=(--shared)
   (( $+opt_args[--project] )) && scope+=(--project ${(q)${(Q)opt_args[--project]}})
   (( $+opt_args[--db] )) && scope+=(--db ${(q)${(Q)opt_args[--db]}})
   kps=(${(f)"$(_call_program keypaths $_memstate_cmd __complete keypaths $scope 2>/dev/null)"})
@@ -117,8 +117,8 @@ _memstate() {
   local -a expl verbs scope common categories
   categories=(decision config status note gotcha reference learning)
   scope=(
-    '(--user --all)--project=[a project other than the one of this repository]:project:_memstate_projects'
-    '(--project --all)--user[the reserved user scope]'
+    '(--shared --all)--project=[a project other than the one of this repository]:project:_memstate_projects'
+    '(--project --all)--shared[the reserved user scope]'
   )
   common=(
     '--json[print the raw JSON shape]'
@@ -162,7 +162,7 @@ _memstate() {
           _arguments $scope $common '1:keypath:_memstate_keypaths' && ret=0 ;;
         search)
           _arguments $scope $common \
-            '(--project --user)--all[search every project]' \
+            '(--project --shared)--all[search every project]' \
             '--mode=[search mode]:mode:(hybrid fts semantic)' \
             '--limit=[maximum results]:count: ' \
             "--category=[only this category]:category:($categories)" \

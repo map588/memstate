@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tombstone a keypath (memstated). --scope user targets the user scope."""
+"""Tombstone a keypath (memstated). --scope shared targets the shared scope."""
 import argparse
 import sys
 

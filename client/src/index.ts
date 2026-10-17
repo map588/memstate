@@ -220,25 +220,27 @@ function systemNameError(name: string): Error {
   );
 }
 
-// USER_PROJECT is the daemon's one reserved project for facts about the
-// user and the host. The daemon rejects writes there outside a short
-// allowlist of keypath shapes. slugName never yields a leading "_", so no
-// repo can collide with it.
-const USER_PROJECT = "_user";
+// SHARED_PROJECT is the daemon's one reserved project for facts that hold
+// in every repository: the user's preferences and profile, each host's env
+// and tools, and the practices and lessons the agent carries between
+// repositories. The daemon rejects writes there outside a short allowlist
+// of keypath shapes. slugName never yields a leading "_", so no repo can
+// collide with it.
+const SHARED_PROJECT = "_shared";
 
-// HOST_SLUG names this machine under host.<slug> in USER_PROJECT: the first
+// HOST_SLUG names this machine under host.<slug> in SHARED_PROJECT: the first
 // hostname label, slugged.
 const HOST_SLUG = slugName(os.hostname().split(".")[0]);
 
 const SCOPE_PROP = {
   type: "string",
-  enum: ["project", "user"],
+  enum: ["project", "shared"],
   default: "project",
   description:
-    '"project" (default) = the cwd project\'s memories. "user" = the reserved ' +
-    "user scope: facts about the user or this machine that hold in every " +
-    "repo (preferences, profile, host env, host tools). Never both scope " +
-    '"user" and project_id.',
+    '"project" (default) = the cwd project\'s memories. "shared" = the reserved ' +
+    "shared scope: facts that hold in every repo (preferences, profile, " +
+    "practices, lessons, this host's env and tools). Never both scope " +
+    '"shared" and project_id.',
 };
 
 type ToolArgs = Record<string, unknown>;
@@ -263,7 +265,7 @@ const PROJECT_NAME_PROP = {
     "calls without project_id use it. Prefer an id that " +
     "memstate_get(list_projects=true) lists. A new id also needs " +
     "new_project=true and must not resemble an existing id. Not with " +
-    'project_id or scope="user".',
+    'project_id or scope="shared".',
 };
 
 const NEW_PROJECT_PROP = {
@@ -278,6 +280,25 @@ const NEW_PROJECT_PROP = {
 };
 
 let sessionProject = "";
+
+// STRICT_SCOPE_PROP is the one session-level switch on the creation gate.
+// Loose mode lifts exactly one rule: a write or a pin to a project that
+// does not exist needs no new_project=true. Every other refusal stays. The
+// state lives in this process; there is no setting for it, because a
+// sticky loose mode is what produced the scratch projects the gate exists
+// for.
+const STRICT_SCOPE_PROP = {
+  type: "boolean",
+  default: true,
+  description:
+    "false lifts one rule for the rest of this session: a write or a pin " +
+    "to a project that does not exist no longer needs new_project=true. " +
+    "The home and system directory refusals, the near-duplicate refusal, " +
+    "reserved ids and the shared-scope allowlist stay. Results carry " +
+    "strict_scope: false while loose; true restores the default.",
+};
+
+let strictScope = true;
 
 // normalizeId folds the spellings that produce near-duplicate projects:
 // underscores, digits and a trailing dev/test/tmp/old/new.
@@ -321,8 +342,8 @@ function nearDuplicates(name: string, ids: string[]): string[] {
   });
 }
 
-// Reserved ids start with "_". The daemon lists _user among the projects,
-// but for the model it is scope="user", never a project id.
+// Reserved ids start with "_". The daemon lists _shared among the projects,
+// but for the model it is scope="shared", never a project id.
 function isReservedId(id: string): boolean {
   return id.startsWith("_");
 }
@@ -335,13 +356,13 @@ async function listProjectIds(): Promise<string[]> {
 // Errors shared by the pin and the write gate.
 function reservedIdError(id: string): Error {
   return new Error(
-    `project ids that start with "_" are reserved ("${id}"); use scope="user" for the user scope`
+    `project ids that start with "_" are reserved ("${id}"); use scope="shared" for the shared scope`
   );
 }
 function homeNameError(id: string): Error {
   return new Error(
     `"${id}" is the name of your home directory, which names the user, not a project; ` +
-      'pin another project with project_name, or use scope="user" for facts about this machine'
+      'pin another project with project_name, or use scope="shared" for facts that hold in every repository'
   );
 }
 
@@ -393,8 +414,8 @@ function writePinFile(project: string): void {
 // that resembles nothing.
 async function pinSession(a: ToolArgs): Promise<void> {
   const name = a.project_name;
-  if (a.project_id || a.scope === "user") {
-    throw new Error('project_name cannot be combined with project_id or scope="user"');
+  if (a.project_id || a.scope === "shared") {
+    throw new Error('project_name cannot be combined with project_id or scope="shared"');
   }
   if (typeof name !== "string") {
     throw new Error("project_name must be a string");
@@ -428,7 +449,7 @@ async function pinSession(a: ToolArgs): Promise<void> {
         `use project_name="${near[0]}", or choose a clearly different name`
     );
   }
-  if (a.new_project !== true) {
+  if (a.new_project !== true && strictScope) {
     throw new Error(
       `no project "${name}". Pass an id from memstate_get(list_projects=true), ` +
         "or new_project=true to start a new project"
@@ -460,7 +481,7 @@ async function checkWriteTarget(id: string, a: ToolArgs, explicit: boolean): Pro
         `the working directory is ${why}, which has no default ` +
           "project for writes. Pin a project with project_name (an id from " +
           "memstate_get(list_projects=true), or a new id with new_project=true), " +
-          'or use scope="user" for facts about this machine' +
+          'or use scope="shared" for facts that hold in every repository' +
           (CWD_SYSTEM_REASON
             ? ". The recall hook's <memstate-scope cwd_project> names the project of the directory you work in"
             : "")
@@ -490,13 +511,13 @@ async function checkWriteTarget(id: string, a: ToolArgs, explicit: boolean): Pro
         `To create "${id}" as a separate project, use the memstate CLI`
     );
   }
-  if (a.new_project !== true) {
+  if (a.new_project !== true && strictScope) {
     const other = explicit
       ? "Pass an id from memstate_get(list_projects=true)"
       : "Pass project_name=<an id from memstate_get(list_projects=true)> to use another project";
     throw new Error(
       `${where}. ${other}, new_project=true to create "${id}" (this also revives a ` +
-        `soft-deleted project), or scope="user" for facts about this machine`
+        `soft-deleted project), or scope="shared" for facts that hold in every repository`
     );
   }
 }
@@ -512,8 +533,8 @@ function checkNewProjectFlag(a: ToolArgs, write: boolean): void {
         "project_name, creates a project"
     );
   }
-  if (a.scope === "user") {
-    throw new Error('new_project has no effect with scope="user": the user scope always exists');
+  if (a.scope === "shared") {
+    throw new Error('new_project has no effect with scope="shared": the shared scope always exists');
   }
   if (!a.project_id && !sessionProject && CWD_IN_REPO) {
     throw new Error(
@@ -523,23 +544,33 @@ function checkNewProjectFlag(a: ToolArgs, write: boolean): void {
   }
 }
 
-// resolveProject picks the project id for a call: the reserved user
-// project for scope "user", else the explicit id, else the session pin,
+// resolveProject picks the project id for a call: the reserved shared
+// project for scope "shared", else the explicit id, else the session pin,
 // else the cwd project. A write to an explicit id or to the cwd project
 // passes checkWriteTarget first; a pinned project was checked at pin time.
+// strict_scope is applied before anything else, so the call that sets it
+// already runs under it.
 async function resolveProject(a: ToolArgs, write = false): Promise<string> {
+  if (typeof a.strict_scope === "boolean") {
+    strictScope = a.strict_scope;
+  } else if (a.strict_scope !== undefined) {
+    throw new Error("strict_scope must be true or false");
+  }
   if (a.project_name !== undefined) {
     await pinSession(a);
   }
   checkNewProjectFlag(a, write);
-  if (a.scope === "user") {
+  if (a.scope === "shared") {
     if (a.project_id) {
-      throw new Error('pass scope="user" or project_id, not both');
+      throw new Error('pass scope="shared" or project_id, not both');
     }
-    return USER_PROJECT;
+    return SHARED_PROJECT;
+  }
+  if (a.scope === "user") {
+    throw new Error('scope "user" was renamed: use scope="shared"');
   }
   if (a.scope !== undefined && a.scope !== "project") {
-    throw new Error(`unknown scope ${JSON.stringify(a.scope)}; use "project" or "user"`);
+    throw new Error(`unknown scope ${JSON.stringify(a.scope)}; use "project" or "shared"`);
   }
   if (a.project_id) {
     const id = String(a.project_id);
@@ -555,16 +586,24 @@ async function resolveProject(a: ToolArgs, write = false): Promise<string> {
 // stripProxyFields removes the fields only the proxy understands before a
 // body reaches the daemon, which rejects unknown fields.
 function stripProxyFields(a: ToolArgs): ToolArgs {
-  const { scope: _scope, project_name: _name, new_project: _new, ...rest } = a;
+  const {
+    scope: _scope,
+    project_name: _name,
+    new_project: _new,
+    strict_scope: _strict,
+    ...rest
+  } = a;
   return rest;
 }
 
-// withSessionProject tells the model which project a pinned session uses.
+// withSessionProject tells the model which project a pinned session uses
+// and that loose mode is on.
 function withSessionProject(result: unknown): unknown {
-  if (sessionProject && result && typeof result === "object" && !Array.isArray(result)) {
-    return { ...(result as Record<string, unknown>), session_project: sessionProject };
-  }
-  return result;
+  if (!result || typeof result !== "object" || Array.isArray(result)) return result;
+  const out = { ...(result as Record<string, unknown>) };
+  if (sessionProject) out.session_project = sessionProject;
+  if (!strictScope) out.strict_scope = false;
+  return out;
 }
 
 type TreeNode = { name: string; children?: TreeNode[]; has_value?: boolean };
@@ -587,7 +626,7 @@ function countValues(nodes: TreeNode[]): number {
   return n;
 }
 
-// isOtherHost reports whether a user-scope keypath describes another
+// isOtherHost reports whether a shared-scope keypath describes another
 // machine.
 function isOtherHost(keypath: string): boolean {
   const seg = keypath.split(".");
@@ -999,6 +1038,7 @@ const TOOLS: ToolDef[] = [
         scope: SCOPE_PROP,
         project_name: PROJECT_NAME_PROP,
         new_project: NEW_PROJECT_PROP,
+        strict_scope: STRICT_SCOPE_PROP,
         keypath: {
           type: "string",
           description:
@@ -1069,6 +1109,7 @@ const TOOLS: ToolDef[] = [
         scope: SCOPE_PROP,
         project_name: PROJECT_NAME_PROP,
         new_project: NEW_PROJECT_PROP,
+        strict_scope: STRICT_SCOPE_PROP,
         keypath: {
           type: "string",
           description:
@@ -1131,6 +1172,7 @@ const TOOLS: ToolDef[] = [
         scope: SCOPE_PROP,
         project_name: PROJECT_NAME_PROP,
         new_project: NEW_PROJECT_PROP,
+        strict_scope: STRICT_SCOPE_PROP,
         keypath: {
           type: "string",
           description:
@@ -1164,25 +1206,25 @@ const TOOLS: ToolDef[] = [
       const tree = (await getJSON(
         `/tree?project_id=${encodeURIComponent(pid)}`
       )) as Record<string, unknown>;
-      if (pid === USER_PROJECT) {
+      if (pid === SHARED_PROJECT) {
         return tree;
       }
-      // The user scope rides along with every project tree, pruned to this
-      // machine, so the agent sees env facts without knowing to ask. It is
-      // a bonus: a soft-deleted _user project (409) must not hide the
-      // project tree.
-      let user: { domains?: TreeNode[] } = {};
+      // The shared scope rides along with every project tree, pruned to
+      // this machine, so the agent sees env facts and lessons without
+      // knowing to ask. It is a bonus: a soft-deleted _shared project (409)
+      // must not hide the project tree.
+      let shared: { domains?: TreeNode[] } = {};
       try {
-        user = (await getJSON(
-          `/tree?project_id=${encodeURIComponent(USER_PROJECT)}`
+        shared = (await getJSON(
+          `/tree?project_id=${encodeURIComponent(SHARED_PROJECT)}`
         )) as { domains?: TreeNode[] };
       } catch {
-        /* user scope unavailable */
+        /* shared scope unavailable */
       }
-      const domains = pruneOtherHosts(user.domains ?? []);
+      const domains = pruneOtherHosts(shared.domains ?? []);
       return {
         ...tree,
-        user: { host: HOST_SLUG, domains, total_memories: countValues(domains) },
+        shared: { host: HOST_SLUG, domains, total_memories: countValues(domains) },
       };
     },
   },
@@ -1212,6 +1254,7 @@ const TOOLS: ToolDef[] = [
         scope: SCOPE_PROP,
         project_name: PROJECT_NAME_PROP,
         new_project: NEW_PROJECT_PROP,
+        strict_scope: STRICT_SCOPE_PROP,
         all_projects: {
           type: "boolean",
           default: false,
@@ -1266,7 +1309,7 @@ const TOOLS: ToolDef[] = [
         results?: { keypath: string }[];
         total_found?: number;
       };
-      if (a.scope === "user" && Array.isArray(out.results)) {
+      if (a.scope === "shared" && Array.isArray(out.results)) {
         // Facts about another machine are noise here.
         out.results = out.results.filter((h) => !isOtherHost(h.keypath));
         out.total_found = out.results.length;
@@ -1293,6 +1336,7 @@ const TOOLS: ToolDef[] = [
         scope: SCOPE_PROP,
         project_name: PROJECT_NAME_PROP,
         new_project: NEW_PROJECT_PROP,
+        strict_scope: STRICT_SCOPE_PROP,
         keypath: { type: "string", description: "required unless memory_id is given" },
         memory_id: {
           type: "integer",
@@ -1328,6 +1372,7 @@ const TOOLS: ToolDef[] = [
         scope: SCOPE_PROP,
         project_name: PROJECT_NAME_PROP,
         new_project: NEW_PROJECT_PROP,
+        strict_scope: STRICT_SCOPE_PROP,
         keypath: { type: "string", description: "exact keypath, or subtree root when recursive" },
         recursive: {
           type: "boolean",
@@ -1423,25 +1468,32 @@ Conventions — follow these EXACTLY; every deviation fragments the store:
   exactly like an explicit write. Pass root="notes" (etc.) only when you
   deliberately want sections nested under a prefix.
 
-User scope — facts that are not about this project:
-- Pass scope="user" (never a project_id) to reach the reserved user scope.
-  memstate_get() with no arguments already returns it under "user", pruned
-  to this machine, so read it there first.
-- A fact belongs in the user scope only when ALL three hold: (1) it stays
-  true if this repo is deleted, it is not about any code; (2) it is true
-  in every repo, for this user or for this machine; (3) it describes the
-  user or the host, not work. Never a decision, todo, task summary, note,
-  or gotcha about code — those stay in the project.
+Shared scope — facts that hold in every repository:
+- Pass scope="shared" (never a project_id) to reach the reserved shared
+  scope. memstate_get() with no arguments already returns it under
+  "shared", pruned to this machine, so read it there first.
+- A fact belongs in the shared scope only when BOTH hold: (1) it stays
+  true if this repo is deleted; (2) it is true in every repo: it describes
+  the user, this machine, or how you work across repos. Never a decision,
+  todo, task summary, or note about one repo's code — those stay in the
+  project.
 - The daemon enforces a keypath allowlist there and rejects everything
   else with 400. Allowed shapes:
     preferences.<topic>                 stated global working preferences
     profile.<topic>                     who the user is; never credentials
+    practices.<topic>                   a way of working that holds in every
+                                        repo, with the case where it helped
+    lessons.<topic>                     a trap that cost trial and error
+                                        anywhere (a shell quirk, a tool whose
+                                        interface changed): how to spot it,
+                                        and the fix
     host.${HOST_SLUG}.env.<topic>       OS, shell, paths, runtimes, ports
     host.${HOST_SLUG}.tools.<topic>     how an installed tool is configured
   This machine's host slug is "${HOST_SLUG}". Host facts need an explicit
-  keypath; heading extraction fits only "## Preferences" and "## Profile".
+  keypath; heading extraction fits only "## Preferences", "## Profile",
+  "## Practices" and "## Lessons".
 - Never store secrets, tokens, or credentials in any scope. The denied-prompt
-  rule applies to the user scope too.
+  rule applies to the shared scope too.
 
 Session project — when the prompt is not about this directory:
 - The cwd project is the default and almost always right. On the first
@@ -1466,12 +1518,19 @@ Session project — when the prompt is not about this directory:
   project. Reads are never gated, and a refusal creates nothing.
 - The home directory has no default project for writes at all, and its
   name is never a project: pin another project with project_name, or use
-  scope="user" for facts about this machine.
-- Ids that start with "_" are reserved. The user scope is scope="user",
+  scope="shared" for facts that hold in every repository.
+- Ids that start with "_" are reserved. The shared scope is scope="shared",
   never a project_id or project_name; list_projects does not show it.
 - new_project=true is an error where nothing can be created: on a read
-  without project_name, with scope="user", or for the git repository's
-  own project. Pass it only on the call that creates or revives a project.`;
+  without project_name, with scope="shared", or for the git repository's
+  own project. Pass it only on the call that creates or revives a project.
+- strict_scope=false on any call lifts one rule for the rest of this
+  session: a write or a pin to a project that does not exist no longer
+  needs new_project=true. The home and system directory refusals, the
+  near-duplicate refusal, reserved ids and the shared-scope allowlist all
+  stay. Results carry strict_scope: false while loose; strict_scope=true
+  restores the default. Use it only when the user wants this session to
+  create scratch projects freely.`;
 
 // ---------- main ----------
 

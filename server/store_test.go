@@ -368,3 +368,68 @@ func TestSearchFilterMatchesKeypathPrefix(t *testing.T) {
 		}
 	}
 }
+
+// A database from before 2026-10-17 holds the reserved project under its
+// old name. OpenStore renames every row once; a second open is a no-op.
+func TestMigrateSharedProject(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "t.db")
+	s, err := OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Seed through the normal write path, then move the rows back to the
+	// legacy name the way an old binary left them.
+	if _, _, err := s.Write(sharedProject, "preferences.x", "v", WriteMeta{}, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Write("proj", "todo.x", "v", WriteMeta{}, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO keypath_embeddings(project_id, keypath, model, dim, vector, created_at)
+		 VALUES(?, 'preferences.x', 'm', 1, X'00', 1)`, sharedProject); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`INSERT INTO projects(id, created_at) SELECT ?, created_at FROM projects WHERE id=?`,
+		`UPDATE memories SET project_id=? WHERE project_id=?`,
+		`UPDATE keypath_embeddings SET project_id=? WHERE project_id=?`,
+		`UPDATE memories_fts SET project_id=? WHERE project_id=?`,
+	} {
+		if _, err := s.db.Exec(q, legacySharedProject, sharedProject); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.db.Exec(`DELETE FROM projects WHERE id=?`, sharedProject); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	tables := []string{
+		"projects WHERE id", "memories WHERE project_id",
+		"keypath_embeddings WHERE project_id", "memories_fts WHERE project_id",
+	}
+	for round := 1; round <= 2; round++ {
+		s, err = OpenStore(dbPath)
+		if err != nil {
+			t.Fatalf("open %d: %v", round, err)
+		}
+		for _, tbl := range tables {
+			var legacy, shared int
+			if err := s.db.QueryRow(`SELECT COUNT(*) FROM `+tbl+`=?`, legacySharedProject).Scan(&legacy); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.db.QueryRow(`SELECT COUNT(*) FROM `+tbl+`=?`, sharedProject).Scan(&shared); err != nil {
+				t.Fatal(err)
+			}
+			if legacy != 0 || shared != 1 {
+				t.Fatalf("round %d: %s: legacy=%d shared=%d, want 0 and 1", round, tbl, legacy, shared)
+			}
+		}
+		mems, err := s.List(sharedProject, "")
+		if err != nil || len(mems) != 1 || mems[0].Keypath != "preferences.x" {
+			t.Fatalf("round %d: list %+v %v", round, mems, err)
+		}
+		s.Close()
+	}
+}

@@ -211,6 +211,49 @@ func migrateFTSProjectColumn(db *sql.DB) error {
 	return tx.Commit()
 }
 
+// migrateSharedProject renames the reserved project from legacySharedProject
+// ("_user", before 2026-10-17) to sharedProject in every table that carries
+// a project id. memories.project_id references projects(id) and foreign keys
+// are on, so the new parent row goes in first and the old one out last. A
+// database without the old row is left alone.
+func migrateSharedProject(db *sql.DB) error {
+	var n int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM projects WHERE id=?`, legacySharedProject,
+	).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmts := []struct {
+		q    string
+		args []any
+	}{
+		{`INSERT OR IGNORE INTO projects(id, created_at, deleted_at)
+		  SELECT ?, created_at, deleted_at FROM projects WHERE id=?`,
+			[]any{sharedProject, legacySharedProject}},
+		{`UPDATE memories SET project_id=? WHERE project_id=?`,
+			[]any{sharedProject, legacySharedProject}},
+		{`UPDATE OR REPLACE keypath_embeddings SET project_id=? WHERE project_id=?`,
+			[]any{sharedProject, legacySharedProject}},
+		{`UPDATE memories_fts SET project_id=? WHERE project_id=?`,
+			[]any{sharedProject, legacySharedProject}},
+		{`DELETE FROM projects WHERE id=?`, []any{legacySharedProject}},
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s.q, s.args...); err != nil {
+			return fmt.Errorf("rename %s to %s: %w", legacySharedProject, sharedProject, err)
+		}
+	}
+	return tx.Commit()
+}
+
 // migrate converges DBs created under older schemas. CREATE TABLE IF NOT
 // EXISTS never adds columns to an existing table, so column additions live
 // here; the embed_source check wipes vectors computed under a different
@@ -230,6 +273,9 @@ func migrate(db *sql.DB) error {
 		}
 	}
 	if err := migrateFTSProjectColumn(db); err != nil {
+		return err
+	}
+	if err := migrateSharedProject(db); err != nil {
 		return err
 	}
 	var src string
@@ -381,7 +427,7 @@ func (s *Store) Write(projectID, keypath, content string, meta WriteMeta, tombst
 // values point at the same prior memory — callers detect "unchanged" via
 // pointer or ID equality.
 func writeExec(exec dbExec, projectID, keypath, content string, meta WriteMeta, tombstone bool) (*Memory, *Memory, error) {
-	// A tombstone skips the gate so an old mistake in _user can be deleted.
+	// A tombstone skips the gate so an old mistake in _shared can be deleted.
 	if !tombstone {
 		if err := checkReservedWrite(projectID, keypath); err != nil {
 			return nil, nil, err

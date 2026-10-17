@@ -182,7 +182,7 @@ func jsonString(s string) string {
 	return string(b)
 }
 
-func TestRenderRecallUserScope(t *testing.T) {
+func TestRenderRecallSharedScope(t *testing.T) {
 	both := []string{"fts", "semantic"}
 	hits := []recallHit{
 		{Keypath: "p1", Content: "project one", Sources: both},
@@ -195,27 +195,27 @@ func TestRenderRecallUserScope(t *testing.T) {
 	}
 	text, shown := renderRecall("proj", hits, user, map[string]bool{}, 3, 500)
 	// One slot goes to the user scope, the rest to the project.
-	if want := "p1,p2,_user/preferences.commit_style"; strings.Join(shown, ",") != want {
+	if want := "p1,p2,_shared/preferences.commit_style"; strings.Join(shown, ",") != want {
 		t.Fatalf("shown = %v want %s", shown, want)
 	}
-	if !strings.Contains(text, "### preferences.commit_style [user] [config]\nno trailers\n") {
-		t.Fatalf("user hit marker missing:\n%s", text)
+	if !strings.Contains(text, "### preferences.commit_style [shared] [config]\nno trailers\n") {
+		t.Fatalf("shared hit marker missing:\n%s", text)
 	}
 	if strings.Contains(text, "profile.role") || strings.Contains(text, "project three") {
-		t.Fatalf("second user hit or fourth hit leaked:\n%s", text)
+		t.Fatalf("second shared hit or fourth hit leaked:\n%s", text)
 	}
-	// A seen user hit frees its slot for the next user hit.
-	seen := map[string]bool{"_user/preferences.commit_style": true}
-	if _, shown := renderRecall("proj", hits, user, seen, 3, 500); strings.Join(shown, ",") != "p1,p2,_user/profile.role" {
+	// A seen shared hit frees its slot for the next shared hit.
+	seen := map[string]bool{"_shared/preferences.commit_style": true}
+	if _, shown := renderRecall("proj", hits, user, seen, 3, 500); strings.Join(shown, ",") != "p1,p2,_shared/profile.role" {
 		t.Fatalf("shown = %v", shown)
 	}
 	// A project keypath equal to a user keypath is not suppressed by it.
 	seen = map[string]bool{"preferences.commit_style": true}
-	if _, shown := renderRecall("proj", hits, user, seen, 3, 500); strings.Join(shown, ",") != "p1,p2,_user/preferences.commit_style" {
+	if _, shown := renderRecall("proj", hits, user, seen, 3, 500); strings.Join(shown, ",") != "p1,p2,_shared/preferences.commit_style" {
 		t.Fatalf("seen keys must be scoped: shown = %v", shown)
 	}
 	// User hits alone still render.
-	if text, _ := renderRecall("proj", nil, user, map[string]bool{}, 3, 500); !strings.Contains(text, "### preferences.commit_style [user]") {
+	if text, _ := renderRecall("proj", nil, user, map[string]bool{}, 3, 500); !strings.Contains(text, "### preferences.commit_style [shared]") {
 		t.Fatalf("user-only render:\n%s", text)
 	}
 }
@@ -247,7 +247,7 @@ func TestRunRecallUserScope(t *testing.T) {
 	seed := func(kp, content string) {
 		t.Helper()
 		code, out := postJSON(t, ts.URL+"/api/v1/memories/store", map[string]any{
-			"project_id": userProject, "keypath": kp, "content": content,
+			"project_id": sharedProject, "keypath": kp, "content": content,
 		})
 		if code != 200 {
 			t.Fatalf("seed %s: %d %v", kp, code, out)
@@ -264,14 +264,14 @@ func TestRunRecallUserScope(t *testing.T) {
 		t.Fatalf("exit %d", code)
 	}
 	text := out.String()
-	if !strings.Contains(text, "[user]") {
-		t.Fatalf("user hit missing:\n%s", text)
+	if !strings.Contains(text, "[shared]") {
+		t.Fatalf("shared hit missing:\n%s", text)
 	}
 	if strings.Contains(text, "other_box") {
 		t.Fatalf("other host leaked:\n%s", text)
 	}
-	if strings.Count(text, "[user]") != 1 {
-		t.Fatalf("more than one user slot:\n%s", text)
+	if strings.Count(text, "[shared]") != 1 {
+		t.Fatalf("more than one shared slot:\n%s", text)
 	}
 }
 
@@ -279,7 +279,7 @@ func TestProjectCandidates(t *testing.T) {
 	sem, fts := []string{"fts", "semantic"}, []string{"fts"}
 	hits := []recallHit{
 		{ProjectID: "cwd_proj", Keypath: "a", Sources: sem},
-		{ProjectID: "_user", Keypath: "preferences.x", Sources: sem},
+		{ProjectID: "_shared", Keypath: "preferences.x", Sources: sem},
 		{ProjectID: "nginx_server", Keypath: "a", Sources: fts},
 		{ProjectID: "nginx_server", Keypath: "b", Sources: fts},
 		{ProjectID: "weak", Keypath: "a", Sources: fts},
@@ -295,7 +295,7 @@ func TestProjectCandidates(t *testing.T) {
 	for i, c := range got {
 		ids[i] = c.ProjectID
 	}
-	// Only semantic hits count: cwd and _user dropped; nginx_server, weak
+	// Only semantic hits count: cwd and _shared dropped; nginx_server, weak
 	// and big are FTS-only word matches and vanish; also (2) ranks above
 	// infra (1).
 	if want := "also,infra"; strings.Join(ids, ",") != want {
@@ -351,7 +351,7 @@ func TestScopeBlockText(t *testing.T) {
 				!strings.Contains(got, "(home directory)") ||
 				!strings.Contains(got, "no default project for writes") ||
 				!strings.Contains(got, "Every write needs project_name") ||
-				!strings.Contains(got, `scope="user"`) ||
+				!strings.Contains(got, `scope="shared"`) ||
 				strings.Contains(got, "Default is the cwd project") {
 				t.Fatalf("home block:\n%s", got)
 			}

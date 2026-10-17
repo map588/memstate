@@ -7,7 +7,7 @@ Two modes:
             own keypath (deeper headings nest via dot segments). Use --root
             to apply a common prefix to every extracted keypath.
 
---scope user writes to the reserved user scope. Only sections that land at
+--scope shared writes to the reserved shared scope. Only sections that land at
 preferences.* or profile.* pass the daemon's allowlist there; host facts
 need an explicit --keypath host.<host_slug>.env.* or .tools.*. One bad
 section rejects the whole call, nothing is written.

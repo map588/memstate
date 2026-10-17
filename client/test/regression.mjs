@@ -448,90 +448,103 @@ async function main() {
       !r.isError && !tree.isError && tree.data.total_memories > 1,
       JSON.stringify(tree));
 
-    // ---- user scope -----------------------------------------------------------
-    // The reserved project `_user` holds facts about the user and this
-    // machine. The daemon allows only preferences.*, profile.*,
-    // host.<slug>.env.* and host.<slug>.tools.* there.
+    // ---- shared scope ----------------------------------------------------------
+    // The reserved project `_shared` holds facts that hold in every
+    // repository. The daemon allows only preferences.*, profile.*,
+    // practices.*, lessons.*, host.<slug>.env.* and host.<slug>.tools.*
+    // there.
     const instr = client.getInstructions() ?? "";
     const hostSlug = /host slug is "([a-z0-9_]+)"/.exec(instr)?.[1] ?? "";
-    check("instructions: describe the user scope and this host's slug",
-      instr.includes("User scope") && hostSlug !== "",
+    check("instructions: describe the shared scope and this host's slug",
+      instr.includes("Shared scope") && hostSlug !== "",
       "");
     r = await call(client, "memstate_set", {
-      scope: "user", keypath: "preferences.commit_style",
+      scope: "shared", keypath: "preferences.commit_style",
       value: "short subjects, no trailers",
     });
-    check("user scope: preferences write is accepted",
+    check("shared scope: preferences write is accepted",
       !r.isError && r.data.action === "created",
       JSON.stringify(r));
-    r = await call(client, "memstate_set", { scope: "user", keypath: "todo.x", value: "nope" });
-    check("user scope: todo write is rejected with the allowed shapes",
+    r = await call(client, "memstate_set", { scope: "shared", keypath: "todo.x", value: "nope" });
+    check("shared scope: todo write is rejected with the allowed shapes",
       r.isError && r.message.includes("allowed"),
       JSON.stringify(r));
+    r = await call(client, "memstate_set", { scope: "shared", keypath: "lessons.zsh_word_splitting", value: "quote it" });
+    check("shared scope: a lesson is accepted",
+      !r.isError && r.data.stored.project_id === "_shared",
+      JSON.stringify(r));
+    r = await call(client, "memstate_set", { scope: "shared", keypath: "practices.go_table_tests", value: "name subtests after the input" });
+    check("shared scope: a practice is accepted",
+      !r.isError && r.data.stored.project_id === "_shared",
+      JSON.stringify(r));
+    r = await call(client, "memstate_set", { scope: "user", keypath: "preferences.x", value: "v" });
+    check("shared scope: the old scope name is refused with the new one",
+      r.isError && r.message.includes('scope="shared"'),
+      JSON.stringify(r));
     r = await call(client, "memstate_set", { project_id: "_scratch", keypath: "preferences.x", value: "nope", new_project: true });
-    check("user scope: other reserved ids are rejected",
+    check("shared scope: other reserved ids are rejected",
       r.isError && r.message.includes("reserved"),
       JSON.stringify(r));
     r = await call(client, "memstate_set", {
-      scope: "user", project_id: PROJECT, keypath: "preferences.x", value: "nope",
+      scope: "shared", project_id: PROJECT, keypath: "preferences.x", value: "nope",
     });
-    check("user scope: scope and project_id together is an error",
+    check("shared scope: scope and project_id together is an error",
       r.isError,
       JSON.stringify(r));
     r = await call(client, "memstate_set", {
-      scope: "user", keypath: `host.${hostSlug}.env.go_bin`,
+      scope: "shared", keypath: `host.${hostSlug}.env.go_bin`,
       value: "go binaries live in ~/.go/bin",
     });
-    check("user scope: this host's env write is accepted",
+    check("shared scope: this host's env write is accepted",
       !r.isError && r.data.action === "created",
       JSON.stringify(r));
     r = await call(client, "memstate_set", {
-      scope: "user", keypath: "host.other_box.env.go_bin",
+      scope: "shared", keypath: "host.other_box.env.go_bin",
       value: "go binaries live in /opt/go/bin on the other box",
     });
-    check("user scope: another host's env write is accepted",
+    check("shared scope: another host's env write is accepted",
       !r.isError,
       JSON.stringify(r));
     r = await call(client, "memstate_get", { project_id: PROJECT });
-    const hostNode = r.data?.user?.domains?.find((d) => d.name === "host");
-    check("get: tree carries the user scope pruned to this host",
-      !r.isError && r.data.user.host === hostSlug &&
-        r.data.user.domains.some((d) => d.name === "preferences") &&
+    const hostNode = r.data?.shared?.domains?.find((d) => d.name === "host");
+    check("get: tree carries the shared scope pruned to this host",
+      !r.isError && r.data.shared.host === hostSlug &&
+        r.data.shared.domains.some((d) => d.name === "preferences") &&
         hostNode && hostNode.children.length === 1 &&
         hostNode.children[0].name === hostSlug &&
-        r.data.user.total_memories === 2,
-      JSON.stringify(r.data?.user));
-    r = await call(client, "memstate_search", { scope: "user", query: "go binaries live", mode: "fts" });
-    check("search: user scope drops other hosts",
+        r.data.shared.total_memories === 4,
+      JSON.stringify(r.data?.shared));
+    r = await call(client, "memstate_search", { scope: "shared", query: "go binaries live", mode: "fts" });
+    check("search: shared scope drops other hosts",
       !r.isError && r.data.results.length === 1 &&
         r.data.results[0].keypath === `host.${hostSlug}.env.go_bin`,
       JSON.stringify(r));
     r = await call(client, "memstate_remember", {
-      scope: "user", content: "## Preferences\nanswer tersely\n\n## Todo\nfinish\n",
+      scope: "shared", content: "## Preferences\nanswer tersely\n\n## Todo\nfinish\n",
     });
-    check("remember: user scope rejects a summary with a todo section",
+    check("remember: shared scope rejects a summary with a todo section",
       r.isError,
       JSON.stringify(r));
-    r = await call(client, "memstate_get", { scope: "user", keypath: "preferences" });
+    r = await call(client, "memstate_get", { scope: "shared", keypath: "preferences" });
     check("remember: the rejected summary wrote nothing",
       !r.isError && r.data.memories.length === 1 &&
         r.data.memories[0].content.includes("no trailers"),
       JSON.stringify(r));
-    // A soft-deleted _user project must not break every project read.
-    r = await call(client, "memstate_delete_project", { project_id: "_user" });
-    check("user scope: the reserved project can be soft-deleted",
+    // A soft-deleted _shared project must not break every project read.
+    r = await call(client, "memstate_delete_project", { project_id: "_shared" });
+    check("shared scope: the reserved project can be soft-deleted",
       !r.isError,
       JSON.stringify(r));
     r = await call(client, "memstate_get", { project_id: PROJECT });
-    check("get: a deleted user scope yields an empty user block, not an error",
-      !r.isError && r.data.domains.length > 0 && r.data.user.total_memories === 0,
+    check("get: a deleted shared scope yields an empty shared block, not an error",
+      !r.isError && r.data.domains.length > 0 && r.data.shared.total_memories === 0,
       JSON.stringify(r));
     r = await call(client, "memstate_set", {
-      scope: "user", keypath: "preferences.commit_style",
+      scope: "shared", keypath: "preferences.commit_style",
       value: "short subjects, no trailers, imperative mood",
     });
-    const userTree = await call(client, "memstate_get", { scope: "user" });
-    check("user scope: a write revives the reserved project",
+    const userTree = await call(client, "memstate_get", { scope: "shared" });
+    check("shared scope: a write revives the reserved project",
       !r.isError && r.data.action === "superseded" &&
         !userTree.isError && userTree.data.total_memories >= 1,
       JSON.stringify([r, userTree]));
@@ -556,18 +569,18 @@ async function main() {
     check("session: a name equal after normalization is refused",
       r.isError && r.message.includes('"other_proj"'),
       JSON.stringify(r));
-    r = await call(client, "memstate_get", { project_name: "_user" });
-    check("session: a reserved name is refused with a pointer to scope=user",
-      r.isError && r.message.includes('scope="user"'),
+    r = await call(client, "memstate_get", { project_name: "_shared" });
+    check("session: a reserved name is refused with a pointer to scope=shared",
+      r.isError && r.message.includes('scope="shared"'),
       JSON.stringify(r));
     r = await call(client, "memstate_get", { project_name: "Bad-Name" });
     check("session: a malformed name is refused",
       r.isError && r.message.includes("snake_case"),
       JSON.stringify(r));
     r = await call(client, "memstate_set", {
-      project_name: "other_proj", scope: "user", keypath: "preferences.x", value: "v",
+      project_name: "other_proj", scope: "shared", keypath: "preferences.x", value: "v",
     });
-    check("session: project_name with scope=user is an error",
+    check("session: project_name with scope=shared is an error",
       r.isError,
       JSON.stringify(r));
     r = await call(client, "memstate_get", { project_name: "taxes_2026", new_project: true });
@@ -747,15 +760,19 @@ async function main() {
         let f = await call(h, "memstate_set", { keypath: "notes.a", value: "v", new_project: true });
         check("gate: a write from the home directory is refused even with new_project",
           f.isError && f.message.includes("home directory") && f.message.includes("project_name") &&
-            f.message.includes('scope="user"'),
+            f.message.includes('scope="shared"'),
+          JSON.stringify(f));
+        f = await call(h, "memstate_set", { keypath: "notes.a", value: "v", strict_scope: false });
+        check("loose: a write from the home directory stays refused",
+          f.isError && f.message.includes("home directory"),
           JSON.stringify(f));
         f = await call(h, "memstate_get", { project_name: homeId, new_project: true });
         check("home: the home directory's name is refused as a pin",
-          f.isError && f.message.includes("home directory") && f.message.includes('scope="user"'),
+          f.isError && f.message.includes("home directory") && f.message.includes('scope="shared"'),
           JSON.stringify(f));
-        f = await call(h, "memstate_set", { scope: "user", keypath: "preferences.gate", value: "v" });
-        check("gate: the user scope is open from the home directory",
-          !f.isError && f.data.stored.project_id === "_user",
+        f = await call(h, "memstate_set", { scope: "shared", keypath: "preferences.gate", value: "v" });
+        check("gate: the shared scope is open from the home directory",
+          !f.isError && f.data.stored.project_id === "_shared",
           JSON.stringify(f));
         f = await call(h, "memstate_set", { project_name: "other_proj", keypath: "notes.home", value: "v" });
         check("gate: a pin from the home directory writes to the pinned project",
@@ -821,8 +838,8 @@ async function main() {
       check("gate (python): a write from the home directory is refused",
         p.code !== 0 && p.err.includes("home directory"),
         JSON.stringify(p));
-      p = py(os.homedir(), ["--scope", "user", "--keypath", "preferences.gate_py", "--value", "v"]);
-      check("gate (python): the user scope is open from the home directory",
+      p = py(os.homedir(), ["--scope", "shared", "--keypath", "preferences.gate_py", "--value", "v"]);
+      check("gate (python): the shared scope is open from the home directory",
         p.code === 0,
         JSON.stringify(p));
     }
@@ -842,32 +859,76 @@ async function main() {
         JSON.stringify(p));
     }
 
-    // Ids that start with "_" are reserved; the user scope is scope="user".
-    r = await call(client, "memstate_get", { project_id: "_user" });
-    check("reserved: project_id _user is refused with a pointer to scope=user",
-      r.isError && r.message.includes('scope="user"'),
+    // Ids that start with "_" are reserved; the shared scope is scope="shared".
+    r = await call(client, "memstate_get", { project_id: "_shared" });
+    check("reserved: project_id _shared is refused with a pointer to scope=shared",
+      r.isError && r.message.includes('scope="shared"'),
       JSON.stringify(r));
     const listed = await call(client, "memstate_get", { list_projects: true });
-    check("reserved: list_projects hides _user",
+    check("reserved: list_projects hides _shared",
       !listed.isError && listed.data.projects.length > 0 && !listed.data.projects.some((q) => q.id.startsWith("_")),
       JSON.stringify(listed.data.projects.map((q) => q.id)));
-    p = py(pyCwd, ["--project", "_user", "--keypath", "preferences.x", "--value", "v"]);
-    check("reserved (python): --project _user is refused with a pointer to --scope user",
-      p.code !== 0 && p.err.includes("--scope user"),
+    p = py(pyCwd, ["--project", "_shared", "--keypath", "preferences.x", "--value", "v"]);
+    check("reserved (python): --project _shared is refused with a pointer to --scope shared",
+      p.code !== 0 && p.err.includes("--scope shared"),
       JSON.stringify(p));
     const GET_PY = path.resolve(__dirname, "..", "skill", "scripts", "memstate_get.py");
     const pl = spawnSync(PY, [GET_PY, "--list-projects"], { cwd: pyCwd, env, encoding: "utf8" });
-    check("reserved (python): --list-projects hides _user",
+    check("reserved (python): --list-projects hides _shared",
       pl.status === 0 && !JSON.parse(pl.stdout).projects.some((q) => q.id.startsWith("_")),
       JSON.stringify({ code: pl.status, out: pl.stdout.slice(0, 200), err: pl.stderr }));
+
+    // ---- loose mode -----------------------------------------------------------
+    // strict_scope=false lifts the one creation rule for a proxy process and
+    // nothing else.
+    const looseCwd = path.join(tmp, "loose_dir");
+    fs.mkdirSync(looseCwd);
+    await withProxy(env, looseCwd, async (l) => {
+      let f = await call(l, "memstate_set", { keypath: "notes.a", value: "v" });
+      check("loose: strict by default, the cwd project is not created",
+        f.isError && f.message.includes("new_project"),
+        JSON.stringify(f));
+      f = await call(l, "memstate_get", { strict_scope: "yes" });
+      check("loose: a non-boolean strict_scope is an error",
+        f.isError && f.message.includes("strict_scope"),
+        JSON.stringify(f));
+      f = await call(l, "memstate_get", { strict_scope: false });
+      check("loose: strict_scope=false is acknowledged in the result",
+        !f.isError && f.data.strict_scope === false,
+        JSON.stringify(f));
+      f = await call(l, "memstate_set", { keypath: "notes.a", value: "v" });
+      check("loose: a write creates the cwd project without new_project",
+        !f.isError && f.data.stored.project_id === "loose_dir" && f.data.strict_scope === false,
+        JSON.stringify(f));
+      f = await call(l, "memstate_set", { project_id: "regress_tests", keypath: "notes.a", value: "v" });
+      check("loose: a near-duplicate is still refused",
+        f.isError && f.message.includes(`"${PROJECT}"`),
+        JSON.stringify(f));
+      f = await call(l, "memstate_set", { scope: "shared", keypath: "todo.x", value: "v" });
+      check("loose: the shared-scope allowlist still applies",
+        f.isError && f.message.includes("allowed"),
+        JSON.stringify(f));
+      f = await call(l, "memstate_get", { project_name: "pinned_scratch_area" });
+      check("loose: a pin to a new project needs no new_project",
+        !f.isError && f.data.session_project === "pinned_scratch_area",
+        JSON.stringify(f));
+      f = await call(l, "memstate_set", { strict_scope: true, project_id: "fresh_loose", keypath: "notes.a", value: "v" });
+      check("loose: strict_scope=true restores the gate",
+        f.isError && f.message.includes("new_project"),
+        JSON.stringify(f));
+      f = await call(l, "memstate_get", {});
+      check("loose: a strict session carries no strict_scope field",
+        !f.isError && !("strict_scope" in f.data),
+        JSON.stringify(Object.keys(f.data ?? {})));
+    });
 
     // new_project where nothing can be created is a mistake, not a no-op.
     r = await call(client, "memstate_get", { new_project: true });
     check("new_project: refused on a read without project_name",
       r.isError && r.message.includes("no effect"),
       JSON.stringify(r));
-    r = await call(client, "memstate_set", { scope: "user", keypath: "preferences.flag", value: "v", new_project: true });
-    check("new_project: refused with scope=user",
+    r = await call(client, "memstate_set", { scope: "shared", keypath: "preferences.flag", value: "v", new_project: true });
+    check("new_project: refused with scope=shared",
       r.isError && r.message.includes("no effect"),
       JSON.stringify(r));
     const repoCwd = path.resolve(__dirname, "..", "..");

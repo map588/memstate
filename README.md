@@ -282,11 +282,11 @@ Pass it only to reach a different project. Keypaths use dot notation.
 
 A useful agent loop:
 
-- At task start, call `memstate_get()` to load the tree. The proxy derives the project id from the repository name. The response also carries the user scope under `user`. Call `memstate_search(query=...)` when you do not know the exact keypath.
+- At task start, call `memstate_get()` to load the tree. The proxy derives the project id from the repository name. The response also carries the shared scope under `shared`. Call `memstate_search(query=...)` when you do not know the exact keypath.
 - At task end, call `memstate_remember(content="## Summary\n...\n## Decisions\n...")` and let the server extract the sections.
 - Facts about the user or this machine, not about the code, go to `scope="user"`: `preferences.*`, `profile.*`, `host.<host_slug>.env.*`, `host.<host_slug>.tools.*`. The daemon rejects any other keypath there, so decisions and task summaries cannot leak into a shared store.
 - When the prompt is clearly about another subject than the directory (for example an nginx config asked from the home directory), pin the session once with `project_name`. Prefer an existing id. A new id also needs `new_project=true`. The proxy refuses a new id that looks like an existing one. On the first prompt, the recall hook prints a `<memstate-scope>` block. It shows the cwd project, whether it exists, and the other projects that the prompt matches. The recall hook follows a session pin through a per-process pin file.
-- A write creates a project only when it targets the git repository you are in, or when it carries `new_project=true`. This rule applies to the cwd project outside a repository, to an explicit `project_id`, and to a soft-deleted project. The proxy always refuses a name that resembles an existing project, and the name of your home directory. From the home directory, the proxy refuses all writes to the default project. Pin a project or use the user scope. The same holds when the proxy was started in a system directory, such as `C:\WINDOWS\system32`, which is where a desktop app that is not itself running in a project starts its MCP servers: no default project, and the proxy's instructions say so. When the MCP client offers workspace roots, the proxy derives the default from the first root instead of its own working directory. Ids that start with `_` are reserved for the user scope. The Python scripts apply the same rule with `--new-project`.
+- A write creates a project only when it targets the git repository you are in, or when it carries `new_project=true`. This rule applies to the cwd project outside a repository, to an explicit `project_id`, and to a soft-deleted project. The proxy always refuses a name that resembles an existing project, and the name of your home directory. From the home directory, the proxy refuses all writes to the default project. Pin a project or use the shared scope. The same holds when the proxy was started in a system directory, such as `C:\WINDOWS\system32`, which is where a desktop app that is not itself running in a project starts its MCP servers: no default project, and the proxy's instructions say so. When the MCP client offers workspace roots, the proxy derives the default from the first root instead of its own working directory. Ids that start with `_` are reserved for the shared scope. The Python scripts apply the same rule with `--new-project`.
 - Never save a denied prompt. A denied prompt is a tool call that the user or a permission check denied.
 
 `node client/dist/index.js init` writes rule files for several agents
@@ -550,7 +550,7 @@ embeddings and the user-scope rules apply exactly as they do for an agent.
 The project defaults to the repository you are in.
 
 ```bash
-memstate tree                          # keypath tree for this repo, plus your user scope
+memstate tree                          # keypath tree for this repo, plus the shared scope
 memstate get decisions                 # content under one keypath
 memstate get todo --raw | less         # content only
 memstate history config.port           # every version, newest first
@@ -558,19 +558,19 @@ memstate search "why sqlite" --limit 5 # hybrid search via the daemon
 memstate set config.port 8080 --category config
 memstate edit notes.setup              # $EDITOR on the current content
 memstate rm branches.old --recursive   # asks y/N; --yes to skip
-memstate tree --user                   # preferences, profile, this host's env and tools
-memstate tree --json | jq .user        # raw shapes for scripts
+memstate tree --shared                 # preferences, profile, practices, lessons, this host's env and tools
+memstate tree --json | jq .shared       # raw shapes for scripts
 memstate projects                      # every live project
 ```
 
-`--project ID` reaches another project, `--user` the reserved user scope,
+`--project ID` reaches another project, `--shared` the reserved shared scope,
 `--all` (search) the whole store. Flags may follow positionals. Without a
 shared daemon, reads still work and `search` falls back to FTS. `set`,
 `edit` and `rm` need the daemon and tell you how to start one.
 
 Tab completion for zsh completes verbs, flags, project ids, config keys and
 keypaths (one dotted segment at a time, in the project that `--project` or
-`--user` selects). Save the script in a directory on `$fpath` and open a
+`--shared` selects). Save the script in a directory on `$fpath` and open a
 new shell:
 
 ```bash

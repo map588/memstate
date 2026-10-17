@@ -146,6 +146,11 @@ func (s *Store) Merge(data *ExportData, overrideProjectID string, force bool) ([
 	var stats []MergeStats
 	for _, pe := range data.Projects {
 		target := pe.ProjectID
+		if target == legacySharedProject {
+			// An export from a build before 2026-10-17 names the shared
+			// project "_user"; the gate would refuse it as unknown.
+			target = sharedProject
+		}
 		if overrideProjectID != "" {
 			target = overrideProjectID
 		}

@@ -135,10 +135,10 @@ func runRecall(stdin io.Reader, stdout io.Writer) int {
 		shown = append(shown, scopeMarker)
 	}
 
-	// The user scope is a bonus: a failure there must not hide project hits.
-	userHits, err := recallSearch(addr, userProject, ev.Prompt)
+	// The shared scope is a bonus: a failure there must not hide project hits.
+	userHits, err := recallSearch(addr, sharedProject, ev.Prompt)
 	if err != nil {
-		debug("user scope search: %v", err)
+		debug("shared scope search: %v", err)
 		userHits = nil
 	}
 	userHits = filterHostHits(userHits, hostSlug())
@@ -217,7 +217,7 @@ type projectCandidate struct {
 }
 
 // projectCandidates groups all-project hits by project, drops the cwd
-// project and the user scope, and counts only hits the semantic side
+// project and the shared scope, and counts only hits the semantic side
 // returned. The FTS side of hybrid matches any word, so "config" or "set"
 // pulls unrelated projects; a cosine match above the threshold is the
 // evidence that a project is about the prompt. At most three, by hit count.
@@ -225,7 +225,7 @@ func projectCandidates(hits []recallHit, cwdProject string) []projectCandidate {
 	byProject := map[string]*projectCandidate{}
 	var order []string
 	for _, h := range hits {
-		if h.ProjectID == "" || h.ProjectID == cwdProject || h.ProjectID == userProject {
+		if h.ProjectID == "" || h.ProjectID == cwdProject || h.ProjectID == sharedProject {
 			continue
 		}
 		if !slices.Contains(h.Sources, "semantic") {
@@ -278,7 +278,7 @@ func scopeBlock(project, cwd string, exists bool, cands []projectCandidate) stri
 		// refuses writes to its default there; say so before the first write.
 		b.WriteString("The working directory is not a git repository (home directory). " +
 			"There is no default project for writes here: pin one with project_name, " +
-			"or use scope=\"user\" for facts about this machine.\n")
+			"or use scope=\"shared\" for facts that hold in every repository.\n")
 	} else {
 		fmt.Fprintf(&b, "The working directory is not a git repository (%s).", filepath.Base(cwd))
 		if !exists {
@@ -303,7 +303,7 @@ func scopeBlock(project, cwd string, exists bool, cands []projectCandidate) stri
 	// directory has no default for writes, every other directory does.
 	if isHome {
 		b.WriteString("Reads use the cwd project. Every write needs project_name=<one of the ids " +
-			"above, or another id from memstate_get(list_projects=true)> or scope=\"user\". " +
+			"above, or another id from memstate_get(list_projects=true)> or scope=\"shared\". " +
 			"Do not invent a new name unless nothing fits; then add new_project=true.\n")
 	} else {
 		b.WriteString("Default is the cwd project. Override only when this prompt is clearly about " +
@@ -439,11 +439,11 @@ func recallSearch(addr, project, prompt string) ([]recallHit, error) {
 	return out.Results, nil
 }
 
-// userSeenPrefix scopes seen-file keys for user-scope hits, so a project
+// sharedSeenPrefix scopes seen-file keys for shared-scope hits, so a project
 // keypath with the same name is not suppressed by them.
-const userSeenPrefix = userProject + "/"
+const sharedSeenPrefix = sharedProject + "/"
 
-// filterHostHits drops user-scope hits that describe another machine:
+// filterHostHits drops shared-scope hits that describe another machine:
 // anything under host.<slug> where slug is not this host.
 func filterHostHits(hits []recallHit, host string) []recallHit {
 	out := hits[:0:0]
@@ -476,11 +476,11 @@ func pickRecall(hits []recallHit, seen map[string]bool, seenPrefix string, max i
 }
 
 // renderRecall formats up to maxHits hits from the project and the user
-// scope. One slot is reserved for the best user-scope hit, marked [user];
+// scope. One slot is reserved for the best shared-scope hit, marked [shared];
 // project hits fill the rest. It returns the block and the seen-file keys it
 // printed. An empty block means nothing new to show.
 func renderRecall(project string, hits, userHits []recallHit, seen map[string]bool, maxHits, maxChars int) (string, []string) {
-	user := pickRecall(userHits, seen, userSeenPrefix, 1)
+	user := pickRecall(userHits, seen, sharedSeenPrefix, 1)
 	proj := pickRecall(hits, seen, "", maxHits-len(user))
 	if len(user)+len(proj) == 0 {
 		return "", nil
@@ -503,7 +503,7 @@ func renderRecall(project string, hits, userHits []recallHit, seen map[string]bo
 		write(h, "", h.Keypath)
 	}
 	for _, h := range user {
-		write(h, " [user]", userSeenPrefix+h.Keypath)
+		write(h, " [shared]", sharedSeenPrefix+h.Keypath)
 	}
 	b.WriteString("</memstate-recall>\n")
 	return b.String(), shown

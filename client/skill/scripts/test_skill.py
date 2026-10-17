@@ -1,16 +1,31 @@
 #!/usr/bin/env python3
 """
 End-to-end test suite for the Memstate AI Skill.
-Tests all 7 scripts against the live API.
+Runs every script against a private child daemon on a temporary DB. It
+never attaches to the shared daemon: MEMSTATE_CHILD=1 forces child mode,
+MEMSTATE_ADDR and MEMSTATE_LOCAL_URL are dropped, and MEMSTATE_DB points
+at a fresh temporary directory unless the caller sets it.
 """
 import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ID = f"skill-test-{int(time.time())}"
+# Project ids are snake_case; the scripts refuse any other shape.
+PROJECT_ID = f"skill_test_{int(time.time())}"
+
+# Hermetic environment for every script this suite spawns.
+os.environ.pop("MEMSTATE_ADDR", None)
+os.environ.pop("MEMSTATE_LOCAL_URL", None)
+os.environ["MEMSTATE_CHILD"] = "1"
+os.environ["MEMSTATE_CONFIG"] = "off"
+os.environ["MEMSTATE_NO_UPDATE_CHECK"] = "1"
+if not os.environ.get("MEMSTATE_DB"):
+    _TMP = tempfile.TemporaryDirectory(prefix="memstate-skilltest-")
+    os.environ["MEMSTATE_DB"] = os.path.join(_TMP.name, "memstate.db")
 
 PASS = "\033[92m✅ PASS\033[0m"
 FAIL = "\033[91m❌ FAIL\033[0m"
@@ -29,10 +44,7 @@ def test(name, script, args, expect_key=None, expect_value=None):
     detail = ""
     if passed and expect_key:
         try:
-            json_str = stdout
-            if "Polling for completion..." in stdout:
-                json_str = stdout.split("Polling for completion...")[1].strip()
-            data = json.loads(json_str)
+            data = json.loads(stdout)
             actual = data.get(expect_key)
             if expect_value is not None and actual != expect_value:
                 passed = False
@@ -63,7 +75,7 @@ def main():
     ok, out = test(
         "memstate_set: store a single fact",
         "memstate_set.py",
-        ["--project", PROJECT_ID, "--keypath", "database.engine", "--value", "PostgreSQL", "--category", "decision"],
+        ["--project", PROJECT_ID, "--new-project", "--keypath", "database.engine", "--value", "PostgreSQL", "--category", "decision"],
         expect_key="action", expect_value="created"
     )
 
@@ -72,12 +84,12 @@ def main():
         "memstate_set: update same keypath (supersede)",
         "memstate_set.py",
         ["--project", PROJECT_ID, "--keypath", "database.engine", "--value", "PostgreSQL 16", "--category", "decision"],
-        expect_key="version"
+        expect_key="action", expect_value="superseded"
     )
     memory_id = None
     if ok:
         try:
-            memory_id = json.loads(out).get("memory_id")
+            memory_id = json.loads(out)["stored"]["id"]
         except Exception:
             pass
 
@@ -89,11 +101,11 @@ def main():
         expect_key="action", expect_value="created"
     )
 
-    # 4. memstate_get — list all projects (no args)
+    # 4. memstate_get — list all projects
     test(
         "memstate_get: list all projects",
         "memstate_get.py",
-        [],
+        ["--list-projects"],
         expect_key="projects"
     )
 
@@ -118,7 +130,7 @@ def main():
         test(
             "memstate_get: fetch by memory_id",
             "memstate_get.py",
-            ["--memory-id", memory_id],
+            ["--memory-id", str(memory_id)],
             expect_key="id", expect_value=memory_id
         )
     else:
@@ -141,15 +153,14 @@ def main():
         expect_key="versions"
     )
 
-    # 10. memstate_remember — markdown ingestion (async)
-    print(f"\n  [Note: memstate_remember polls for job completion, may take ~20s]")
+    # 10. memstate_remember — heading extraction, one memory per ## section
     test(
         "memstate_remember: markdown ingestion",
         "memstate_remember.py",
         ["--project", PROJECT_ID,
          "--content", "## Architecture Summary\n- Backend: FastAPI\n- Database: PostgreSQL 16\n- Auth: JWT with httpOnly cookies\n- Deploy: Docker on AWS ECS",
          "--source", "agent"],
-        expect_key="status", expect_value="complete"
+        expect_key="method", expect_value="headings"
     )
 
     # 11. memstate_delete — soft-delete a keypath
@@ -168,37 +179,37 @@ def main():
         expect_key="project_id", expect_value=PROJECT_ID
     )
 
-    # 13. user scope — the daemon allows only the allowlisted shapes there.
+    # 13. shared scope — the daemon allows only the allowlisted shapes there.
     user_kp = f"preferences.skill_test_{int(time.time())}"
     test(
-        "memstate_set: --scope user accepts a preferences fact",
+        "memstate_set: --scope shared accepts a preferences fact",
         "memstate_set.py",
-        ["--scope", "user", "--keypath", user_kp, "--value", "terse answers"],
+        ["--scope", "shared", "--keypath", user_kp, "--value", "terse answers"],
         expect_key="action", expect_value="created"
     )
     code, stdout, stderr = run_script(
-        "memstate_set.py", "--scope", "user", "--keypath", "todo.skill_test", "--value", "nope")
+        "memstate_set.py", "--scope", "shared", "--keypath", "todo.skill_test", "--value", "nope")
     rejected = code == 1 and "HTTP 400" in stderr and "allowed" in stderr
-    print(f"{PASS if rejected else FAIL} memstate_set: --scope user rejects a todo keypath")
+    print(f"{PASS if rejected else FAIL} memstate_set: --scope shared rejects a todo keypath")
     if not rejected:
         print(f"       code={code} stderr={stderr.strip()[:300]}")
-    results.append(("memstate_set: --scope user rejects a todo keypath", rejected))
+    results.append(("memstate_set: --scope shared rejects a todo keypath", rejected))
     test(
-        "memstate_get: --scope user tree carries user.host",
+        "memstate_get: --scope shared tree carries shared.host",
         "memstate_get.py",
-        ["--scope", "user"],
+        ["--scope", "shared"],
         expect_key="host"
     )
     test(
-        "memstate_get: project tree carries the user scope",
+        "memstate_get: project tree carries the shared scope",
         "memstate_get.py",
         ["--project", "skill_test_other"],
-        expect_key="user"
+        expect_key="shared"
     )
     test(
-        "memstate_delete: --scope user cleans up",
+        "memstate_delete: --scope shared cleans up",
         "memstate_delete.py",
-        ["--scope", "user", "--keypath", user_kp],
+        ["--scope", "shared", "--keypath", user_kp],
         expect_key="deleted_count"
     )
 

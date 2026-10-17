@@ -254,6 +254,7 @@ func handleStore(store *Store, embedder *Embedder) http.HandlerFunc {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		in.ProjectID = legacyProject(in.ProjectID)
 		if in.ProjectID == "" || in.Keypath == "" || in.Content == "" {
 			writeErr(w, http.StatusBadRequest, "project_id, keypath, content are required")
 			return
@@ -312,6 +313,7 @@ func handleRemember(store *Store, embedder *Embedder) http.HandlerFunc {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		in.ProjectID = legacyProject(in.ProjectID)
 		if in.ProjectID == "" || in.Content == "" {
 			writeErr(w, http.StatusBadRequest, "project_id and content are required")
 			return
@@ -395,6 +397,7 @@ func handleDelete(store *Store) http.HandlerFunc {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		in.ProjectID = legacyProject(in.ProjectID)
 		if in.ProjectID == "" || in.Keypath == "" {
 			writeErr(w, http.StatusBadRequest, "project_id and keypath are required")
 			return
@@ -438,6 +441,7 @@ func handleDeleteProject(store *Store) http.HandlerFunc {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		in.ProjectID = legacyProject(in.ProjectID)
 		if in.ProjectID == "" {
 			writeErr(w, http.StatusBadRequest, "project_id required")
 			return
@@ -548,6 +552,7 @@ func handleSearch(store *Store, embedder *Embedder) http.HandlerFunc {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		in.ProjectID = legacyProject(in.ProjectID)
 		if in.Query == "" {
 			writeErr(w, http.StatusBadRequest, "query required")
 			return
@@ -686,6 +691,7 @@ func handleHistory(store *Store) http.HandlerFunc {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		in.ProjectID = legacyProject(in.ProjectID)
 		var versions []*Memory
 
 		switch {
@@ -738,6 +744,7 @@ func handleKeypaths(store *Store) http.HandlerFunc {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		in.ProjectID = legacyProject(in.ProjectID)
 		if in.ProjectID == "" {
 			writeErr(w, http.StatusBadRequest, "project_id required")
 			return
@@ -766,7 +773,7 @@ func handleKeypaths(store *Store) http.HandlerFunc {
 
 func handleTree(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		pid := r.URL.Query().Get("project_id")
+		pid := legacyProject(r.URL.Query().Get("project_id"))
 		if pid == "" {
 			writeErr(w, http.StatusBadRequest, "project_id required")
 			return

@@ -2,11 +2,11 @@
 """Browse and retrieve memories from the memstated daemon.
 
 Usage:
-  memstate_get.py                                    # This repo's tree plus the user scope (names only)
-  memstate_get.py --scope user                       # The user scope tree, pruned to this host
+  memstate_get.py                                    # This repo's tree plus the shared scope (names only)
+  memstate_get.py --scope shared                       # The shared scope tree, pruned to this host
   memstate_get.py --list-projects                    # List all project ids
   memstate_get.py --keypath db --include-content    # Subtree with content
-  memstate_get.py --scope user --keypath preferences # User-scope subtree with content
+  memstate_get.py --scope shared --keypath preferences # Shared-scope subtree with content
   memstate_get.py --project other_app --keypath db  # Another project's subtree
   memstate_get.py --memory-id 42                     # Single memory by numeric ID
 """
@@ -15,7 +15,7 @@ import sys
 import urllib.error
 import urllib.parse
 
-from _client import (USER_PROJECT, add_scope_args, count_values, emit, fetch,
+from _client import (SHARED_PROJECT, add_scope_args, count_values, emit, fetch,
                      get, host_slug, list_projects_visible, prune_other_hosts,
                      resolve_project)
 
@@ -24,12 +24,12 @@ def _tree(project: str) -> dict:
     return fetch("GET", f"/tree?project_id={urllib.parse.quote(project)}")
 
 
-def _user_tree() -> dict:
-    """The user scope, pruned to this machine's host.<slug> subtree. A
-    soft-deleted _user project (HTTP 409) yields an empty scope so the
+def _shared_tree() -> dict:
+    """The shared scope, pruned to this machine's host.<slug> subtree. A
+    soft-deleted _shared project (HTTP 409) yields an empty scope so the
     project tree still prints."""
     try:
-        domains = _tree(USER_PROJECT).get("domains") or []
+        domains = _tree(SHARED_PROJECT).get("domains") or []
     except urllib.error.HTTPError:
         domains = []
     domains = prune_other_hosts(domains)
@@ -62,13 +62,13 @@ def main() -> int:
         }
         return emit(lambda: fetch("POST", "/keypaths", body))
 
-    if project == USER_PROJECT:
-        return emit(_user_tree)
+    if project == SHARED_PROJECT:
+        return emit(_shared_tree)
 
-    # The user scope rides along with every project tree, like the proxy.
+    # The shared scope rides along with every project tree, like the proxy.
     def combined() -> dict:
         tree = _tree(project)
-        tree["user"] = _user_tree()
+        tree["shared"] = _shared_tree()
         return tree
 
     return emit(combined)

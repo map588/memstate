@@ -34,7 +34,7 @@ var (
 // cliOpts are the flags every verb accepts.
 type cliOpts struct {
 	project string
-	user    bool
+	shared  bool
 	json    bool
 	noColor bool
 	db      string
@@ -43,7 +43,7 @@ type cliOpts struct {
 
 func (o *cliOpts) bind(fs *flag.FlagSet) {
 	fs.StringVar(&o.project, "project", "", "project id (default: this repo's slug)")
-	fs.BoolVar(&o.user, "user", false, "the reserved user scope (_user)")
+	fs.BoolVar(&o.shared, "shared", false, "the reserved shared scope (_shared)")
 	fs.BoolVar(&o.json, "json", false, "print the raw JSON shape")
 	fs.BoolVar(&o.noColor, "no-color", false, "disable ANSI colors")
 	fs.StringVar(&o.db, "db", "", "SQLite file for reads (default MEMSTATE_DB or ~/.memstate/memstate.db)")
@@ -58,15 +58,15 @@ func newVerbFlags(name string) (*flag.FlagSet, *cliOpts) {
 	return fs, o
 }
 
-// resolveCLIProject picks the project for a verb: --user, else --project,
+// resolveCLIProject picks the project for a verb: --shared, else --project,
 // else the repository slug of the working directory (the same rule as the
 // proxy and the Python skill).
 func resolveCLIProject(o cliOpts) (string, error) {
-	if o.user && o.project != "" {
-		return "", errors.New("use --user or --project, not both")
+	if o.shared && o.project != "" {
+		return "", errors.New("use --shared or --project, not both")
 	}
-	if o.user {
-		return userProject, nil
+	if o.shared {
+		return sharedProject, nil
 	}
 	if o.project != "" {
 		return o.project, nil
@@ -134,7 +134,7 @@ Browse and edit the memstate store. Reads open the SQLite file directly;
 writes go through the shared daemon (MEMSTATE_ADDR, else daemon.addr).
 
   memstate tree     [KEYPATH]              keypath tree with metadata, plus the
-                                           user scope for this host
+                                           shared scope for this host
   memstate get      [KEYPATH] [--raw]      content at KEYPATH and below
   memstate history  KEYPATH                every version, newest first, with tombstones
   memstate search   QUERY... [--all] [--mode hybrid|fts|semantic] [--limit N]
@@ -157,7 +157,7 @@ writes go through the shared daemon (MEMSTATE_ADDR, else daemon.addr).
 
 Flags on every verb:
   --project ID   a project other than this repository's
-  --user         the reserved user scope (preferences, profile, host.<slug>.*)
+  --shared       the reserved shared scope (preferences, profile, practices, lessons, host.<slug>.*)
   --json         raw JSON, no color
   --no-color     plain text (also NO_COLOR, or a non-terminal stdout)
   --db PATH      SQLite file for reads (default MEMSTATE_DB, ~/.memstate/memstate.db)
@@ -295,7 +295,7 @@ func cliTree(args []string) int {
 	fs, o := newVerbFlags("tree")
 	pos, err := parseInterspersed(fs, args)
 	if err != nil || len(pos) > 1 {
-		return cliUsage("tree [KEYPATH] [--project ID | --user] [--json]")
+		return cliUsage("tree [KEYPATH] [--project ID | --shared] [--json]")
 	}
 	project, err := resolveCLIProject(*o)
 	if err != nil {
@@ -312,32 +312,32 @@ func cliTree(args []string) int {
 	defer store.Close()
 
 	host := hostSlug()
-	// The user scope rides along with a whole-project tree, like the proxy's
-	// memstate_get(); a subtree or the user scope itself shows alone.
-	withUser := !o.user && keypath == ""
-	var userMems []*Memory
-	if withUser {
-		if deleted, _ := store.ProjectDeleted(userProject); !deleted {
-			all, err := store.List(userProject, "")
+	// The shared scope rides along with a whole-project tree, like the proxy's
+	// memstate_get(); a subtree or the shared scope itself shows alone.
+	withShared := !o.shared && keypath == ""
+	var sharedMems []*Memory
+	if withShared {
+		if deleted, _ := store.ProjectDeleted(sharedProject); !deleted {
+			all, err := store.List(sharedProject, "")
 			if err != nil {
 				return cliFail("%v", err)
 			}
 			for _, m := range all {
 				if !isOtherHost(m.Keypath, host) {
-					userMems = append(userMems, m)
+					sharedMems = append(sharedMems, m)
 				}
 			}
 		}
 	}
-	if o.user {
+	if o.shared {
 		all, err := store.List(project, keypath)
 		if err != nil {
 			return cliFail("%v", err)
 		}
-		userMems = nil
+		sharedMems = nil
 		for _, m := range all {
 			if !isOtherHost(m.Keypath, host) {
-				userMems = append(userMems, m)
+				sharedMems = append(sharedMems, m)
 			}
 		}
 	}
@@ -357,7 +357,7 @@ func cliTree(args []string) int {
 		if keypath != "" {
 			domains = []*TreeNode{node}
 		}
-		if o.user {
+		if o.shared {
 			domains = pruneTreeHosts(domains, host)
 		}
 		total := 0
@@ -365,10 +365,10 @@ func cliTree(args []string) int {
 			countValues(d, &total)
 		}
 		out := map[string]any{"project_id": project, "domains": orEmpty(domains), "total_memories": total}
-		if withUser {
+		if withShared {
 			udom := []*TreeNode{}
-			if deleted, _ := store.ProjectDeleted(userProject); !deleted {
-				uroot, err := store.Tree(userProject)
+			if deleted, _ := store.ProjectDeleted(sharedProject); !deleted {
+				uroot, err := store.Tree(sharedProject)
 				if err != nil {
 					return cliFail("%v", err)
 				}
@@ -378,16 +378,16 @@ func cliTree(args []string) int {
 			for _, d := range udom {
 				countValues(d, &utotal)
 			}
-			out["user"] = map[string]any{"host": host, "domains": orEmpty(udom), "total_memories": utotal}
+			out["shared"] = map[string]any{"host": host, "domains": orEmpty(udom), "total_memories": utotal}
 		}
 		printJSON(out)
 		return 0
 	}
 
 	p := newPalette(o.noColor)
-	if o.user {
-		fmt.Fprintf(cliOut, "%s\n\n", p.dim(fmt.Sprintf("user scope (host %s) — %d keypath(s)", host, len(userMems))))
-		printKeyTree(cliOut, userMems, p)
+	if o.shared {
+		fmt.Fprintf(cliOut, "%s\n\n", p.dim(fmt.Sprintf("shared scope (host %s) — %d keypath(s)", host, len(sharedMems))))
+		printKeyTree(cliOut, sharedMems, p)
 		return 0
 	}
 	mems, err := store.List(project, keypath)
@@ -405,9 +405,9 @@ func cliTree(args []string) int {
 		}
 	}
 	printKeyTree(cliOut, mems, p)
-	if withUser && len(userMems) > 0 {
-		fmt.Fprintf(cliOut, "\n%s\n\n", p.dim(fmt.Sprintf("user scope (host %s) — %d keypath(s)", host, len(userMems))))
-		printKeyTree(cliOut, userMems, p)
+	if withShared && len(sharedMems) > 0 {
+		fmt.Fprintf(cliOut, "\n%s\n\n", p.dim(fmt.Sprintf("shared scope (host %s) — %d keypath(s)", host, len(sharedMems))))
+		printKeyTree(cliOut, sharedMems, p)
 	}
 	return 0
 }
@@ -454,7 +454,7 @@ func cliGet(args []string) int {
 	raw := fs.Bool("raw", false, "content only, no metadata")
 	pos, err := parseInterspersed(fs, args)
 	if err != nil || len(pos) > 1 {
-		return cliUsage("get [KEYPATH] [--raw] [--project ID | --user] [--json]")
+		return cliUsage("get [KEYPATH] [--raw] [--project ID | --shared] [--json]")
 	}
 	project, err := resolveCLIProject(*o)
 	if err != nil {
@@ -473,7 +473,7 @@ func cliGet(args []string) int {
 	if err != nil {
 		return cliFail("%v", err)
 	}
-	if o.user {
+	if o.shared {
 		host := hostSlug()
 		mems = slices.DeleteFunc(mems, func(m *Memory) bool { return isOtherHost(m.Keypath, host) })
 	}
@@ -516,7 +516,7 @@ func cliHistory(args []string) int {
 	fs, o := newVerbFlags("history")
 	pos, err := parseInterspersed(fs, args)
 	if err != nil || len(pos) != 1 {
-		return cliUsage("history KEYPATH [--project ID | --user] [--json]")
+		return cliUsage("history KEYPATH [--project ID | --shared] [--json]")
 	}
 	project, err := resolveCLIProject(*o)
 	if err != nil {
@@ -580,7 +580,7 @@ func cliSearch(args []string) int {
 	pos, err := parseInterspersed(fs, args)
 	query := strings.TrimSpace(strings.Join(pos, " "))
 	if err != nil || query == "" || *limit < 1 {
-		return cliUsage("search QUERY... [--all | --project ID | --user] [--mode M] [--limit N] [--category C] [--topics a,b] [--json]")
+		return cliUsage("search QUERY... [--all | --project ID | --shared] [--mode M] [--limit N] [--category C] [--topics a,b] [--json]")
 	}
 	project := ""
 	if !*all {
@@ -643,7 +643,7 @@ func cliSearch(args []string) int {
 			out.Results = append(out.Results, searchHit{Memory: *m, Sources: []string{"fts"}})
 		}
 	}
-	if o.user {
+	if o.shared {
 		out.Results = slices.DeleteFunc(out.Results, func(h searchHit) bool { return isOtherHost(h.Keypath, host) })
 	}
 	out.TotalFound = len(out.Results)
@@ -705,7 +705,7 @@ func cliSet(args []string) int {
 	source := fs.String("source", "", "provenance shown in history")
 	pos, err := parseInterspersed(fs, args)
 	if err != nil || len(pos) != 2 {
-		return cliUsage("set KEYPATH VALUE|- [--category C] [--topics a,b] [--source S] [--project ID | --user]")
+		return cliUsage("set KEYPATH VALUE|- [--category C] [--topics a,b] [--source S] [--project ID | --shared]")
 	}
 	project, err := resolveCLIProject(*o)
 	if err != nil {
@@ -750,7 +750,7 @@ func cliEdit(args []string) int {
 	topics := fs.String("topics", "", "replace the topics (default: keep the current ones)")
 	pos, err := parseInterspersed(fs, args)
 	if err != nil || len(pos) != 1 {
-		return cliUsage("edit KEYPATH [--category C] [--topics a,b] [--project ID | --user]")
+		return cliUsage("edit KEYPATH [--category C] [--topics a,b] [--project ID | --shared]")
 	}
 	project, err := resolveCLIProject(*o)
 	if err != nil {
@@ -862,7 +862,7 @@ func cliRm(args []string) int {
 	yes := fs.Bool("yes", false, "skip the confirmation for --recursive")
 	pos, err := parseInterspersed(fs, args)
 	if err != nil || len(pos) != 1 {
-		return cliUsage("rm KEYPATH [--recursive] [--yes] [--project ID | --user]")
+		return cliUsage("rm KEYPATH [--recursive] [--yes] [--project ID | --shared]")
 	}
 	project, err := resolveCLIProject(*o)
 	if err != nil {

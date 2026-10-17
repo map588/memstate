@@ -14,7 +14,7 @@ Three modes:
                  (default nomic-embed-text; set MEMSTATE_EMBED_MODEL
                  or start memstated with --embed-model to change it).
 
---scope user searches the reserved user scope and drops hits that describe
+--scope shared searches the reserved shared scope and drops hits that describe
 another machine (host.<other_slug>.*).
 """
 import argparse
@@ -59,7 +59,7 @@ def main() -> int:
 
     def search():
         out = fetch("POST", "/memories/search", body)
-        if args.scope == "user" and isinstance(out, dict) and isinstance(out.get("results"), list):
+        if args.scope == "shared" and isinstance(out, dict) and isinstance(out.get("results"), list):
             out["results"] = [h for h in out["results"] if not is_other_host(h.get("keypath", ""))]
             out["total_found"] = len(out["results"])
         return out

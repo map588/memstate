@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Show the version chain for a keypath (memstated). --scope user targets the user scope."""
+"""Show the version chain for a keypath (memstated). --scope shared targets the shared scope."""
 import argparse
 import sys
 

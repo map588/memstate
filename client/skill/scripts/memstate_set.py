@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Store a single fact at a keypath (memstated).
 
---scope user writes to the reserved user scope. The daemon accepts only
+--scope shared writes to the reserved shared scope. The daemon accepts only
 preferences.*, profile.*, host.<host_slug>.env.* and host.<host_slug>.tools.*
-there; see SKILL.md, "User scope".
+there; see SKILL.md, "Shared scope".
 """
 import argparse
 import sys

@@ -50,11 +50,11 @@ func TestResolveCLIProject(t *testing.T) {
 	if got, err := resolveCLIProject(cliOpts{project: "my_app"}); err != nil || got != "my_app" {
 		t.Fatalf("--project: %q %v", got, err)
 	}
-	if got, err := resolveCLIProject(cliOpts{user: true}); err != nil || got != userProject {
-		t.Fatalf("--user: %q %v", got, err)
+	if got, err := resolveCLIProject(cliOpts{shared: true}); err != nil || got != sharedProject {
+		t.Fatalf("--shared: %q %v", got, err)
 	}
-	if _, err := resolveCLIProject(cliOpts{user: true, project: "x"}); err == nil {
-		t.Fatal("--user with --project must be an error")
+	if _, err := resolveCLIProject(cliOpts{shared: true, project: "x"}); err == nil {
+		t.Fatal("--shared with --project must be an error")
 	}
 	cwd, _ := os.Getwd()
 	if got, err := resolveCLIProject(cliOpts{}); err != nil || got != deriveProject(cwd) {
@@ -99,9 +99,9 @@ func seedCLIStore(t *testing.T) string {
 	must("proj", "decisions.db", "sqlite over postgres, WAL mode", WriteMeta{Category: "decision"})
 	must("proj", "todo.a", "write the cli", WriteMeta{})
 	must("proj", "todo.b", "ship it", WriteMeta{})
-	must(userProject, "preferences.commit_style", "short subjects", WriteMeta{Category: "config"})
-	must(userProject, "host."+hostSlug()+".env.go_bin", "~/.go/bin", WriteMeta{})
-	must(userProject, "host.other_box.env.go_bin", "/opt/go/bin", WriteMeta{})
+	must(sharedProject, "preferences.commit_style", "short subjects", WriteMeta{Category: "config"})
+	must(sharedProject, "host."+hostSlug()+".env.go_bin", "~/.go/bin", WriteMeta{})
+	must(sharedProject, "host.other_box.env.go_bin", "/opt/go/bin", WriteMeta{})
 	return dbPath
 }
 
@@ -119,18 +119,18 @@ func TestCLITreeGetHistory(t *testing.T) {
 	if tree["project_id"] != "proj" || tree["total_memories"].(float64) != 3 {
 		t.Fatalf("tree shape: %v", tree)
 	}
-	user := tree["user"].(map[string]any)
+	user := tree["shared"].(map[string]any)
 	if user["host"] != hostSlug() || user["total_memories"].(float64) != 2 {
-		t.Fatalf("user block must be pruned to this host: %v", user)
+		t.Fatalf("shared block must be pruned to this host: %v", user)
 	}
 	if strings.Contains(out, "other_box") {
 		t.Fatalf("other host leaked into tree:\n%s", out)
 	}
 
-	// Human tree: keypath names, no content, user block header.
+	// Human tree: keypath names, no content, shared block header.
 	code, out = runCLI(t, "tree", "--project", "proj", "--db", db, "--no-color")
 	if code != 0 || !strings.Contains(out, "decisions") || strings.Contains(out, "WAL mode") ||
-		!strings.Contains(out, "user scope") {
+		!strings.Contains(out, "shared scope") {
 		t.Fatalf("human tree:\n%s", out)
 	}
 
@@ -156,10 +156,10 @@ func TestCLITreeGetHistory(t *testing.T) {
 		t.Fatalf("get missing: code=%d err=%q", code, errText)
 	}
 
-	// --user reads the reserved project.
-	code, out = runCLI(t, "get", "preferences", "--user", "--db", db, "--raw")
+	// --shared reads the reserved project.
+	code, out = runCLI(t, "get", "preferences", "--shared", "--db", db, "--raw")
 	if code != 0 || !strings.Contains(out, "short subjects") {
-		t.Fatalf("get --user: %q", out)
+		t.Fatalf("get --shared: %q", out)
 	}
 
 	// history: newest first.
@@ -213,9 +213,9 @@ func TestCLISetEditRmViaDaemon(t *testing.T) {
 	}
 
 	// The daemon's gate message reaches the terminal.
-	code, _, errText := runCLIErr(t, "set", "todo.x", "nope", "--user")
+	code, _, errText := runCLIErr(t, "set", "todo.x", "nope", "--shared")
 	if code != 1 || !strings.Contains(errText, "allowed shapes") {
-		t.Fatalf("set --user todo: code=%d err=%q", code, errText)
+		t.Fatalf("set --shared todo: code=%d err=%q", code, errText)
 	}
 
 	// edit: the editor appends a line; category carries over.
@@ -292,8 +292,8 @@ func TestCLISearchFallsBackToFTS(t *testing.T) {
 	if code != 0 || !strings.Contains(out, "fts only") {
 		t.Fatalf("fts note missing:\n%s", out)
 	}
-	// --user drops other hosts.
-	code, out = runCLI(t, "search", "go_bin", "--user", "--db", db, "--json")
+	// --shared drops other hosts.
+	code, out = runCLI(t, "search", "go_bin", "--shared", "--db", db, "--json")
 	res = decodeCLI(t, out)
 	if code != 0 || res["total_found"].(float64) != 1 {
 		t.Fatalf("user search host filter: %v", res)
@@ -348,7 +348,7 @@ func TestCLIComplete(t *testing.T) {
 		t.Fatalf("keypaths: %q", got)
 	}
 	want := "host." + hostSlug() + ".env.go_bin preferences.commit_style"
-	if got := lines("__complete", "keypaths", "--user", "--db", db); got != want {
+	if got := lines("__complete", "keypaths", "--shared", "--db", db); got != want {
 		t.Fatalf("user keypaths must hide other hosts: %q, want %q", got, want)
 	}
 	if got := lines("__complete", "projects", "--db", db); got != "proj" {
@@ -358,7 +358,7 @@ func TestCLIComplete(t *testing.T) {
 		t.Fatalf("config keys: %q", got)
 	}
 	// Errors print nothing, so Tab shows no noise.
-	if got := lines("__complete", "keypaths", "--user", "--project", "x", "--db", db); got != "" {
+	if got := lines("__complete", "keypaths", "--shared", "--project", "x", "--db", db); got != "" {
 		t.Fatalf("bad flags: %q", got)
 	}
 	if got := lines("__complete", "frobnicate"); got != "" {

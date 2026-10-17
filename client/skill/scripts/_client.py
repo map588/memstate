@@ -336,14 +336,14 @@ def slug_name(name: str) -> str:
     return slug or "default"
 
 
-# USER_PROJECT is the daemon's one reserved project for facts about the
+# SHARED_PROJECT is the daemon's one reserved project for facts about the
 # user and the host. The daemon rejects writes there outside a short
-# allowlist of keypath shapes (see SKILL.md, "User scope").
-USER_PROJECT = "_user"
+# allowlist of keypath shapes (see SKILL.md, "Shared scope").
+SHARED_PROJECT = "_shared"
 
 
 def host_slug() -> str:
-    """This machine's segment under host.<slug> in USER_PROJECT: the first
+    """This machine's segment under host.<slug> in SHARED_PROJECT: the first
     hostname label, slugged. Same rule as the TS proxy and the Go daemon."""
     return slug_name(socket.gethostname().split(".")[0])
 
@@ -353,28 +353,29 @@ def add_scope_args(ap) -> None:
     ap.add_argument("--project", default=None,
                     help="project id (default: the cwd project, derived from the git "
                          "repository or directory name; ids that start with _ are reserved)")
-    ap.add_argument("--scope", choices=("project", "user"), default="project",
-                    help="'user' targets the reserved user scope (facts about "
-                         "the user or this machine, not about this repo)")
+    ap.add_argument("--scope", choices=("project", "shared"), default="project",
+                    help="'shared' targets the reserved shared scope: facts that hold "
+                         "in every repository (preferences, profile, practices, lessons, "
+                         "this host's env and tools), never facts about this repo")
 
 
 def resolve_project(args) -> str:
-    """Project id for a call: the reserved user project for --scope user,
+    """Project id for a call: the reserved shared project for --scope shared,
     else --project, else this repo's default."""
-    if args.scope == "user":
+    if args.scope == "shared":
         if args.project:
-            raise SystemExit("Error: pass --scope user or --project, not both")
-        return USER_PROJECT
+            raise SystemExit("Error: pass --scope shared or --project, not both")
+        return SHARED_PROJECT
     if args.project and is_reserved_id(args.project):
         raise SystemExit(
             f'Error: project ids that start with "_" are reserved ("{args.project}"); '
-            "use --scope user for the user scope")
+            "use --scope shared for the shared scope")
     return args.project or default_project()
 
 
 def is_reserved_id(pid: str) -> bool:
-    """Reserved ids start with "_". The daemon lists _user among the
-    projects, but for scripts it is --scope user, never --project."""
+    """Reserved ids start with "_". The daemon lists _shared among the
+    projects, but for scripts it is --scope shared, never --project."""
     return pid.startswith("_")
 
 
@@ -455,10 +456,10 @@ def check_write_target(args, project: str) -> None:
     default project for writes. Same rule as the TS proxy; the memstate CLI
     is the human escape for a deliberate near-duplicate. Exits 1 with the
     way out on stderr; a refusal creates nothing."""
-    if args.new_project and args.scope == "user":
+    if args.new_project and args.scope == "shared":
         raise SystemExit(
-            "Error: --new-project has no effect with --scope user: the user scope always exists")
-    if args.scope == "user":
+            "Error: --new-project has no effect with --scope shared: the shared scope always exists")
+    if args.scope == "shared":
         return
     explicit = bool(args.project)
     if not explicit:
@@ -474,11 +475,11 @@ def check_write_target(args, project: str) -> None:
                 f"Error: the working directory is {why}, which has no "
                 "default project for writes. Pass --project ID (an id from "
                 "memstate_get.py --list-projects, or a new id with --new-project), "
-                "or --scope user for facts about this machine")
+                "or --scope shared for facts about this machine")
     if explicit and project == home_slug_name():
         raise SystemExit(
             f'Error: "{project}" is the name of your home directory, which names the user, '
-            "not a project; pass another --project, or --scope user for facts about this machine")
+            "not a project; pass another --project, or --scope shared for facts about this machine")
     ids = list_project_ids()
     if project in ids:
         return
@@ -502,7 +503,7 @@ def check_write_target(args, project: str) -> None:
 
 
 def is_other_host(keypath: str) -> bool:
-    """True when a user-scope keypath describes another machine."""
+    """True when a shared-scope keypath describes another machine."""
     seg = keypath.split(".")
     return seg[0] == "host" and len(seg) >= 2 and seg[1] != host_slug()
 

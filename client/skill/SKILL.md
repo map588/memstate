@@ -76,20 +76,21 @@ Every deviation fragments the store into disconnected near-duplicates.
 - **source**: A short provenance string, for example `claude-code
   session 2026_07_04` or `user decision`. Shown in history.
 
-## User scope: facts that are not about this project
+## Shared scope: facts that hold in every repository
 
-Every memory lives in a project by default. Some facts are about the
-user or the machine and hold in every repository: an installed tool, a
-path, the Ollama URL, a working preference, the user's role. These go
-in the reserved project `_user`. Every script reaches it with
-`--scope user` (never with `--project`).
+Every memory lives in a project by default. Some facts hold in every
+repository: an installed tool, a path, the Ollama URL, a working
+preference, the user's role, a way of working that paid off, a trap that
+cost a session. These go in the reserved project `_shared`. Every script
+reaches it with `--scope shared` (never with `--project`).
 
-A fact belongs in the user scope only when ALL three hold:
+A fact belongs in the shared scope only when BOTH hold:
 
-1. It stays true if this repository is deleted. It is not about any code.
-2. It is true in every repository, for this user or for this machine.
-3. It describes the user or the host, not work. Never a decision, todo,
-   task summary, note, or gotcha about code. Those stay in the project.
+1. It stays true if this repository is deleted.
+2. It is true in every repository: it describes the user, this machine,
+   or how the agent works across repositories. Never a decision, todo,
+   task summary, or note about one repository's code. Those stay in the
+   project.
 
 The daemon enforces this line with a keypath allowlist. A write outside
 it returns HTTP 400 and nothing is stored. Allowed shapes:
@@ -98,28 +99,37 @@ it returns HTTP 400 and nothing is stored. Allowed shapes:
 |---|---|---|
 | `preferences.<topic>` | stated global working preferences | `preferences.commit_style` |
 | `profile.<topic>` | who the user is; never credentials | `profile.role` |
+| `practices.<topic>` | a way of working that holds in every repository, with the case where it helped | `practices.go_table_tests` |
+| `lessons.<topic>` | a trap that cost trial and error anywhere: a shell quirk, a tool whose interface changed | `lessons.zsh_word_splitting` |
 | `host.<host_slug>.env.<topic>` | OS, shell, paths, runtimes, ports | `host.mbp.env.go_bin` |
 | `host.<host_slug>.tools.<topic>` | how an installed tool is configured | `host.mbp.tools.ollama_url` |
 
+A practice says what to do and names the case where it saved time. A
+lesson says what went wrong, how to recognise it, and the fix. Both are
+about the agent's work, not about one repository.
+
 `<host_slug>` is the first label of the hostname, slugged like a project
 id (`Matts-MBP.local` → `matts_mbp`). `memstate_get.py` prints it as
-`user.host`. Reads prune other machines' `host.*` subtrees; searches with
-`--scope user` drop them.
+`shared.host`. Reads prune other machines' `host.*` subtrees; searches with
+`--scope shared` drop them.
 
 ```bash
-python3 scripts/memstate_set.py --scope user --keypath preferences.commit_style \
+python3 scripts/memstate_set.py --scope shared --keypath preferences.commit_style \
   --value "short subjects, no trailers" --category config
-python3 scripts/memstate_set.py --scope user --keypath host.matts_mbp.tools.ollama_url \
+python3 scripts/memstate_set.py --scope shared --keypath lessons.zsh_word_splitting \
+  --value "zsh does not word-split unquoted \$var; a script that relies on it fails. Quote, or use \${=var}." --category gotcha
+python3 scripts/memstate_set.py --scope shared --keypath host.matts_mbp.tools.ollama_url \
   --value "http://127.0.0.1:11434, model qwen3-embedding:4b" --category config
-python3 scripts/memstate_get.py --scope user --keypath preferences --include-content
+python3 scripts/memstate_get.py --scope shared --keypath preferences --include-content
 ```
 
-Heading extraction (`memstate_remember.py --scope user` without
-`--keypath`) fits only `## Preferences` and `## Profile`. Host facts need
-an explicit `--keypath`. One bad section rejects the whole call.
+Heading extraction (`memstate_remember.py --scope shared` without
+`--keypath`) fits only `## Preferences`, `## Profile`, `## Practices` and
+`## Lessons`. Host facts need an explicit `--keypath`. One bad section
+rejects the whole call.
 
 Never store secrets, tokens, or credentials in any scope. The
-denied-prompt rule applies to the user scope too.
+denied-prompt rule applies to the shared scope too.
 
 ## Session project (MCP sessions only)
 
@@ -140,17 +150,28 @@ revives. A name that resembles an existing project is refused outright;
 use the existing project, or create the new one with the `memstate` CLI,
 which is the human escape. The home directory has no default project for
 writes, and its name is never accepted as a project: pin a project or use
-the user scope. A system directory (a filesystem root, `C:\WINDOWS\...`, or
+the shared scope. A system directory (a filesystem root, `C:\WINDOWS\...`, or
 `/usr`, `/etc` and the like) is treated the same way; a desktop app that is
 not running in a project starts its MCP servers from one, so a session that
 sees "no default project" in a write error passes `project_name` once, using
-the project the recall hook's `<memstate-scope cwd_project>` names. Ids that start with `_` are reserved; the user scope is
-`--scope user`, never `--project`, and `--list-projects` does not show it.
-`--new-project` is an error where nothing can be created (`--scope user`,
+the project the recall hook's `<memstate-scope cwd_project>` names. Ids that start with `_` are reserved; the shared scope is
+`--scope shared`, never `--project`, and `--list-projects` does not show it.
+`--new-project` is an error where nothing can be created (`--scope shared`,
 or the git repository you are in). Reads are never gated. These scripts
 are one-shot and have no session: pass `--project` instead of
 `project_name`. A pinned MCP session publishes its pin for the recall hook
 as `<db dir>/recall/pins/<pid>`, removed when the proxy exits.
+
+### Loose mode (MCP sessions only)
+
+`strict_scope=false` on any memstate tool call lifts one rule for the rest
+of the proxy process: a write or a pin to a project that does not exist no
+longer needs `new_project=true`. Everything else stays: the home and
+system directory refusals, the near-duplicate refusal, reserved ids, and
+the shared-scope allowlist. Results carry `strict_scope: false` while loose.
+`strict_scope=true` restores the default. Use it when a session works
+across several scratch directories on purpose. The scripts have no
+session and keep `--new-project`.
 
 ## Workflows
 
@@ -331,8 +352,8 @@ Any write to the same project_id revives it with all memories intact.
    user or a permission check denied. Do not save it under any keypath, in
    any category, or in any summary. Do not save it as a warning for a later
    session. No reason overrides this rule.
-8. **Keep user facts out of projects, and work out of the user scope.**
-   A tool path or a global preference goes to `--scope user`; a
+8. **Keep shared facts out of projects, and project work out of the shared scope.**
+   A tool path, a global preference, a cross-repo practice or lesson goes to `--scope shared`; a
    decision, todo, or summary never does. The daemon rejects the latter.
 
 ## Connecting to the daemon
