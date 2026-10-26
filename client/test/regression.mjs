@@ -169,6 +169,79 @@ async function main() {
       !r.isError && r.data.action === "unchanged" && r.data.stored.version === 2,
       JSON.stringify(r));
 
+    // ---- host tag ---------------------------------------------------------
+    // host=true adds the topic host_<slug> to every memory the call writes,
+    // once, next to the caller's topics. The slug is the one INSTRUCTIONS
+    // prints, so the test never re-derives the hostname rule. The block
+    // writes to its own project and deletes it, so later checks that count
+    // PROJECT's memories see no trace of it.
+    const hostTopic = `host_${
+      /host slug is "([a-z0-9_]+)"/.exec(client.getInstructions() ?? "")?.[1] ?? ""
+    }`;
+    check("host tag: INSTRUCTIONS names the host slug",
+      hostTopic !== "host_", "no host slug in INSTRUCTIONS");
+    const HOST_PROJECT = "host_tag_test";
+    r = await call(client, "memstate_set", {
+      project_id: HOST_PROJECT,
+      new_project: true,
+      keypath: "config.host_only",
+      value: "a fact true on this machine only",
+      topics: ["build"],
+      host: true,
+    });
+    check("set: host=true adds the host topic next to the caller's topics",
+      !r.isError && JSON.stringify(r.data.stored.topics) === JSON.stringify(["build", hostTopic]),
+      JSON.stringify(r));
+
+    r = await call(client, "memstate_set", {
+      project_id: HOST_PROJECT,
+      keypath: "config.host_only",
+      value: "a fact true on this machine only",
+      topics: ["build", hostTopic],
+      host: true,
+    });
+    check("set: host=true never adds the host topic twice",
+      !r.isError && r.data.action === "unchanged",
+      JSON.stringify(r));
+
+    r = await call(client, "memstate_set", {
+      project_id: HOST_PROJECT,
+      keypath: "config.host_only",
+      value: "a fact true on this machine only",
+      host: "radxa",
+    });
+    check("set: a non-boolean host is an error",
+      r.isError && r.message.includes("host must be true or false"),
+      JSON.stringify(r));
+
+    r = await call(client, "memstate_remember", {
+      project_id: HOST_PROJECT,
+      content: "## Build\nneeds the arm toolchain\n\n## Ports\n8080 is taken\n",
+      host: true,
+    });
+    check("remember: host=true tags every section",
+      !r.isError && r.data.items.length === 2 &&
+        r.data.items.every((i) => JSON.stringify(i.stored.topics) === JSON.stringify([hostTopic])),
+      JSON.stringify(r));
+
+    r = await call(client, "memstate_set", {
+      project_id: HOST_PROJECT,
+      keypath: "config.everywhere",
+      value: "the toolchain fact that holds on every machine",
+    });
+    r = await call(client, "memstate_search", {
+      project_id: HOST_PROJECT,
+      query: "toolchain",
+      mode: "fts",
+      topics: [hostTopic],
+    });
+    check("search: topics=[host topic] finds only tagged memories",
+      !r.isError && r.data.results.length === 1 && r.data.results[0].keypath === "build",
+      JSON.stringify(r));
+
+    r = await call(client, "memstate_delete_project", { project_id: HOST_PROJECT });
+    check("host tag: test project deleted", !r.isError, JSON.stringify(r));
+
     r = await call(client, "memstate_search", {
       project_id: PROJECT,
       query: "second value",

@@ -395,10 +395,29 @@ def list_projects_visible() -> dict:
 
 
 def add_write_args(ap) -> None:
-    """Add --new-project, which the two write scripts accept."""
+    """Add --new-project and --host, which the two write scripts accept."""
     ap.add_argument("--new-project", action="store_true",
                     help="allow this write to create a project that does not exist "
                          "yet (the git repository you are in never needs it)")
+    ap.add_argument("--host", action="store_true",
+                    help="tag every memory this call writes with the topic "
+                         "host_<host_slug>: a project fact that holds only on "
+                         "this machine")
+
+
+def host_topic() -> str:
+    """The topic that marks a project fact as true only on this machine.
+    Same rule as the TS proxy (HOST_TOPIC)."""
+    return "host_" + host_slug()
+
+
+def host_topics(args, topics):
+    """The topics a write sends: the caller's, plus host_topic() once when
+    --host was given. Returns None when there are none."""
+    topics = list(topics) if topics else []
+    if args.host and host_topic() not in topics:
+        topics.append(host_topic())
+    return topics or None
 
 
 # The near-duplicate rule folds the spellings that split one project into

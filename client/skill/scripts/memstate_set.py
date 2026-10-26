@@ -8,7 +8,7 @@ there; see SKILL.md, "Shared scope".
 import argparse
 import sys
 
-from _client import add_scope_args, add_write_args, check_write_target, post, resolve_project
+from _client import add_scope_args, add_write_args, check_write_target, host_topics, post, resolve_project
 
 
 def main() -> int:
@@ -35,8 +35,9 @@ def main() -> int:
         body["source"] = args.source
     if args.category:
         body["category"] = args.category
-    if args.topics:
-        body["topics"] = args.topics.split(",")
+    topics = host_topics(args, args.topics.split(",") if args.topics else None)
+    if topics:
+        body["topics"] = topics
     return post("/memories/store", body)
 
 

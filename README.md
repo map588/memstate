@@ -272,7 +272,7 @@ Pass it only to reach a different project. Keypaths use dot notation.
 
 | Tool | Purpose |
 |---|---|
-| `memstate_set` | Write a short value at a keypath (`config.port = "8080"`). |
+| `memstate_set` | Write a short value at a keypath (`config.port = "8080"`). `host=true` adds the topic `host_<host_slug>` for a fact that holds only on this machine. |
 | `memstate_remember` | Write a markdown summary. An explicit keypath stores all content there. Without a keypath, each `## heading` becomes its own versioned memory, nested by `###` depth. |
 | `memstate_get` | Read a keypath, browse a subtree, or return the full project tree. |
 | `memstate_search` | Search current memories. `mode="hybrid"` (default) fuses an any-word FTS5 match with the semantic ranking. `mode="fts"` uses SQLite FTS5 and requires every word. `mode="semantic"` embeds the query with Ollama and ranks by cosine similarity against the embedding of each keypath's current content. All modes accept `category` and `topics` filters. |

@@ -13,6 +13,9 @@ import sys
 import tempfile
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _client  # noqa: E402
+
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 # Project ids are snake_case; the scripts refuse any other shape.
 PROJECT_ID = f"skill_test_{int(time.time())}"
@@ -100,6 +103,22 @@ def main():
         ["--project", PROJECT_ID, "--keypath", "auth.method", "--value", "JWT with httpOnly cookies", "--category", "decision"],
         expect_key="action", expect_value="created"
     )
+
+    # 3b. memstate_set --host — tags the write with host_<host_slug>
+    code, out, err = run_script(
+        "memstate_set.py",
+        "--project", PROJECT_ID, "--host", "--keypath", "build.toolchain",
+        "--value", "arm cross toolchain", "--topics", "build",
+    )
+    host_topic = "host_" + _client.host_slug()
+    try:
+        got = json.loads(out)["stored"].get("topics")
+    except Exception:
+        got = None
+    passed = code == 0 and got == ["build", host_topic]
+    print(f"{PASS if passed else FAIL} memstate_set: --host adds the host topic"
+          + ("" if passed else f" (got {got!r}; {err.strip()})"))
+    results.append(("memstate_set: --host adds the host topic", passed))
 
     # 4. memstate_get — list all projects
     test(

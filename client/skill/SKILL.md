@@ -73,6 +73,11 @@ Every deviation fragments the store into disconnected near-duplicates.
   Filterable in search.
 - **topics**: Subject tags, lowercase snake_case (`auth,embeddings`).
   Search matches any listed topic.
+- **host tag**: A project fact that holds only on this machine (a build
+  path, a toolchain, a port) keeps its normal keypath and gets the topic
+  `host_<host_slug>`. Pass `host=true` (scripts: `--host`) on a write and
+  the proxy adds the topic; filter with `--topics host_<host_slug>` in
+  search. Facts true on every machine take no tag.
 - **source**: A short provenance string, for example `claude-code
   session 2026_07_04` or `user decision`. Shown in history.
 
@@ -236,7 +241,7 @@ python3 scripts/memstate_delete_project.py --project my_app
 ```bash
 python3 scripts/memstate_set.py \
   --keypath KEYPATH --value VALUE \
-  [--project ID] [--new-project] [--source TEXT] [--category WORD] [--topics TAG1,TAG2]
+  [--project ID] [--new-project] [--host] [--source TEXT] [--category WORD] [--topics TAG1,TAG2]
 ```
 
 **Response:** `action` (`created` | `superseded` | `unchanged`),
@@ -250,7 +255,7 @@ written.
 ```bash
 python3 scripts/memstate_remember.py \
   --content "MARKDOWN" \
-  [--project ID] [--new-project]
+  [--project ID] [--new-project] [--host]
   [--keypath KEYPATH]        # store everything as ONE memory here
   [--root PREFIX]            # heading-split mode: nest sections under this prefix (default: none)
   [--source TEXT] [--category WORD] [--topics TAG1,TAG2]

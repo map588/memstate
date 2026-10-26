@@ -300,6 +300,34 @@ const STRICT_SCOPE_PROP = {
 
 let strictScope = true;
 
+// HOST_TOPIC tags a project memory that holds only on this machine (a build
+// path, a toolchain, a port). It is a plain topic, so memstate_search
+// filters on it with topics=[HOST_TOPIC], and the daemon knows nothing of
+// it. host=true on a write appends it; hostTopics is the one place that does.
+const HOST_TOPIC = `host_${HOST_SLUG}`;
+
+const HOST_PROP = {
+  type: "boolean",
+  default: false,
+  description:
+    `true adds the topic "${HOST_TOPIC}" to every memory this call writes: ` +
+    "for a project fact that holds only on this machine (a build path, a " +
+    "toolchain, a port), not elsewhere. Filter with memstate_search " +
+    `topics=["${HOST_TOPIC}"].`,
+};
+
+// hostTopics returns the topics a write sends: the caller's, plus
+// HOST_TOPIC once when host=true. Anything but a boolean is an error, so a
+// host name passed by mistake is never dropped in silence.
+function hostTopics(a: ToolArgs): string[] | undefined {
+  if (a.host !== undefined && typeof a.host !== "boolean") {
+    throw new Error(`host must be true or false; the host tag is always "${HOST_TOPIC}"`);
+  }
+  const topics = Array.isArray(a.topics) ? (a.topics as string[]) : undefined;
+  if (a.host !== true) return topics;
+  return topics?.includes(HOST_TOPIC) ? topics : [...(topics ?? []), HOST_TOPIC];
+}
+
 // normalizeId folds the spellings that produce near-duplicate projects:
 // underscores, digits and a trailing dev/test/tmp/old/new.
 function normalizeId(id: string): string {
@@ -591,6 +619,7 @@ function stripProxyFields(a: ToolArgs): ToolArgs {
     project_name: _name,
     new_project: _new,
     strict_scope: _strict,
+    host: _host,
     ...rest
   } = a;
   return rest;
@@ -1039,6 +1068,7 @@ const TOOLS: ToolDef[] = [
         project_name: PROJECT_NAME_PROP,
         new_project: NEW_PROJECT_PROP,
         strict_scope: STRICT_SCOPE_PROP,
+        host: HOST_PROP,
         keypath: {
           type: "string",
           description:
@@ -1081,7 +1111,7 @@ const TOOLS: ToolDef[] = [
         content: a.value,
         source: a.source,
         category: a.category,
-        topics: a.topics,
+        topics: hostTopics(a),
       }),
   },
   {
@@ -1110,6 +1140,7 @@ const TOOLS: ToolDef[] = [
         project_name: PROJECT_NAME_PROP,
         new_project: NEW_PROJECT_PROP,
         strict_scope: STRICT_SCOPE_PROP,
+        host: HOST_PROP,
         keypath: {
           type: "string",
           description:
@@ -1151,6 +1182,7 @@ const TOOLS: ToolDef[] = [
     handler: async (a) =>
       postJSON("/memories/remember", {
         ...stripProxyFields(a),
+        topics: hostTopics(a),
         project_id: await resolveProject(a, true),
       }),
   },
@@ -1494,6 +1526,14 @@ Shared scope — facts that hold in every repository:
   "## Practices" and "## Lessons".
 - Never store secrets, tokens, or credentials in any scope. The denied-prompt
   rule applies to the shared scope too.
+
+Host tag — a project fact that holds only on this machine:
+- Pass host=true on memstate_set or memstate_remember when the fact is
+  about this repository but true only here (a build path, a toolchain, a
+  port). The proxy adds the topic "${HOST_TOPIC}" to every memory the
+  call writes; the keypath stays the normal one. Filter with
+  memstate_search topics=["${HOST_TOPIC}"]. Facts true on every machine
+  take no tag.
 
 Session project — when the prompt is not about this directory:
 - The cwd project is the default and almost always right. On the first
