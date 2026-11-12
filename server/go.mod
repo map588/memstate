@@ -5,7 +5,7 @@ go 1.27.1
 // The release binaries are built with this Go version (setup-go reads it in
 // CI). Keep it at the newest patch release: the standard library gets
 // security fixes there.
-toolchain go1.27.3
+toolchain go1.27.4
 
 require (
 	github.com/mattn/go-isatty v0.0.24
