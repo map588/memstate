@@ -183,6 +183,10 @@ test: build  ## Run Go tests + TS end-to-end smoke + MCP regression
 # --no-bin-links keeps symlinks out of the bundle: tar.exe on Windows
 # cannot make a symlink without admin rights or Developer Mode, and
 # install.ps1 then fails. The proxy does not use node_modules/.bin.
+#
+# SHA256SUMS lists the SHA-256 of every other file in dist/. `memstated
+# upgrade` and both install scripts check their downloads against it, so
+# it must be the last file that the target writes.
 release: client/dist/index.js  ## Build memstated for linux/{amd64,arm64}, darwin/{amd64,arm64}, windows/amd64 and the proxy bundle under dist/
 	$(call RM_RF,$(DIST))
 	$(call MKDIR_P,$(DIST))
@@ -205,6 +209,7 @@ release: client/dist/index.js  ## Build memstated for linux/{amd64,arm64}, darwi
 	$(call CP_FILE,scripts/configure-claude-hook.py,$(BUNDLE_DIR)/configure-claude-hook.py)
 	cd $(call P,$(BUNDLE_DIR)/client) && npm ci --omit=dev --ignore-scripts --no-bin-links --no-audit --no-fund
 	$(call TAR_CZ,$(DIST)/memstate-mcp.tar.gz,$(BUNDLE_DIR))
+	node scripts/sha256sums.mjs $(DIST)
 	@$(BLANK)
 	@$(call SAY,Release binaries for v$(VERSION) in $(DIST)/:)
 	@$(LS) $(DIST)

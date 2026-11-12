@@ -87,8 +87,10 @@ func newRouter(store *Store, shutdown func(), embedder *Embedder) http.Handler {
 	})
 
 	// POST /admin/shutdown — local-only kill switch for a manually-started
-	// shared daemon. Loopback binding is the access control; anyone who can
-	// already reach 127.0.0.1 on this user's system can also `pkill`.
+	// shared daemon. Loopback binding is the access control for programs:
+	// one that can reach 127.0.0.1 on this user's system can also `pkill`.
+	// requestGuard keeps web pages out; the request has no body, so the
+	// Origin and Host rules are the ones that apply.
 	mux.HandleFunc("POST /admin/shutdown", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusAccepted, map[string]string{"status": "shutting down"})
 		// Flush the response before cancelling so the caller gets a clean reply.
@@ -114,7 +116,7 @@ func newRouter(store *Store, shutdown func(), embedder *Embedder) http.Handler {
 	mux.HandleFunc("GET /api/v1/projects", handleProjects(store))
 	mux.HandleFunc("GET /api/v1/memories/{id}", handleMemoryByID(store))
 
-	return mux
+	return requestGuard(mux)
 }
 
 // ---------- helpers ----------
@@ -251,7 +253,7 @@ func handleStore(store *Store, embedder *Embedder) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var in storeReq
 		if err := decodeJSON(r, &in); err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
+			writeErr(w, decodeStatus(err), err.Error())
 			return
 		}
 		in.ProjectID = legacyProject(in.ProjectID)
@@ -310,7 +312,7 @@ func handleRemember(store *Store, embedder *Embedder) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var in rememberReq
 		if err := decodeJSON(r, &in); err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
+			writeErr(w, decodeStatus(err), err.Error())
 			return
 		}
 		in.ProjectID = legacyProject(in.ProjectID)
@@ -357,9 +359,10 @@ func handleRemember(store *Store, embedder *Embedder) http.HandlerFunc {
 }
 
 // writeStatus maps a store write error to an HTTP status. A refused
-// reserved-project write is the caller's mistake, not a server fault.
+// reserved-project write or an unsafe name is the caller's mistake, not a
+// server fault.
 func writeStatus(err error) int {
-	if errors.Is(err, ErrReservedWrite) {
+	if errors.Is(err, ErrReservedWrite) || errors.Is(err, ErrInvalidName) {
 		return http.StatusBadRequest
 	}
 	return http.StatusInternalServerError
@@ -394,7 +397,7 @@ func handleDelete(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var in deleteReq
 		if err := decodeJSON(r, &in); err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
+			writeErr(w, decodeStatus(err), err.Error())
 			return
 		}
 		in.ProjectID = legacyProject(in.ProjectID)
@@ -438,7 +441,7 @@ func handleDeleteProject(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var in deleteProjectReq
 		if err := decodeJSON(r, &in); err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
+			writeErr(w, decodeStatus(err), err.Error())
 			return
 		}
 		in.ProjectID = legacyProject(in.ProjectID)
@@ -549,7 +552,7 @@ func handleSearch(store *Store, embedder *Embedder) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var in searchReq
 		if err := decodeJSON(r, &in); err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
+			writeErr(w, decodeStatus(err), err.Error())
 			return
 		}
 		in.ProjectID = legacyProject(in.ProjectID)
@@ -688,7 +691,7 @@ func handleHistory(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var in historyReq
 		if err := decodeJSON(r, &in); err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
+			writeErr(w, decodeStatus(err), err.Error())
 			return
 		}
 		in.ProjectID = legacyProject(in.ProjectID)
@@ -741,7 +744,7 @@ func handleKeypaths(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var in keypathsReq
 		if err := decodeJSON(r, &in); err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
+			writeErr(w, decodeStatus(err), err.Error())
 			return
 		}
 		in.ProjectID = legacyProject(in.ProjectID)

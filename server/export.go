@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -108,7 +109,16 @@ type MergeStats struct {
 	Deleted      int // source latest was a newer tombstone — local keypath tombstoned
 	Unchanged    int // source newer but identical state — nothing written
 	SkippedOlder int // local latest is at least as new — local wins
+	// Renamed lists the keypaths that the name rule refuses and that Merge
+	// stored under a converted name.
+	Renamed []RenamedKeypath
+	// Relabeled lists the keypaths that have a category or a topic that
+	// the name rule refuses and that Merge converted.
+	Relabeled []string
 }
+
+// RenamedKeypath is one keypath of an export file that Merge converted.
+type RenamedKeypath struct{ From, To string }
 
 // Merge folds an export file into the local store, project by project.
 // overrideProjectID retargets the import and is only valid for a
@@ -219,11 +229,28 @@ func (s *Store) mergeProject(target string, memories []ExportMemory, force bool)
 // version ascending) against the local store, inside the caller's tx.
 func mergeKeypath(tx dbExec, target string, chain []ExportMemory, st *MergeStats, force bool) error {
 	kp := chain[0].Keypath
+	live := !chain[len(chain)-1].Tombstone
+	if live && safeLabels(chain) {
+		st.Relabeled = append(st.Relabeled, kp)
+	}
 	srcLatest := chain[len(chain)-1]
-	// The fresh-keypath path below inserts rows directly, so the reserved
-	// gate runs here too. A chain that ends in a tombstone is history, not
-	// a live fact, and passes.
-	if !srcLatest.Tombstone {
+	// The fresh-keypath path below inserts rows directly, so the name gate
+	// and the reserved gate run here too. A chain that ends in a tombstone
+	// is history, not a live fact, and passes: a delete of an old name must
+	// reach the other machines.
+	//
+	// A live keypath that the name rule refuses gets a converted name, and
+	// safeLabels above did the same for its categories and topics, so one
+	// old name in a file does not stop the import of a project.
+	if live {
+		if safe := safeKeypath(kp); safe != kp {
+			st.Renamed = append(st.Renamed, RenamedKeypath{From: kp, To: safe})
+			kp = safe
+		}
+		meta := WriteMeta{Source: srcLatest.Source, Category: srcLatest.Category, Topics: srcLatest.Topics}
+		if err := checkWriteNames(target, kp, meta); err != nil {
+			return err
+		}
 		if err := checkReservedWrite(target, kp); err != nil {
 			return err
 		}
@@ -261,7 +288,7 @@ func mergeKeypath(tx dbExec, target string, chain []ExportMemory, st *MergeStats
 			r, err := tx.Exec(
 				`INSERT INTO memories(project_id, keypath, content, source, category, topics, version, parent_id, tombstone, created_at)
 				 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				target, m.Keypath, m.Content, srcArg, catArg, topicsArg,
+				target, kp, m.Content, srcArg, catArg, topicsArg,
 				m.Version, parentArg, tombVal, m.CreatedAt,
 			)
 			if err != nil {
@@ -320,6 +347,29 @@ func mergeKeypath(tx dbExec, target string, chain []ExportMemory, st *MergeStats
 	}
 	st.Updated++
 	return nil
+}
+
+// safeLabels converts each category and topic in chain that the name rule
+// refuses, with safeName. It reports whether it changed one. A changed
+// topic list is a new slice, so the data of the caller stays as it was.
+func safeLabels(chain []ExportMemory) bool {
+	changed := false
+	for i := range chain {
+		m := &chain[i]
+		if m.Category != "" && !isName(m.Category) {
+			m.Category = safeName(m.Category)
+			changed = true
+		}
+		if slices.ContainsFunc(m.Topics, func(t string) bool { return !isName(t) }) {
+			topics := make([]string, len(m.Topics))
+			for j, t := range m.Topics {
+				topics[j] = safeName(t)
+			}
+			m.Topics = topics
+			changed = true
+		}
+	}
+	return changed
 }
 
 // safeFilename keeps a project id usable as a filename component. Ids are

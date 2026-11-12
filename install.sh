@@ -9,6 +9,9 @@
 # Requirements: curl, tar and Node 18 or later. The Claude Code skill also
 # needs Python 3.
 #
+# The script checks each download against the SHA256SUMS asset of the same
+# release before it runs or unpacks the download.
+#
 # Environment:
 #   MEMSTATE_VERSION        release tag to install, for example v0.7.8 (default: latest)
 #   MEMSTATE_INSTALL_DIR    directory for the commands (default: ~/.local/bin)
@@ -30,6 +33,11 @@ set -euo pipefail
 
 REPO="map588/memstate"
 BUNDLE="memstate-mcp.tar.gz"
+# The release asset that lists the SHA-256 of every other asset.
+SUMS="SHA256SUMS"
+# The last release that has no SHA256SUMS. A release after it must have the
+# file, or the script stops.
+LAST_WITHOUT_SUMS="0.9.1"
 VERSION="${MEMSTATE_VERSION:-latest}"
 INSTALL_DIR="${MEMSTATE_INSTALL_DIR:-$HOME/.local/bin}"
 ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/memstate"
@@ -70,6 +78,34 @@ ask() {
 fetch() {
   log "downloading $1"
   curl -fsSL --retry 3 -o "$2" "$1"
+}
+
+# sha256 FILE prints the SHA-256 of FILE as hex. Node is a requirement of
+# this script, so no other hash program is necessary.
+sha256() {
+  node -e 'const c = require("crypto"), f = require("fs");
+process.stdout.write(c.createHash("sha256").update(f.readFileSync(process.argv[1])).digest("hex"));' "$1" </dev/null
+}
+
+# verify FILE NAME LIST stops the script when the SHA-256 of FILE is not the
+# one that LIST gives for NAME. LIST has "<hex>  <name>" lines.
+verify() {
+  local want got
+  want="$(awk -v n="$2" '$2 == n || $2 == "*" n { print tolower($1); exit }' "$3")"
+  [ -n "$want" ] || die "$SUMS has no entry for $2"
+  got="$(sha256 "$1")" || die "cannot compute the SHA-256 of $2"
+  [ "$got" = "$want" ] ||
+    die "checksum mismatch for $2 (got $got, want $want). The download is damaged or was replaced."
+}
+
+# released_without_sums TAG is true when TAG is a release at or before
+# LAST_WITHOUT_SUMS. Every other value is false, for example the text that
+# stands for MEMSTATE_DOWNLOAD_URL.
+released_without_sums() {
+  node -e 'const parse = (s) => (/^v?(\d+)\.(\d+)\.(\d+)/.exec(s) || []).slice(1).map(Number);
+const [tag, last] = process.argv.slice(1).map(parse);
+if (tag.length !== 3) process.exit(1);
+for (let i = 0; i < 3; i++) if (tag[i] !== last[i]) process.exit(tag[i] < last[i] ? 0 : 1);' "$1" "$LAST_WITHOUT_SUMS" </dev/null
 }
 
 install_skill() {
@@ -158,6 +194,17 @@ main() {
   fetch "$base/$asset" "$tmp/memstated" || die "download failed: $base/$asset"
   fetch "$base/$BUNDLE" "$tmp/$BUNDLE" ||
     die "download failed: $base/$BUNDLE (releases before v0.7.8 do not have it)"
+  # Check both downloads before the script runs or unpacks them. The list
+  # comes from the same release: it finds a damaged or replaced download.
+  if fetch "$base/$SUMS" "$tmp/$SUMS"; then
+    verify "$tmp/memstated" "$asset" "$tmp/$SUMS"
+    verify "$tmp/$BUNDLE" "$BUNDLE" "$tmp/$SUMS"
+    log "checksums match $SUMS"
+  elif released_without_sums "$tag"; then
+    log "warning: release $tag has no $SUMS. The downloads are not verified."
+  else
+    die "download failed: $base/$SUMS. A release after v$LAST_WITHOUT_SUMS has this file. Without it the downloads cannot be verified."
+  fi
   chmod 0755 "$tmp/memstated"
   "$tmp/memstated" --help </dev/null >/dev/null 2>&1 || die "the downloaded memstated does not run"
   mkdir "$tmp/bundle"

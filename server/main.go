@@ -284,6 +284,7 @@ func main() {
 	if *ownerPIDFlag == 0 {
 		daemonIdleTimeout = idleTimeout
 	}
+	daemonBindHost = bindHostName(resolved)
 	handler := newRouter(store, shutdownFn, embedder)
 	if idleTimeout > 0 && *ownerPIDFlag == 0 {
 		var lastActivity atomic.Int64
@@ -292,9 +293,16 @@ func main() {
 		go watchIdle(ctx, &lastActivity, idleTimeout, shutdownFn)
 	}
 
+	// ReadTimeout bounds a slow request body and IdleTimeout a silent
+	// keep-alive connection, so neither holds a connection open without
+	// end. There is no WriteTimeout: a search waits for the embedding
+	// server for up to the embed timeout, which the handler bounds itself.
 	srv := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    64 << 10,
 	}
 
 	go func() {
@@ -686,6 +694,12 @@ func cmdImport(args []string) int {
 	for _, st := range stats {
 		fmt.Printf("%s: %d restored, %d updated, %d deleted, %d unchanged, %d kept (local newer)\n",
 			st.ProjectID, st.Restored, st.Updated, st.Deleted, st.Unchanged, st.SkippedOlder)
+		for _, r := range st.Renamed {
+			fmt.Printf("  renamed %q to %q (unsafe characters in the keypath)\n", r.From, r.To)
+		}
+		for _, kp := range st.Relabeled {
+			fmt.Printf("  converted the unsafe characters in a category or topic of %q\n", kp)
+		}
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "memstated import: %v\n", err)

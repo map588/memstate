@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // `memstated recall` is the UserPromptSubmit hook for Claude Code. It reads
@@ -157,6 +158,11 @@ const versionMarker = "#version"
 // and the hook prints nothing else, so this notice is the only sign. The
 // fix is a daemon restart on the installed binary.
 func versionSkewBlock(addr string, daemon *healthResponse) string {
+	// The address comes from the environment or the addr file, and the
+	// version and build from whatever answers there.
+	clip := func(s string) string { return cutRunes(safeInline(s), 64) }
+	addr = clip(addr)
+	daemon = &healthResponse{Version: clip(daemon.Version), Build: clip(daemon.Build)}
 	describe := func(version, build string) string {
 		if build == "" {
 			return "version " + version
@@ -264,6 +270,10 @@ func scopeBlock(project, cwd string, exists bool, cands []projectCandidate) stri
 	root, inRepo := repoRoot(cwd)
 	home, err := os.UserHomeDir()
 	isHome := !inRepo && err == nil && filepath.Clean(cwd) == filepath.Clean(home)
+	// Directory names and the project ids of other writers go into the
+	// block as names on one line.
+	project = safeInline(project)
+	rootName, cwdName := safeInline(filepath.Base(root)), safeInline(filepath.Base(cwd))
 	// No write can land in the home directory's project, so whether it
 	// exists is noise there.
 	if isHome {
@@ -272,7 +282,7 @@ func scopeBlock(project, cwd string, exists bool, cands []projectCandidate) stri
 		fmt.Fprintf(&b, "<memstate-scope cwd_project=%q exists=\"%t\">\n", project, exists)
 	}
 	if inRepo {
-		fmt.Fprintf(&b, "The working directory is the git repository %s.\n", filepath.Base(root))
+		fmt.Fprintf(&b, "The working directory is the git repository %s.\n", rootName)
 	} else if isHome {
 		// The home directory names the user, not a project. The proxy
 		// refuses writes to its default there; say so before the first write.
@@ -280,7 +290,7 @@ func scopeBlock(project, cwd string, exists bool, cands []projectCandidate) stri
 			"There is no default project for writes here: pin one with project_name, " +
 			"or use scope=\"shared\" for facts that hold in every repository.\n")
 	} else {
-		fmt.Fprintf(&b, "The working directory is not a git repository (%s).", filepath.Base(cwd))
+		fmt.Fprintf(&b, "The working directory is not a git repository (%s).", cwdName)
 		if !exists {
 			fmt.Fprintf(&b, " Project %q does not exist yet; a write creates it only with new_project=true.", project)
 		}
@@ -291,7 +301,7 @@ func scopeBlock(project, cwd string, exists bool, cands []projectCandidate) stri
 	} else {
 		parts := make([]string, len(cands))
 		for i, c := range cands {
-			s := fmt.Sprintf("%s (%d semantic hit", c.ProjectID, c.Hits)
+			s := fmt.Sprintf("%s (%d semantic hit", safeInline(c.ProjectID), c.Hits)
 			if c.Hits != 1 {
 				s += "s"
 			}
@@ -485,18 +495,18 @@ func renderRecall(project string, hits, userHits []recallHit, seen map[string]bo
 	if len(user)+len(proj) == 0 {
 		return "", nil
 	}
-	var b strings.Builder
+	// The hits are stored text: names stay on their line and "<" is escaped,
+	// so a note cannot end this block or start another one.
+	var notes strings.Builder
 	var shown []string
-	fmt.Fprintf(&b, "<memstate-recall project=%q>\n", project)
-	b.WriteString("Memories related to this prompt. Call memstate_get(keypath) for full content.\n\n")
 	write := func(h recallHit, marker, seenKey string) {
-		fmt.Fprintf(&b, "### %s%s", h.Keypath, marker)
+		fmt.Fprintf(&notes, "### %s%s", safeInline(h.Keypath), marker)
 		if h.Category != "" {
-			fmt.Fprintf(&b, " [%s]", h.Category)
+			fmt.Fprintf(&notes, " [%s]", safeInline(h.Category))
 		}
-		b.WriteString("\n")
-		b.WriteString(cutRunes(strings.TrimSpace(h.Content), maxChars))
-		b.WriteString("\n\n")
+		notes.WriteString("\n")
+		notes.WriteString(escapeMarkup(cutRunes(strings.TrimSpace(h.Content), maxChars)))
+		notes.WriteString("\n\n")
 		shown = append(shown, seenKey)
 	}
 	for _, h := range proj {
@@ -505,8 +515,40 @@ func renderRecall(project string, hits, userHits []recallHit, seen map[string]bo
 	for _, h := range user {
 		write(h, " [shared]", sharedSeenPrefix+h.Keypath)
 	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "<memstate-recall project=%q>\n", safeInline(project))
+	b.WriteString("Memories related to this prompt. Call memstate_get(keypath) for full content.\n")
+	if strings.Contains(notes.String(), "&lt;") {
+		b.WriteString("In the notes, a less-than sign is written as &lt;.\n")
+	}
+	b.WriteString("\n")
+	b.WriteString(notes.String())
 	b.WriteString("</memstate-recall>\n")
 	return b.String(), shown
+}
+
+// The hook output goes into the context of a model, in blocks with a closing
+// tag. Stored text, names and the strings of /health come from every writer
+// of the store and from whatever answers on the daemon address. The two
+// functions below keep that text inside its block.
+
+// escapeMarkup writes "<" as "&lt;", so text cannot close the block that
+// holds it or open a block of its own. ">" stays as it is: without "<" it
+// starts no tag, and arrows such as "->" stay readable.
+func escapeMarkup(s string) string {
+	return strings.ReplaceAll(s, "<", "&lt;")
+}
+
+// safeInline makes a name safe to print inside one line: escapeMarkup, and
+// every control character or line separator becomes a space.
+func safeInline(s string) string {
+	return escapeMarkup(strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || r == lineSeparator || r == paragraphSeparator {
+			return ' '
+		}
+		return r
+	}, s))
 }
 
 // cutRunes shortens s to max runes and marks the cut.

@@ -72,6 +72,12 @@ $env:MEMSTATE_INSTALL_SKILL = '1'; irm https://raw.githubusercontent.com/map588/
 To update, run the script again. It replaces the daemon and the proxy
 together. `memstated upgrade` replaces only the daemon.
 
+Each release has a `SHA256SUMS` file. The install scripts and
+`memstated upgrade` check every download against it before they run or
+unpack the download, and stop when a checksum is different. The file
+comes from the same release, so the check finds a damaged or replaced
+download. It does not replace trust in the release itself.
+
 To uninstall on macOS or Linux:
 
 ```bash
@@ -455,7 +461,7 @@ setting that changed. `MEMSTATE_CONFIG` names another file, and
 | Embed model | `nomic-embed-text` (override with `MEMSTATE_EMBED_MODEL` or `--embed-model`) |
 | Embed timeout | `60s` per embedding call (override with `MEMSTATE_EMBED_TIMEOUT` or `--embed-timeout`). Must cover a cold model load: a 4B model needs about 20s on first use. |
 | Semantic threshold | `0.5` (override with `MEMSTATE_SEMANTIC_THRESHOLD` or per request) |
-| Network egress | The daemon binds `127.0.0.1` only. Embedding calls, when enabled, go to the configured embedding URL, which is usually also loopback. |
+| Network | The daemon binds `127.0.0.1` unless `--addr` or `MEMSTATE_ADDR` names another address; see [Who can reach the daemon](#who-can-reach-the-daemon). Embedding calls, when enabled, go to the configured embedding URL, which is usually also loopback. |
 
 For a per-project database, set `MEMSTATE_DB` in the MCP config's
 `env:` block:
@@ -514,6 +520,42 @@ SQLite in WAL mode with a small connection pool. Each write takes the
 write lock when its transaction starts, so other writers wait in a
 queue and do not fail. Reads run on the other connections during a
 write.
+
+## Who can reach the daemon
+
+The daemon has no login. Every program that can connect to its address
+can read, write and stop it. On the default address, `127.0.0.1`, that
+is every program on the machine. If you start it on a network address
+with `--addr`, that is every machine that can reach the address, so use
+only an address on a private network such as a VPN.
+
+A web browser on the same machine can also connect, and a web page can
+make the browser send requests. The daemon refuses the requests that
+only a browser sends:
+
+- A request with an `Origin` header, or with a `Sec-Fetch-Site` header
+  other than `none`, gets `403`. The clients of the daemon do not send
+  these headers.
+- A request whose `Host` header is a DNS name with a dot gets `403`,
+  unless the name is the one in `--addr`. An IP address, `localhost` and
+  a name without a dot are accepted. This stops a page that points its
+  own DNS name at the daemon (DNS rebinding).
+- A request with a body must have `Content-Type: application/json`, or
+  it gets `415`. A page cannot send that type to another site without a
+  permission request, which the daemon does not answer.
+
+Two limits apply to every client:
+
+- A request body larger than 4 MiB gets `413`.
+- A write gets `400` when a name is not safe to print later. A project
+  id, each segment of a keypath, a category and a topic contain only
+  letters, digits, `_` and `-`. A source is one line of text.
+  `memstate rm` and `memstate_delete` still remove a keypath that an
+  older daemon accepted.
+
+The recall hook prints stored text into the session. It writes `<` as
+`&lt;` there, so a note cannot end the block that holds it. Read the
+exact text with `memstate_get`.
 
 ## Python CLI (for skills, hooks, scripts)
 

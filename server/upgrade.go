@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -165,18 +167,6 @@ func cmdUpgrade(args []string) int {
 	}
 
 	want := releaseAssetName()
-	var url string
-	var names []string
-	for _, a := range rel.Assets {
-		names = append(names, a.Name)
-		if a.Name == want {
-			url = a.BrowserDownloadURL
-		}
-	}
-	if url == "" {
-		return fail(fmt.Errorf("release %s has no asset %q (assets: %s)",
-			rel.TagName, want, strings.Join(names, ", ")))
-	}
 
 	exePath, err := os.Executable()
 	if err != nil {
@@ -190,10 +180,11 @@ func cmdUpgrade(args []string) int {
 
 	fmt.Printf("downloading %s %s → %s\n", rel.TagName, want, exePath)
 	tmp := exePath + ".download"
-	if err := downloadTo(url, tmp); err != nil {
+	if err := downloadRelease(rel, want, tmp); err != nil {
 		return fail(err)
 	}
 	defer os.Remove(tmp) // no-op after the rename succeeds
+	fmt.Printf("checksum matches %s\n", checksumAsset)
 
 	// Stop a running shared daemon BEFORE swapping the binary: Windows
 	// refuses to move a running executable, and on every platform it avoids
@@ -240,6 +231,118 @@ func cmdUpgrade(args []string) int {
 	}
 	fmt.Printf("upgraded v%s → %s\n", healthVersion, rel.TagName)
 	return 0
+}
+
+// checksumAsset is the release asset that lists the SHA-256 of every other
+// asset, one "<hex>  <name>" line each (`make release` writes it with
+// scripts/sha256sums.mjs).
+const checksumAsset = "SHA256SUMS"
+
+// assetURL returns the download URL of the release asset called name.
+func (r *ghRelease) assetURL(name string) (string, error) {
+	var names []string
+	for _, a := range r.Assets {
+		if a.Name == name {
+			return a.BrowserDownloadURL, nil
+		}
+		names = append(names, a.Name)
+	}
+	return "", fmt.Errorf("release %s has no asset %q (assets: %s)",
+		r.TagName, name, strings.Join(names, ", "))
+}
+
+// downloadRelease downloads the asset called name to dest and checks it
+// against the release's checksum list. When it returns an error, dest does
+// not exist.
+//
+// The list comes from the same release as the binary. The check finds a
+// download that is damaged, cut short or replaced on the way. It does not
+// find a release that an attacker published: that needs a signature made
+// with a key that is not on GitHub.
+func downloadRelease(rel *ghRelease, name, dest string) error {
+	url, err := rel.assetURL(name)
+	if err != nil {
+		return err
+	}
+	sumsURL, err := rel.assetURL(checksumAsset)
+	if err != nil {
+		return fmt.Errorf("%w; the download cannot be verified", err)
+	}
+	sums, err := fetchText(sumsURL, 1<<20)
+	if err != nil {
+		return err
+	}
+	if err := downloadTo(url, dest); err != nil {
+		return err
+	}
+	if err := verifyDownload(dest, sums, name); err != nil {
+		os.Remove(dest)
+		return err
+	}
+	return nil
+}
+
+// fetchText returns the body of url as text. A body longer than limit bytes
+// is an error.
+func fetchText(url string, limit int64) (string, error) {
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("GET %s: HTTP %d", url, resp.StatusCode)
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return "", err
+	}
+	if int64(len(b)) > limit {
+		return "", fmt.Errorf("GET %s: longer than %d bytes", url, limit)
+	}
+	return string(b), nil
+}
+
+// checksumFor returns the SHA-256 that a checksum list gives for name, as
+// lower-case hex. A line is "<64 hex digits>  <name>"; `sha256sum` writes
+// "*" before the name of a file that it read in binary mode.
+func checksumFor(sums, name string) (string, error) {
+	for _, line := range strings.Split(sums, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || strings.TrimPrefix(fields[1], "*") != name {
+			continue
+		}
+		digest := strings.ToLower(fields[0])
+		if b, err := hex.DecodeString(digest); err != nil || len(b) != sha256.Size {
+			return "", fmt.Errorf("%s: the entry for %s is not a SHA-256", checksumAsset, name)
+		}
+		return digest, nil
+	}
+	return "", fmt.Errorf("%s has no entry for %s", checksumAsset, name)
+}
+
+// verifyDownload reports an error unless the SHA-256 of the file at path is
+// the one that the checksum list gives for name.
+func verifyDownload(path, sums, name string) error {
+	want, err := checksumFor(sums, name)
+	if err != nil {
+		return err
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return err
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); got != want {
+		return fmt.Errorf("checksum mismatch for %s: got %s, want %s; the download is damaged or was replaced",
+			name, got, want)
+	}
+	return nil
 }
 
 func downloadTo(url, dest string) error {

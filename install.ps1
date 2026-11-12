@@ -10,6 +10,9 @@
 # Claude Code runs hook commands with Git Bash when it is present, and the
 # hooks are bash scripts.
 #
+# The script checks each download against the SHA256SUMS asset of the same
+# release before it runs or unpacks the download.
+#
 # Environment:
 #   MEMSTATE_VERSION        release tag to install, for example v0.7.8 (default: latest)
 #   MEMSTATE_SETUP          1 runs `memstate-mcp setup`, 0 skips it
@@ -42,6 +45,11 @@
     $Repo = 'map588/memstate'
     $Asset = 'memstated-windows-amd64.exe'
     $Bundle = 'memstate-mcp.tar.gz'
+    # The release asset that lists the SHA-256 of every other asset.
+    $Sums = 'SHA256SUMS'
+    # The last release that has no SHA256SUMS. A release after it must have
+    # the file, or the script stops.
+    $LastWithoutSums = [version]'0.9.1'
     $Root = Join-Path $env:LOCALAPPDATA 'Programs\memstate'
     $ServerDir = Join-Path $Root 'server'
     # Python and Node find the home directory through USERPROFILE, so the
@@ -87,6 +95,25 @@
     function Get-File([string]$Url, [string]$Path) {
         Say "downloading $Url"
         Invoke-WebRequest -Uri $Url -OutFile $Path -UseBasicParsing
+    }
+
+    # Confirm-Checksum stops the script when the SHA-256 of Path is not the
+    # one that the list at SumsPath gives for Name. The list has
+    # "<hex>  <name>" lines.
+    function Confirm-Checksum([string]$Path, [string]$Name, [string]$SumsPath) {
+        $want = $null
+        foreach ($line in Get-Content -LiteralPath $SumsPath) {
+            $fields = @($line.Trim() -split '\s+')
+            if ($fields.Count -eq 2 -and $fields[1].TrimStart('*') -eq $Name) {
+                $want = $fields[0].ToLowerInvariant()
+                break
+            }
+        }
+        if (-not $want) { Fail "$Sums has no entry for $Name" }
+        $got = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($got -ne $want) {
+            Fail "checksum mismatch for $Name (got $got, want $want). The download is damaged or was replaced."
+        }
     }
 
     # Replace-File moves Source to Target. Windows does not let a program
@@ -226,6 +253,25 @@
         try { Get-File "$base/$Asset" $daemonFile } catch { Fail "download failed: $base/$Asset" }
         try { Get-File "$base/$Bundle" $bundleFile } catch {
             Fail "download failed: $base/$Bundle (releases before v0.7.8 do not have it)"
+        }
+        # Check both downloads before the script runs or unpacks them. The
+        # list comes from the same release: it finds a damaged or replaced
+        # download.
+        $sumsFile = Join-Path $tmp $Sums
+        $haveSums = $true
+        try { Get-File "$base/$Sums" $sumsFile } catch { $haveSums = $false }
+        if ($haveSums) {
+            Confirm-Checksum $daemonFile $Asset $sumsFile
+            Confirm-Checksum $bundleFile $Bundle $sumsFile
+            Say "checksums match $Sums"
+        } else {
+            $released = $null
+            if ($tag -match '^v?(\d+\.\d+\.\d+)') { $released = [version]$Matches[1] }
+            if ($released -and $released -le $LastWithoutSums) {
+                Say "warning: release $tag has no $Sums. The downloads are not verified."
+            } else {
+                Fail "download failed: $base/$Sums. A release after v$LastWithoutSums has this file. Without it the downloads cannot be verified."
+            }
         }
         if ((Invoke-Captured $daemonFile @('--help')).Code -ne 0) { Fail 'the downloaded memstated does not run' }
         $unpacked = Join-Path $tmp 'bundle'
