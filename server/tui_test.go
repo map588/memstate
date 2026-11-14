@@ -448,6 +448,13 @@ func TestUIDeleteProject(t *testing.T) {
 	f := newUIFixture(t)
 	m := f.m
 
+	// The key line names the action. "D project" did not say that the key
+	// deletes.
+	uiSend(t, m, tea.WindowSizeMsg{Width: 160, Height: 40})
+	if !strings.Contains(uiScreenText(m), "D delete project") {
+		t.Fatalf("the key line does not name the delete:\n%s", uiScreenText(m))
+	}
+
 	// The wrong id deletes nothing.
 	uiKeys(t, m, "D")
 	uiType(t, m, "pro")

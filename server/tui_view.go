@@ -345,7 +345,7 @@ func (m *uiModel) footerView() string {
 	case m.screen == screenTables:
 		hint = "tab pane · ←/→ columns · enter row · pgup/pgdn page · X purge (memories) · r reload · 1 browser · ? keys · q quit"
 	default:
-		hint = "tab pane · / filter · s search · h history · n new · e edit · m meta · d delete · X purge · D project · 2 tables · ? keys · q quit"
+		hint = "? keys · tab pane · / filter · s search · h history · n new · e edit · m meta · d delete · X purge · D delete project · 2 tables · q quit"
 	}
 	return line + "\n" + uiFaint.Render(fit(hint, m.width))
 }
