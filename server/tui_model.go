@@ -49,6 +49,15 @@ type uiForm struct {
 	submit func(values []string) (tea.Cmd, error)
 }
 
+// uiSearch is an open list of search hits. It takes the place of the
+// keypath tree until a hit is opened or the list is closed.
+type uiSearch struct {
+	project string // "" = each project
+	query   string
+	hits    []searchHit
+	cur     int
+}
+
 type uiModel struct {
 	b         *uiBackend
 	pal       palette
@@ -79,6 +88,8 @@ type uiModel struct {
 	showHistory bool
 	history     []*Memory
 	histCur     int
+
+	search *uiSearch
 
 	detail      viewport.Model
 	detailText  string
@@ -314,6 +325,9 @@ func (m *uiModel) sync() tea.Cmd {
 	}
 	m.keyCur = clampCur(m.keyCur, len(m.nodes))
 	m.histCur = clampCur(m.histCur, len(m.history))
+	if m.search != nil {
+		m.search.cur = clampCur(m.search.cur, len(m.search.hits))
+	}
 	m.tabCur = clampCur(m.tabCur, len(m.tables))
 	if m.screen == screenTables && len(m.tables) > 0 && m.tables[m.tabCur].Name != m.rawTable {
 		m.rawTable, m.rawPage = m.tables[m.tabCur].Name, 0
@@ -398,6 +412,20 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmd = m.b.saveEdit(msg.job, msg.err)
 	case deleteReadyMsg:
 		m.openDeleteForm(msg)
+	case purgeReadyMsg:
+		m.openPurgeForm(msg)
+	case searchDoneMsg:
+		m.search = &uiSearch{project: msg.project, query: msg.out.Query, hits: msg.out.Results}
+		m.screen, m.focus = screenBrowser, paneKeys
+		m.showHistory, m.history = false, nil
+		status := fmt.Sprintf("%d match(es) · %s", len(msg.out.Results), msg.out.Mode)
+		switch {
+		case msg.out.Degraded != "" && msg.out.Mode == "fts":
+			status += " only (" + msg.out.Degraded + ")"
+		case msg.out.Degraded != "":
+			status += " · degraded: " + msg.out.Degraded
+		}
+		m.setStatus(status, false)
 	case writeDoneMsg:
 		m.setStatus(msg.status, false)
 		want := ""
@@ -448,10 +476,108 @@ func (m *uiModel) key(k tea.KeyPressMsg) tea.Cmd {
 	return m.browserKey(k)
 }
 
+// startSearch asks for the words of a content search. all searches each
+// project; without it the search is in the project on screen.
+func (m *uiModel) startSearch(all bool) {
+	project, title := m.project, "search "+m.project
+	if all || project == "" {
+		project, title = "", "search each project"
+	}
+	m.openForm(&uiForm{
+		title:  title,
+		labels: []string{"words"},
+		values: []string{""},
+		submit: func(v []string) (tea.Cmd, error) {
+			q := strings.TrimSpace(v[0])
+			if q == "" {
+				return nil, errors.New("no words; no search")
+			}
+			return m.b.search(project, q), nil
+		},
+	})
+}
+
+// searchKey handles a key while the list of hits is open.
+func (m *uiModel) searchKey(k tea.KeyPressMsg) tea.Cmd {
+	s := k.String()
+	switch s {
+	case "esc":
+		m.search = nil
+	case "enter":
+		return m.openHit()
+	case "s":
+		m.startSearch(false)
+	case "S":
+		m.startSearch(true)
+	case "tab", "shift+tab", "left", "right":
+		if m.focus == paneDetail {
+			m.focus = paneKeys
+		} else {
+			m.focus = paneDetail
+		}
+	default:
+		if m.focus == paneDetail {
+			var cmd tea.Cmd
+			m.detail, cmd = m.detail.Update(k)
+			return cmd
+		}
+		_, _, _, paneH := m.browserDims()
+		cur, ok := moveCur(m.search.cur, len(m.search.hits), paneH-3, s)
+		if !ok {
+			m.setStatus("the search results are open: enter opens the match, esc closes the list", false)
+		}
+		m.search.cur = cur
+	}
+	return nil
+}
+
+// openHit closes the list of hits and puts the cursor on the selected
+// one, in its project.
+func (m *uiModel) openHit() tea.Cmd {
+	sr := m.search
+	m.search = nil
+	if sr.cur >= len(sr.hits) {
+		return nil
+	}
+	hit := sr.hits[sr.cur]
+	m.focus = paneKeys
+	if hit.ProjectID == m.project {
+		m.keyFilter = ""
+		m.selectPath(hit.Keypath)
+		if m.selectedPath() != hit.Keypath {
+			m.setStatus(hit.Keypath+" is not in the tree on screen; r reads the store again", true)
+		}
+		return nil
+	}
+	m.projFilter = ""
+	i := slices.IndexFunc(m.visibleProjects(), func(p *Project) bool { return p.ID == hit.ProjectID })
+	if i < 0 {
+		m.setStatus("project "+hit.ProjectID+" is not in the list; r reads the store again", true)
+		return nil
+	}
+	m.projCur = i
+	cmd := m.openProject(hit.ProjectID)
+	m.wantPath = hit.Keypath
+	return cmd
+}
+
 func (m *uiModel) browserKey(k tea.KeyPressMsg) tea.Cmd {
 	s := k.String()
+	if m.search != nil {
+		return m.searchKey(k)
+	}
 	node := m.selectedNode()
 	switch s {
+	case "s":
+		m.startSearch(false)
+	case "S":
+		m.startSearch(true)
+	case "X":
+		if node == nil {
+			m.setStatus("nothing to purge", true)
+			break
+		}
+		return m.b.preparePurge(m.project, node.path, node.hasChildren)
 	case "tab":
 		m.focus = (m.focus + 1) % 3
 	case "shift+tab":
@@ -623,6 +749,14 @@ func (m *uiModel) tablesKey(k tea.KeyPressMsg) tea.Cmd {
 			m.rowView.SetContent(m.rowText(m.rawRows[row]))
 			m.rowView.GotoTop()
 		}
+	case "X":
+		row := m.grid.Cursor()
+		pi, ki := slices.Index(m.rawCols, "project_id"), slices.Index(m.rawCols, "keypath")
+		if m.rawTable != "memories" || m.tabFocus != 1 || row < 0 || row >= len(m.rawRows) || pi < 0 || ki < 0 {
+			m.setStatus("X purges the keypath of the selected row of the memories table", true)
+			break
+		}
+		return m.b.preparePurge(m.rawRows[row][pi], m.rawRows[row][ki], false)
 	case "pgdown":
 		if m.rawTable != "" && (m.rawPage+1)*uiRawPage < m.tableCount(m.rawTable) {
 			m.rawPage++
@@ -755,6 +889,33 @@ func (m *uiModel) openOpForm(msg writableMsg) {
 			},
 		})
 	}
+}
+
+func (m *uiModel) openPurgeForm(msg purgeReadyMsg) {
+	lines := []string{
+		"Purge from project " + msg.project + ".",
+		"A purge erases the content and each version. It has no undo.",
+		"An import does not bring these versions back to this machine.",
+		"To retire a fact and keep its history, use d.",
+		"",
+	}
+	versions := 0
+	for _, it := range msg.items {
+		versions += it.Versions
+		lines = append(lines, fmt.Sprintf("  %s  (%d version(s))", it.Keypath, it.Versions))
+	}
+	m.openForm(&uiForm{
+		title:  "purge " + msg.keypath,
+		labels: []string{fmt.Sprintf("type purge to erase %d keypath(s), %d version(s)", len(msg.items), versions)},
+		values: []string{""},
+		lines:  lines,
+		submit: func(v []string) (tea.Cmd, error) {
+			if strings.TrimSpace(v[0]) != "purge" {
+				return nil, errors.New("not confirmed; nothing purged")
+			}
+			return m.b.purge(msg.project, msg.keypath, msg.recursive), nil
+		},
+	})
 }
 
 func (m *uiModel) openDeleteForm(msg deleteReadyMsg) {

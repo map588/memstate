@@ -581,6 +581,150 @@ func TestUITablePaging(t *testing.T) {
 	}
 }
 
+func TestUISearch(t *testing.T) {
+	f := newUIFixture(t)
+	m := f.m
+
+	// In the project on screen. The daemon of the fixture has no
+	// embedder, so its hybrid search answers with the word matches.
+	uiKeys(t, m, "s")
+	uiType(t, m, "postgres")
+	uiKeys(t, m, "enter")
+	if m.search == nil || len(m.search.hits) != 1 || m.search.hits[0].Keypath != "decisions.db" || m.statusErr {
+		t.Fatalf("search: %+v, status %q", m.search, m.status)
+	}
+	screen := uiScreenText(m)
+	for _, want := range []string{"search: postgres (1)", "proj:decisions.db", "sqlite over postgres, WAL mode", "1 match(es)"} {
+		if !strings.Contains(screen, want) {
+			t.Fatalf("search screen lacks %q:\n%s", want, screen)
+		}
+	}
+	// A write key does not act on a match; the list stays open.
+	before := f.memoryRows(t)
+	uiKeys(t, m, "d", "e", "X")
+	if m.search == nil || m.form != nil || !slices.EqualFunc(before, f.memoryRows(t), slices.Equal[[]string]) {
+		t.Fatal("a write key acted while the search results were open")
+	}
+	uiKeys(t, m, "enter")
+	if m.search != nil || m.selectedPath() != "decisions.db" || m.project != "proj" {
+		t.Fatalf("after enter: search open=%v, cursor on %q in %q", m.search != nil, m.selectedPath(), m.project)
+	}
+
+	// In each project: enter opens the project of the match.
+	uiKeys(t, m, "S")
+	uiType(t, m, "subjects")
+	uiKeys(t, m, "enter")
+	if m.search == nil || len(m.search.hits) != 1 || m.search.hits[0].ProjectID != sharedProject {
+		t.Fatalf("search of each project: %+v, status %q", m.search, m.status)
+	}
+	if !strings.Contains(uiScreenText(m), sharedProject+":preferences.commit_style") {
+		t.Fatalf("the list does not name the project:\n%s", uiScreenText(m))
+	}
+	uiKeys(t, m, "enter")
+	if m.project != sharedProject || m.selectedPath() != "preferences.commit_style" {
+		t.Fatalf("after enter: on %q, cursor on %q", m.project, m.selectedPath())
+	}
+
+	// No match, then esc.
+	uiKeys(t, m, "s")
+	uiType(t, m, "zzzzqq")
+	uiKeys(t, m, "enter")
+	if m.search == nil || len(m.search.hits) != 0 || !strings.Contains(uiScreenText(m), "no match for zzzzqq") {
+		t.Fatalf("empty search: %+v", m.search)
+	}
+	uiKeys(t, m, "esc")
+	if m.search != nil {
+		t.Fatal("esc did not close the list")
+	}
+
+	// Without a daemon the word search runs on the store file, and the
+	// status line says so. Another host's shared facts stay out.
+	m.b.addrFlag = ""
+	uiKeys(t, m, "S")
+	uiType(t, m, "bin")
+	uiKeys(t, m, "enter")
+	if m.search == nil || len(m.search.hits) != 1 || !strings.Contains(m.status, "fts only") {
+		t.Fatalf("offline search: %+v, status %q", m.search, m.status)
+	}
+	if kp := m.search.hits[0].Keypath; kp != "host."+hostSlug()+".env.go_bin" {
+		t.Fatalf("offline search hit %q", kp)
+	}
+}
+
+func TestUIPurge(t *testing.T) {
+	f := newUIFixture(t)
+	m := f.m
+	// A purge is direct on the store file. It needs no daemon.
+	m.b.readOnly = "read-only: test"
+
+	// The wrong word erases nothing.
+	uiSelect(t, m, "decisions.db")
+	before := f.memoryRows(t)
+	uiKeys(t, m, "X")
+	if m.form == nil || !slices.Contains(m.form.lines, "  decisions.db  (2 version(s))") {
+		t.Fatalf("purge form: %+v, status %q", m.form, m.status)
+	}
+	uiType(t, m, "y")
+	uiKeys(t, m, "enter")
+	if !m.statusErr || !slices.EqualFunc(before, f.memoryRows(t), slices.Equal[[]string]) {
+		t.Fatalf("an unconfirmed purge ran; status %q", m.status)
+	}
+
+	uiKeys(t, m, "X")
+	uiType(t, m, "purge")
+	uiKeys(t, m, "enter")
+	if hist, _ := f.store.History("proj", "decisions.db"); len(hist) != 0 || m.statusErr {
+		t.Fatalf("after purge: history %+v, status %q (err=%v)", hist, m.status, m.statusErr)
+	}
+	if _, ok := m.mems["decisions.db"]; ok || !strings.Contains(m.status, "purged 1 keypath(s), 2 version(s)") {
+		t.Fatalf("model after purge: status %q", m.status)
+	}
+	for _, row := range f.memoryRows(t) {
+		if strings.Contains(strings.Join(row, "|"), "sqlite over postgres") {
+			t.Fatalf("purged content is still in the store: %v", row)
+		}
+	}
+
+	// A branch: each keypath below, a tombstoned one too.
+	if _, _, err := f.store.Delete("proj", "todo.a"); err != nil {
+		t.Fatal(err)
+	}
+	uiKeys(t, m, "r")
+	uiSelect(t, m, "todo")
+	uiKeys(t, m, "X")
+	if m.form == nil || !slices.Contains(m.form.lines, "  todo.a  (2 version(s))") || !slices.Contains(m.form.lines, "  todo.b  (1 version(s))") {
+		t.Fatalf("branch purge form: %+v", m.form)
+	}
+	uiType(t, m, "purge")
+	uiKeys(t, m, "enter")
+	for _, kp := range []string{"todo.a", "todo.b"} {
+		if hist, _ := f.store.History("proj", kp); len(hist) != 0 {
+			t.Fatalf("%s survived the branch purge: %+v", kp, hist)
+		}
+	}
+
+	// From the raw memories table: the keypath of the selected row.
+	uiKeys(t, m, "2", "j", "enter")
+	if m.rawTable != "memories" || len(m.rawRows) == 0 {
+		t.Fatalf("raw table %q with %d rows", m.rawTable, len(m.rawRows))
+	}
+	project, keypath := m.rawRows[0][1], m.rawRows[0][2]
+	uiKeys(t, m, "X")
+	if m.form == nil || !strings.Contains(uiScreenText(m), keypath) {
+		t.Fatalf("raw purge form: %+v\n%s", m.form, uiScreenText(m))
+	}
+	uiType(t, m, "purge")
+	uiKeys(t, m, "enter")
+	if hist, _ := f.store.History(project, keypath); len(hist) != 0 {
+		t.Fatalf("%s/%s survived the raw purge: %+v", project, keypath, hist)
+	}
+	// X on a table that has no keypath column is refused.
+	uiKeys(t, m, "esc", "g", "enter", "X")
+	if m.rawTable != "projects" || m.form != nil || !m.statusErr {
+		t.Fatalf("X on %q: form=%v status %q", m.rawTable, m.form != nil, m.status)
+	}
+}
+
 // Stored text is not terminal input. This content clears the screen and
 // sets the window title when a viewer prints it as it is.
 func TestUIEscapeSequencesInContent(t *testing.T) {
@@ -644,6 +788,7 @@ func TestUIKeysProperty(t *testing.T) {
 		"j", "k", "g", "G", "up", "down", "left", "right", "pgup", "pgdown",
 		"tab", "shift+tab", "enter", "space", "esc", "h", "r", "/", "?", "1", "2",
 		"n", "e", "m", "d", "D", "a", "o", ".", "backspace", "ctrl+u",
+		"s", "S", "X",
 	}
 	run := 0
 	rapid.Check(t, func(rt *rapid.T) {
@@ -692,6 +837,9 @@ func TestUIKeysProperty(t *testing.T) {
 			inside("keypath", m.keyCur, len(m.nodes))
 			inside("history", m.histCur, len(m.history))
 			inside("table", m.tabCur, len(m.tables))
+			if m.search != nil {
+				inside("search", m.search.cur, len(m.search.hits))
+			}
 
 			screen := uiScreenText(m)
 			if i := strings.IndexFunc(screen, isTermControl); i >= 0 {

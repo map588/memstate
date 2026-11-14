@@ -623,14 +623,16 @@ project of the repository you are in and shows every live project.
 - **Screen 2, raw tables:** the six SQLite tables (`projects`, `memories`,
   `memories_fts`, `keypath_embeddings`, `meta`, `purged`) as rows, 100 on a page.
   `memories` shows each version and each tombstone. `enter` opens one row
-  with each column in full. This screen only reads.
+  with each column in full. This screen only reads, with one exception:
+  `X` on a row of `memories` purges the keypath of that row.
 
 | Key | Action |
 |---|---|
 | `1` `2` | browser screen, raw tables screen |
 | `tab` `shift+tab` | next pane, previous pane |
 | `j` `k` `g` `G` `pgup` `pgdn` | move |
-| `/` | filter (`esc` clears it) |
+| `/` | filter the projects or the keypaths by name (`esc` clears it) |
+| `s` `S` | search the content of this project, of each project; `enter` opens a match |
 | `enter` `space` | fold or open a branch |
 | `h` | version history |
 | `n` | new memory: keypath, category, topics, then `$EDITOR` |
@@ -638,6 +640,7 @@ project of the repository you are in and shows every live project.
 | `m` | change category and topics |
 | `d` | delete the keypath, or each keypath below a branch (you confirm with `y`) |
 | `D` | soft-delete the project (you type its id to confirm) |
+| `X` | purge: erase the keypath, or each keypath below a branch (you type `purge`) |
 | `r` | read the store again |
 | `?` `q` | keys, quit |
 
@@ -647,6 +650,22 @@ Without a daemon the browser is read-only and says so. With `--db PATH` it
 is read-only too, unless `--addr` names the daemon that serves that file.
 The browser shows control characters in stored text as symbols, so a note
 cannot send an escape sequence to your terminal.
+
+The search (`s`, `S`) is the hybrid search of the daemon. Without a daemon
+it is a word search on the store file, and the status line says so.
+
+**Purge (`X`)** is for a note that must not be in the collection at all. A
+delete (`d`) keeps the content in the history; a purge erases the content,
+each version, the search row and the vectors. It has no undo. It works on
+the store file, so it needs no daemon. To purge a keypath that is deleted
+already, use `X` on one of its rows in the raw `memories` table.
+
+A purge is local. The store keeps a record of it (table `purged`), and
+`memstated import` does not restore the purged versions from the file of
+another machine, also with `--force`; it prints each keypath that it did
+not restore. The other machine keeps its copy until you purge there too.
+A note that someone writes at the same keypath after the purge is imported
+as normal.
 
 Tab completion for zsh completes verbs, flags, project ids, config keys and
 keypaths (one dotted segment at a time, in the project that `--project` or

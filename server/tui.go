@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -20,6 +21,9 @@ import (
 
 // uiRawPage is the number of raw table rows on one page.
 const uiRawPage = 100
+
+// uiSearchLimit is the largest number of hits of one search.
+const uiSearchLimit = 30
 
 // uiSource is the provenance that a write from the browser carries.
 const uiSource = "memstate ui"
@@ -213,6 +217,20 @@ type deleteReadyMsg struct {
 	keypaths         []string
 }
 
+// searchDoneMsg carries the hits of a search. project is empty for a
+// search of each project.
+type searchDoneMsg struct {
+	project string
+	out     searchOut
+}
+
+// purgeReadyMsg lists what a purge will erase, for the confirmation.
+type purgeReadyMsg struct {
+	project, keypath string
+	recursive        bool
+	items            []PurgedKeypath
+}
+
 // writeDoneMsg ends each write. The model reloads and puts the cursor on
 // keypath when it is not empty.
 type writeDoneMsg struct {
@@ -265,6 +283,86 @@ func (b *uiBackend) loadRows(table string, page int) tea.Cmd {
 			return uiErrMsg{err}
 		}
 		return rowsLoadedMsg{table, page, cols, rows}
+	}
+}
+
+// search finds memories by content. It follows the rule of `memstate
+// search`: the daemon answers with a hybrid search; without a daemon, and
+// with --db, the FTS side runs on the SQLite file. A project of "" means
+// each project.
+func (b *uiBackend) search(project, query string) tea.Cmd {
+	return func() tea.Msg {
+		var out searchOut
+		answered := false
+		degraded := "reads from the store file"
+		if b.readOnly == "" {
+			d, err := openDaemon(b.addrFlag)
+			if err == nil {
+				body := map[string]any{"query": query, "mode": "hybrid", "limit": uiSearchLimit, "include_content": true}
+				if project != "" {
+					body["project_id"] = project
+				}
+				var raw []byte
+				if raw, err = d.call("POST", "/memories/search", body); err == nil {
+					if err := json.Unmarshal(raw, &out); err != nil {
+						return uiErrMsg{fmt.Errorf("decode daemon reply: %v", err)}
+					}
+					answered = true
+				}
+			}
+			if err != nil {
+				if strings.Contains(err.Error(), "HTTP 4") {
+					return uiErrMsg{err}
+				}
+				degraded = err.Error()
+			}
+		}
+		if !answered {
+			mems, err := b.store.SearchAny(project, query, SearchFilter{}, uiSearchLimit)
+			if err != nil {
+				return uiErrMsg{err}
+			}
+			out = searchOut{Mode: "fts", Query: query, Degraded: degraded}
+			for _, m := range mems {
+				out.Results = append(out.Results, searchHit{Memory: *m, Sources: []string{"fts"}})
+			}
+		}
+		out.Results = slices.DeleteFunc(out.Results, func(h searchHit) bool {
+			return h.ProjectID == sharedProject && isOtherHost(h.Keypath, b.host)
+		})
+		return searchDoneMsg{project, out}
+	}
+}
+
+// ---------- commands: purge (SQLite) ----------
+
+// preparePurge lists what a purge will erase. A purge acts on the store
+// file on the screen and needs no daemon; see purge.go.
+func (b *uiBackend) preparePurge(project, keypath string, recursive bool) tea.Cmd {
+	return func() tea.Msg {
+		items, err := b.store.PurgePreview(project, keypath, recursive)
+		if err != nil {
+			return uiErrMsg{err}
+		}
+		if len(items) == 0 {
+			return uiErrMsg{fmt.Errorf("nothing to purge in project %s at %s", project, keypath)}
+		}
+		return purgeReadyMsg{project, keypath, recursive, items}
+	}
+}
+
+func (b *uiBackend) purge(project, keypath string, recursive bool) tea.Cmd {
+	return func() tea.Msg {
+		items, err := b.store.Purge(project, keypath, recursive)
+		if err != nil {
+			return uiErrMsg{err}
+		}
+		versions := 0
+		for _, it := range items {
+			versions += it.Versions
+		}
+		return writeDoneMsg{fmt.Sprintf("purged %d keypath(s), %d version(s) at %s in %s",
+			len(items), versions, keypath, project), project, ""}
 	}
 }
 

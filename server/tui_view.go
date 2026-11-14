@@ -199,6 +199,19 @@ func (m *uiModel) detailContent() string {
 		}
 		return strings.Join(lines, "\n")
 	}
+	if sr := m.search; sr != nil {
+		if sr.cur >= len(sr.hits) {
+			return "no match for " + oneLine(sr.query)
+		}
+		hit := sr.hits[sr.cur]
+		meta := entryMeta(&hit.Memory)
+		if len(hit.Sources) > 0 {
+			meta += " · found by " + strings.Join(hit.Sources, ", ")
+		}
+		return m.pal.bold(m.pal.cyan(oneLine(hit.ProjectID+":"+hit.Keypath))) + "\n" +
+			m.pal.dim(oneLine(meta)) + "\n\n" +
+			renderMarkdown(sanitizeTerm(hit.Content), "", m.pal)
+	}
 	if !m.loaded {
 		if m.gotProjects && len(m.projects) == 0 {
 			return "no projects in this store"
@@ -307,7 +320,12 @@ func (m *uiModel) footerView() string {
 	switch {
 	case m.form != nil:
 		f := m.form
-		label := fit(fmt.Sprintf("%s (%d/%d) %s: ", oneLine(f.title), f.idx+1, len(f.labels), f.labels[f.idx]), m.width/2)
+		// A form with context lines has its title on the pane above.
+		label := fmt.Sprintf("(%d/%d) %s: ", f.idx+1, len(f.labels), f.labels[f.idx])
+		if len(f.lines) == 0 {
+			label = oneLine(f.title) + " " + label
+		}
+		label = fit(label, m.width/2)
 		line = uiBold.Render(label) + m.input.View()
 	case m.filtering:
 		line = uiBold.Render("filter: ") + m.input.View()
@@ -322,10 +340,12 @@ func (m *uiModel) footerView() string {
 		hint = "enter next · esc cancel"
 	case m.filtering:
 		hint = "enter keep · esc clear"
+	case m.screen == screenBrowser && m.search != nil:
+		hint = "enter open the match · esc close the list · s search again · tab pane · q quit"
 	case m.screen == screenTables:
-		hint = "tab pane · ←/→ columns · enter row · pgup/pgdn page · r reload · 1 browser · ? keys · q quit"
+		hint = "tab pane · ←/→ columns · enter row · pgup/pgdn page · X purge (memories) · r reload · 1 browser · ? keys · q quit"
 	default:
-		hint = "tab pane · / filter · h history · n new · e edit · m meta · d delete · D project · 2 tables · ? keys · q quit"
+		hint = "tab pane · / filter · s search · h history · n new · e edit · m meta · d delete · X purge · D project · 2 tables · ? keys · q quit"
 	}
 	return line + "\n" + uiFaint.Render(fit(hint, m.width))
 }
@@ -381,10 +401,22 @@ func (m *uiModel) browserView() string {
 		return text
 	})
 
+	if sr := m.search; sr != nil {
+		keyTitle = fmt.Sprintf("search: %s (%d)", oneLine(sr.query), len(sr.hits))
+		keyLines = listLines(len(sr.hits), sr.cur, keyW-2, rows, m.focus == paneKeys, func(i int) string {
+			if sr.project == "" {
+				return oneLine(sr.hits[i].ProjectID + ":" + sr.hits[i].Keypath)
+			}
+			return oneLine(sr.hits[i].Keypath)
+		})
+	}
+
 	detTitle := "memory"
 	switch {
 	case m.form != nil && len(m.form.lines) > 0:
 		detTitle = oneLine(m.form.title)
+	case m.search != nil:
+		detTitle = "match"
 	case m.showHistory:
 		detTitle = "history"
 	}
@@ -409,6 +441,12 @@ func (m *uiModel) tablesView() string {
 	var title string
 	var body []string
 	switch {
+	case m.form != nil && len(m.form.lines) > 0:
+		// A purge from this screen: show what the form asks about.
+		title = oneLine(m.form.title)
+		for _, l := range m.form.lines {
+			body = append(body, fit(oneLine(l), gridW-2))
+		}
 	case m.rowDetail:
 		title = fmt.Sprintf("%s · row %d", m.rawTable, m.rawPage*uiRawPage+m.grid.Cursor()+1)
 		body = strings.Split(m.rowView.View(), "\n")
@@ -434,7 +472,9 @@ const uiHelpText = `Keys
   1 / 2            browser screen / raw tables screen
   tab, shift+tab   next / previous pane        left, right also move
   j k, arrows      move        g G  first / last       pgup pgdn  page
-  /                filter the projects or the keypaths (esc clears)
+  /                filter the projects or the keypaths by name (esc clears)
+  s / S            search the content of this project / of each project;
+                   enter opens a match, esc closes the list
   enter, space     fold or open a branch of the keypath tree
   h                version history of the keypath (esc closes)
   r                read the store again
@@ -448,7 +488,13 @@ Writes (browser screen; each one goes through the shared daemon)
   d   delete: a tombstone on the keypath, or on each keypath below a branch
   D   soft-delete the project
 
-Raw tables (read-only)
+Purge (direct on the store file; needs no daemon; no undo)
+
+  X   erase the keypath, or each keypath below a branch: the content, each
+      version, the search row and the vectors. On the raw memories table,
+      X erases the keypath of the selected row, a deleted one too.
+
+Raw tables
 
   left, right      show the columns to the left / to the right
   enter            open the row with each column in full
