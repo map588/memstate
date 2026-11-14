@@ -161,7 +161,7 @@ func main() {
 	// own simple arg handling and don't spin up the server.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
-		case "tree", "get", "show", "cat", "history", "log", "set", "edit", "rm", "delete", "completions", "__complete":
+		case "tree", "get", "show", "cat", "history", "log", "set", "edit", "rm", "delete", "ui", "tui", "completions", "__complete":
 			os.Exit(cmdCLI(os.Args[1:]))
 		case "stop":
 			os.Exit(cmdStop(os.Args[2:]))
@@ -451,8 +451,8 @@ func printUsage() {
                                    (--keys: "memstate tree")
   memstated search QUERY...        alias of "memstate search"
   memstate <verb>                  browse and edit the store: tree, get,
-                                   history, search, set, edit, rm, projects,
-                                   status. See "memstate --help".
+                                   history, search, set, edit, rm, ui,
+                                   projects, status. See "memstate --help".
   memstated upgrade [--addr HOST:PORT]
                                    download the latest release binary over this
                                    one and restart the shared daemon if running

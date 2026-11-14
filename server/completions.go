@@ -142,6 +142,7 @@ _memstate() {
         'edit:open the current content in an editor'
         'rm:tombstone a keypath or a subtree'
         'delete:alias of rm'
+        'ui:terminal browser of the store and its raw tables'
         'projects:live projects with memory counts'
         'status:daemon health'
         'config:settings, their sources, and the running daemon'
@@ -185,6 +186,11 @@ _memstate() {
             '--recursive[also tombstone every keypath below]' \
             '--yes[skip the confirmation for --recursive]' \
             '1:keypath:_memstate_keypaths' && ret=0 ;;
+        ui|tui)
+          _arguments $scope \
+            '--no-color[disable ANSI colors]' \
+            '--db=[SQLite file to read; without --addr the session is read-only]:SQLite file:_files' \
+            '--addr=[shared daemon address for writes]:address: ' && ret=0 ;;
         projects)
           _arguments '--db=[SQLite file]:SQLite file:_files' && ret=0 ;;
         status)

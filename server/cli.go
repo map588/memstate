@@ -147,7 +147,10 @@ writes go through the shared daemon (MEMSTATE_ADDR, else daemon.addr).
                                            store it when it changed
   memstate rm       KEYPATH [--recursive] [--yes]
                                            tombstone a keypath or a subtree
-  memstate projects                        live projects with memory counts
+  memstate ui                              terminal browser: projects, keypath tree,
+                                           content and history, the raw SQLite tables;
+                                           edits and deletes go through the daemon
+  memstate projects                       live projects with memory counts
   memstate status   [--addr HOST:PORT]     daemon health
   memstate config   [set KEY VALUE|unset KEY|path]
                                            settings, their sources, and whether the
@@ -189,6 +192,8 @@ func cmdCLI(args []string) int {
 		return cliEdit(rest)
 	case "rm", "delete":
 		return cliRm(rest)
+	case "ui", "tui":
+		return cliUI(rest)
 	case "projects":
 		return cmdProjects(rest)
 	case "status":
@@ -799,15 +804,7 @@ func cliEdit(args []string) int {
 	}
 	tmp.Close()
 
-	editor := os.Getenv("VISUAL")
-	if editor == "" {
-		editor = os.Getenv("EDITOR")
-	}
-	if editor == "" {
-		editor = "vi"
-	}
-	parts := strings.Fields(editor)
-	cmd := exec.Command(parts[0], append(parts[1:], tmpPath)...)
+	cmd, editor := editorCommand(tmpPath)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
 		return cliFail("editor %q: %v", editor, err)
@@ -846,6 +843,21 @@ func cliEdit(args []string) int {
 		return cliFail("%v", err)
 	}
 	return printStoreReply(raw, *o)
+}
+
+// editorCommand builds the command that opens path in the user's editor:
+// $VISUAL, else $EDITOR, else vi. It also returns the editor text, for
+// messages. `edit` and `ui` share it.
+func editorCommand(path string) (*exec.Cmd, string) {
+	editor := os.Getenv("VISUAL")
+	if editor == "" {
+		editor = os.Getenv("EDITOR")
+	}
+	if editor == "" {
+		editor = "vi"
+	}
+	parts := strings.Fields(editor)
+	return exec.Command(parts[0], append(parts[1:], path)...), editor
 }
 
 // stdinIsTerminal is true only for a real terminal. A plain Stat check is

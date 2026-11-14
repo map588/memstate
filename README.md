@@ -603,12 +603,50 @@ memstate rm branches.old --recursive   # asks y/N; --yes to skip
 memstate tree --shared                 # preferences, profile, practices, lessons, this host's env and tools
 memstate tree --json | jq .shared       # raw shapes for scripts
 memstate projects                      # every live project
+memstate ui                            # terminal browser, see below
 ```
 
 `--project ID` reaches another project, `--shared` the reserved shared scope,
 `--all` (search) the whole store. Flags may follow positionals. Without a
 shared daemon, reads still work and `search` falls back to FTS. `set`,
 `edit` and `rm` need the daemon and tell you how to start one.
+
+### Terminal browser (`memstate ui`)
+
+`memstate ui` opens the store in a full-screen browser. It starts on the
+project of the repository you are in and shows every live project.
+
+- **Screen 1, browser:** the projects, the keypath tree of the selected
+  project, and the content of the selected keypath. `h` shows the version
+  history of a keypath, with its tombstones. `/` filters the projects or the
+  keypaths.
+- **Screen 2, raw tables:** the five SQLite tables (`projects`, `memories`,
+  `memories_fts`, `keypath_embeddings`, `meta`) as rows, 100 on a page.
+  `memories` shows each version and each tombstone. `enter` opens one row
+  with each column in full. This screen only reads.
+
+| Key | Action |
+|---|---|
+| `1` `2` | browser screen, raw tables screen |
+| `tab` `shift+tab` | next pane, previous pane |
+| `j` `k` `g` `G` `pgup` `pgdn` | move |
+| `/` | filter (`esc` clears it) |
+| `enter` `space` | fold or open a branch |
+| `h` | version history |
+| `n` | new memory: keypath, category, topics, then `$EDITOR` |
+| `e` | edit the content in `$VISUAL` or `$EDITOR`; category and topics stay |
+| `m` | change category and topics |
+| `d` | delete the keypath, or each keypath below a branch (you confirm with `y`) |
+| `D` | soft-delete the project (you type its id to confirm) |
+| `r` | read the store again |
+| `?` `q` | keys, quit |
+
+The writes follow the same rules as `set`, `edit` and `rm`: each one is a
+new version or a tombstone, and each one goes through the shared daemon.
+Without a daemon the browser is read-only and says so. With `--db PATH` it
+is read-only too, unless `--addr` names the daemon that serves that file.
+The browser shows control characters in stored text as symbols, so a note
+cannot send an escape sequence to your terminal.
 
 Tab completion for zsh completes verbs, flags, project ids, config keys and
 keypaths (one dotted segment at a time, in the project that `--project` or
