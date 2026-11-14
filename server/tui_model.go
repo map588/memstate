@@ -218,6 +218,18 @@ func (m *uiModel) selectedNode() *uiNode {
 	return &m.nodes[m.keyCur]
 }
 
+// actionPath is the keypath that a delete or a purge of node acts on. It
+// is the path of the node, with one exception. In the shared project the
+// tree shows only this host below "host" (pruneTreeHosts), so an action on
+// that node acts on this host only: an action must not change the facts
+// that the screen hides.
+func (m *uiModel) actionPath(node *uiNode) string {
+	if m.project == sharedProject && node.path == "host" {
+		return "host." + m.b.host
+	}
+	return node.path
+}
+
 func (m *uiModel) selectedPath() string {
 	if n := m.selectedNode(); n != nil {
 		return n.path
@@ -577,7 +589,7 @@ func (m *uiModel) browserKey(k tea.KeyPressMsg) tea.Cmd {
 			m.setStatus("nothing to purge", true)
 			break
 		}
-		return m.b.preparePurge(m.project, node.path, node.hasChildren)
+		return m.b.preparePurge(m.project, m.actionPath(node), node.hasChildren)
 	case "tab":
 		m.focus = (m.focus + 1) % 3
 	case "shift+tab":
@@ -650,7 +662,7 @@ func (m *uiModel) browserKey(k tea.KeyPressMsg) tea.Cmd {
 			m.setStatus("nothing to delete", true)
 			break
 		}
-		return m.b.prepareDelete(m.project, node.path, node.hasChildren)
+		return m.b.prepareDelete(m.project, m.actionPath(node), node.hasChildren)
 	case "D":
 		if m.project == "" || len(m.visibleProjects()) == 0 {
 			m.setStatus("no project", true)

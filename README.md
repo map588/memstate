@@ -651,6 +651,11 @@ is read-only too, unless `--addr` names the daemon that serves that file.
 The browser shows control characters in stored text as symbols, so a note
 cannot send an escape sequence to your terminal.
 
+In the shared scope (`_shared`) the tree shows `host` for this machine only,
+as `memstate tree --shared` does. `d` and `X` on the `host` branch act on the
+facts of this machine only. The facts of another machine are in the raw
+`memories` table.
+
 The search (`s`, `S`) is the hybrid search of the daemon. Without a daemon
 it is a word search on the store file, and the status line says so.
 

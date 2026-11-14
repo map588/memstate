@@ -397,6 +397,53 @@ func TestUIDelete(t *testing.T) {
 	}
 }
 
+// In the shared project the tree shows only this host below "host". A
+// delete or a purge on the "host" node acts on what the tree shows. The
+// facts of another host are not on the screen and stay.
+func TestUISharedHostNode(t *testing.T) {
+	f := newUIFixture(t)
+	m := f.m
+	mine, other := "host."+hostSlug()+".env.go_bin", "host.other_box.env.go_bin"
+	m.focus = paneProjects
+	uiKeys(t, m, "g")
+	if m.project != sharedProject {
+		t.Fatalf("on project %q", m.project)
+	}
+
+	uiSelect(t, m, "host")
+	uiKeys(t, m, "d")
+	if m.form == nil || !slices.Contains(m.form.lines, "  "+mine) || slices.Contains(m.form.lines, "  "+other) {
+		t.Fatalf("delete form on the host node: %+v, status %q", m.form, m.status)
+	}
+	uiKeys(t, m, "y", "enter")
+	if mem := f.latest(t, sharedProject, mine); !mem.Tombstone || m.statusErr {
+		t.Fatalf("this host is not deleted: %+v, status %q", mem, m.status)
+	}
+	if mem := f.latest(t, sharedProject, other); mem.Tombstone {
+		t.Fatalf("the delete on the host node took another host: %+v", mem)
+	}
+
+	// The same rule for a purge.
+	if _, _, err := f.store.Write(sharedProject, mine, "~/go/bin", WriteMeta{}, false); err != nil {
+		t.Fatal(err)
+	}
+	uiKeys(t, m, "r")
+	uiSelect(t, m, "host")
+	uiKeys(t, m, "X")
+	if m.form == nil || !slices.Contains(m.form.lines, "  "+mine+"  (3 version(s))") ||
+		slices.ContainsFunc(m.form.lines, func(l string) bool { return strings.Contains(l, other) }) {
+		t.Fatalf("purge form on the host node: %+v, status %q", m.form, m.status)
+	}
+	uiType(t, m, "purge")
+	uiKeys(t, m, "enter")
+	if hist, _ := f.store.History(sharedProject, mine); len(hist) != 0 || m.statusErr {
+		t.Fatalf("this host is not purged: %+v, status %q", hist, m.status)
+	}
+	if hist, _ := f.store.History(sharedProject, other); len(hist) != 1 {
+		t.Fatalf("the purge on the host node took another host: %+v", hist)
+	}
+}
+
 func TestUIDeleteProject(t *testing.T) {
 	f := newUIFixture(t)
 	m := f.m
