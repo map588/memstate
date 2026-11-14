@@ -29,12 +29,18 @@ type PurgedKeypath struct {
 
 // purgeWhere is the row filter of a purge, for the tables that have the
 // columns project_id and keypath. recursive adds each keypath below.
+//
+// The match is exact. A purge has no undo, so it must not take a keypath
+// that only looks like the target: LIKE ignores the case of ASCII letters
+// ("Notes.%" matches "notes.x"), so the filter compares the prefix with
+// substr, which does not.
 func purgeWhere(projectID, keypath string, recursive bool) (string, []any) {
 	if !recursive {
 		return `project_id = ? AND keypath = ?`, []any{projectID, keypath}
 	}
-	return `project_id = ? AND (keypath = ? OR keypath LIKE ? ESCAPE '\')`,
-		[]any{projectID, keypath, escapeLike(keypath) + ".%"}
+	below := keypath + "."
+	return `project_id = ? AND (keypath = ? OR substr(keypath, 1, length(?)) = ?)`,
+		[]any{projectID, keypath, below, below}
 }
 
 type rowQuerier interface {
@@ -61,8 +67,11 @@ func purgeList(q rowQuerier, projectID, keypath string, recursive bool) ([]Purge
 
 // PurgePreview lists what Purge erases with the same arguments: live
 // keypaths and tombstoned ones. It changes nothing.
+//
+// Preview and Purge take the keypath as it is stored and do not normalize
+// it. An import can leave a tombstoned chain with a name that a write
+// changes ("x/y"); its purge must not erase the keypath "x.y".
 func (s *Store) PurgePreview(projectID, keypath string, recursive bool) ([]PurgedKeypath, error) {
-	keypath = NormalizeKeypath(keypath)
 	if keypath == "" {
 		return nil, errors.New("purge needs a keypath")
 	}
@@ -73,7 +82,6 @@ func (s *Store) PurgePreview(projectID, keypath string, recursive bool) ([]Purge
 // below it, in one transaction. It returns what it erased. Nothing to
 // erase is an error.
 func (s *Store) Purge(projectID, keypath string, recursive bool) ([]PurgedKeypath, error) {
-	keypath = NormalizeKeypath(keypath)
 	if keypath == "" {
 		return nil, errors.New("purge needs a keypath")
 	}

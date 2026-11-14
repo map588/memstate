@@ -100,6 +100,21 @@ func TestPurge(t *testing.T) {
 		t.Fatal("the subtree purge took a sibling")
 	}
 
+	// A purge takes the name as it is stored. An import can leave a
+	// tombstoned chain with a name that a write would refuse or change;
+	// its purge must not erase the keypath with the normal name.
+	must("x.y", "the keypath with the normal name")
+	if _, _, err := s.Write("p", "x/y", "", WriteMeta{}, true); err != nil {
+		t.Fatal(err)
+	}
+	done, err = s.Purge("p", "x/y", false)
+	if err != nil || len(done) != 1 || done[0].Keypath != "x/y" {
+		t.Fatalf("purge of the odd name: %+v err=%v", done, err)
+	}
+	if m, _ := s.GetLatest("p", "x.y"); m == nil {
+		t.Fatal("the purge of x/y erased x.y")
+	}
+
 	// Nothing to purge is an error, and an empty keypath is not "all".
 	if _, err := s.Purge("p", "absent", true); err == nil {
 		t.Fatal("purge of an absent keypath must be an error")
@@ -125,7 +140,9 @@ func TestPurgeProperty(t *testing.T) {
 		}
 		defer s.Close()
 		projects := []string{"alpha", "beta"}
-		keys := []string{"a", "a.b", "a.b.c", "a_b", "ab", "n.x", "n"}
+		// "A" and "a" differ only in case, and "_" is a LIKE wildcard. A
+		// purge of "a" takes none of "A", "A.b", "a_b", "a_b.c", "ab".
+		keys := []string{"a", "a.b", "a.b.c", "a_b", "a_b.c", "ab", "n.x", "n", "A", "A.b"}
 		for i, n := 0, rapid.IntRange(1, 25).Draw(rt, "writes"); i < n; i++ {
 			pid := rapid.SampledFrom(projects).Draw(rt, "project")
 			kp := rapid.SampledFrom(keys).Draw(rt, "keypath")
