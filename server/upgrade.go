@@ -7,11 +7,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -144,7 +147,7 @@ func releaseAssetName() string {
 func cmdUpgrade(args []string) int {
 	fs := flag.NewFlagSet("upgrade", flag.ExitOnError)
 	addr := fs.String("addr", "",
-		"shared daemon to restart after the swap (default MEMSTATE_ADDR or "+defaultAddr+")")
+		"shared daemon of this machine to restart after the swap (default MEMSTATE_ADDR or "+defaultAddr+")")
 	_ = fs.Parse(args)
 	if fs.NArg() != 0 {
 		fmt.Fprintln(os.Stderr, "usage: memstated upgrade [--addr HOST:PORT]")
@@ -186,9 +189,6 @@ func cmdUpgrade(args []string) int {
 	defer os.Remove(tmp) // no-op after the rename succeeds
 	fmt.Printf("checksum matches %s\n", checksumAsset)
 
-	// Stop a running shared daemon BEFORE swapping the binary: Windows
-	// refuses to move a running executable, and on every platform it avoids
-	// a window where /health reports the old version from the new file.
 	restartAddr := *addr
 	if restartAddr == "" {
 		restartAddr = os.Getenv("MEMSTATE_ADDR")
@@ -196,41 +196,173 @@ func cmdUpgrade(args []string) int {
 	if restartAddr == "" {
 		restartAddr = defaultAddr
 	}
+	if err := installDownload(tmp, exePath, restartAddr); err != nil {
+		return fail(err)
+	}
+	fmt.Printf("upgraded v%s → %s\n", healthVersion, rel.TagName)
+	return 0
+}
+
+// installDownload puts the downloaded binary tmp at exePath. When a shared
+// daemon of this machine listens on addr, it stops that daemon before the
+// swap and starts the new binary in its place: Windows refuses to move a
+// running executable, and on every platform the stop avoids a window where
+// /health reports the old version from the new file. It leaves the daemon
+// of another machine alone (locateDaemon).
+func installDownload(tmp, exePath, addr string) error {
 	// Read the running daemon's flags first, so the restart replays them.
-	prev, err := fetchHealth(restartAddr)
-	wasRunning := err == nil && prev.Service == healthServiceName
-	if wasRunning {
-		fmt.Printf("stopping daemon at %s\n", restartAddr)
-		if err := stopAndWait(restartAddr, 5*time.Second); err != nil {
-			return fail(err)
+	prev, site := locateDaemon(addr)
+	if site == daemonHere {
+		fmt.Printf("stopping daemon at %s\n", addr)
+		if err := stopAndWait(addr, 5*time.Second); err != nil {
+			return err
 		}
 	}
 
 	if err := replaceBinary(tmp, exePath); err != nil {
-		if wasRunning {
+		if site == daemonHere {
 			fmt.Fprintf(os.Stderr,
 				"memstated upgrade: daemon at %s was stopped but not restarted — restart it manually\n",
-				restartAddr)
+				addr)
 		}
-		return fail(err)
+		return err
 	}
 
-	if wasRunning {
-		if err := startDetachedDaemon(exePath, restartAddr, prev); err != nil {
-			fmt.Fprintf(os.Stderr,
-				"memstated upgrade: binary upgraded but restart failed: %v\n"+
-					"start it manually: memstated --addr %s\n", err, restartAddr)
-			return 1
-		}
-		fmt.Printf("daemon restarted at %s\n", restartAddr)
-		if next, err := fetchHealth(restartAddr); err == nil {
-			reportRestartDiff(os.Stdout, prev, next)
-		}
-	} else {
+	switch site {
+	case daemonElsewhere:
+		fmt.Println(elsewhereNote(addr, prev, "upgrade"))
+		return nil
+	case daemonAbsent:
 		fmt.Println("no running shared daemon found — child-mode daemons pick up the new binary next session")
+		return nil
 	}
-	fmt.Printf("upgraded v%s → %s\n", healthVersion, rel.TagName)
-	return 0
+	if err := startDetachedDaemon(exePath, addr, prev); err != nil {
+		return fmt.Errorf("binary upgraded but restart failed: %v\n"+
+			"start it manually: memstated --addr %s", err, addr)
+	}
+	fmt.Printf("daemon restarted at %s\n", addr)
+	if next, err := fetchHealth(addr); err == nil {
+		reportRestartDiff(os.Stdout, prev, next)
+	}
+	return nil
+}
+
+// daemonSite says where the shared daemon of an address runs, as this
+// machine sees it.
+type daemonSite int
+
+const (
+	// daemonAbsent: this machine can listen on the address, and no memstate
+	// daemon answers there.
+	daemonAbsent daemonSite = iota
+	// daemonHere: a memstate daemon of this machine answers.
+	daemonHere
+	// daemonElsewhere: the daemon of the address does not run on this
+	// machine. This machine cannot start it, so it must not stop it.
+	daemonElsewhere
+)
+
+// locateDaemon reads /health at addr and says where the daemon of that
+// address runs. The report is nil when no memstate daemon answers.
+//
+// `upgrade` and `restart` stop a daemon and start this binary in its place.
+// That is correct only for a daemon of this machine. On a machine that is
+// a client, MEMSTATE_ADDR names the daemon of another machine: the stop
+// works there, the start cannot work here, and each client of that daemon
+// loses its store until someone starts it again.
+//
+// A daemon is here when two facts hold. This machine can listen on the
+// address (addrIsLocal). The PID in the report is a process of this
+// machine: a forwarded port has a local address and a daemon on the far
+// side. A daemon from an old release reports no PID, and then the address
+// decides.
+func locateDaemon(addr string) (*healthResponse, daemonSite) {
+	h, err := fetchHealth(addr)
+	if err != nil || h.Service != healthServiceName {
+		h = nil
+	}
+	switch {
+	case !addrIsLocal(addr):
+		return h, daemonElsewhere
+	case h == nil:
+		return nil, daemonAbsent
+	case h.Pid != 0 && !processAlive(h.Pid):
+		return h, daemonElsewhere
+	}
+	return h, daemonHere
+}
+
+// elsewhereNote is the line that `memstated <verb>` prints for a daemon
+// that it leaves alone. h is the /health report, nil when none came: the
+// note then says nothing about the state of the daemon, because a daemon
+// across a slow link can answer later than fetchHealth waits.
+func elsewhereNote(addr string, h *healthResponse, verb string) string {
+	version := ""
+	if h != nil {
+		version = " (it runs v" + oneLine(h.Version) + ")"
+	}
+	return fmt.Sprintf("the daemon at %s does not run on this machine%s. "+
+		"This command did not stop it: run `memstated %s` on the machine that runs it.",
+		addr, version, verb)
+}
+
+// addrIsLocal reports whether this machine can listen on addr.
+func addrIsLocal(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	return hostIsLocal(host, interfaceAddrs(), net.LookupHost)
+}
+
+// interfaceAddrs returns the address of each network interface of this
+// machine.
+func interfaceAddrs() []netip.Addr {
+	addrs, _ := net.InterfaceAddrs()
+	var out []netip.Addr
+	for _, a := range addrs {
+		var ip net.IP
+		switch v := a.(type) {
+		case *net.IPNet:
+			ip = v.IP
+		case *net.IPAddr:
+			ip = v.IP
+		}
+		if parsed, ok := netip.AddrFromSlice(ip); ok {
+			out = append(out, parsed.Unmap())
+		}
+	}
+	return out
+}
+
+// hostIsLocal reports whether host, the host part of a listen address, is
+// an address of this machine: empty (each interface), a loopback or
+// unspecified address, or one of local, the addresses of the interfaces.
+// A name is local when each address that lookup gives for it is local. A
+// name that does not resolve is not local: the caller then leaves the
+// daemon alone, which is the safe result. For an IP address this is the
+// rule of isRemoteAddr in the proxy, which does not start a daemon for an
+// address of another machine.
+func hostIsLocal(host string, local []netip.Addr, lookup func(string) ([]string, error)) bool {
+	if host == "" {
+		return true
+	}
+	here := func(s string) bool {
+		ip, err := netip.ParseAddr(s)
+		if err != nil {
+			return false
+		}
+		ip = ip.WithZone("").Unmap()
+		return ip.IsLoopback() || ip.IsUnspecified() || slices.Contains(local, ip)
+	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return here(host)
+	}
+	ips, err := lookup(host)
+	if err != nil || len(ips) == 0 {
+		return false
+	}
+	return !slices.ContainsFunc(ips, func(s string) bool { return !here(s) })
 }
 
 // checksumAsset is the release asset that lists the SHA-256 of every other

@@ -4,12 +4,16 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -212,5 +216,251 @@ func TestUpgradeRestartKeepsConfig(t *testing.T) {
 		h.EmbedTimeout != "7s" || h.IdleTimeout != "20m0s" || h.Pid == 0 ||
 		strings.Join(h.Args, " ") != "--addr "+addr+" --embed-model keep-me --embed-timeout 7s --idle-timeout 20m" {
 		t.Fatalf("restarted daemon lost config: %+v", h)
+	}
+}
+
+// daemonOfAnotherMachine answers /health as a memstate daemon does, with a
+// PID that is the PID of no process on this machine, and counts the
+// shutdown requests. It stands for a daemon that this machine reaches
+// through a forwarded port: the address is local, the process is not.
+func daemonOfAnotherMachine(t *testing.T) (addr string, stops *atomic.Int32) {
+	t.Helper()
+	// The home directory holds the daemon log. Keep the test out of the
+	// real one.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("MEMSTATE_DB", filepath.Join(t.TempDir(), "memstate.db"))
+	t.Setenv("MEMSTATE_CONFIG", "off")
+
+	// A process that ended: its PID is free.
+	gone := exec.Command(os.Args[0], "-test.run=^$")
+	if err := gone.Run(); err != nil {
+		t.Fatal(err)
+	}
+	pid := gone.Process.Pid
+
+	stops = new(atomic.Int32)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, healthResponse{
+			Service: healthServiceName, Version: "0.9.1", Pid: pid,
+			Args: []string{"--addr", "0.0.0.0:8765"},
+		})
+	})
+	mux.HandleFunc("POST /admin/shutdown", func(w http.ResponseWriter, r *http.Request) {
+		stops.Add(1)
+		w.WriteHeader(http.StatusAccepted)
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	return strings.TrimPrefix(ts.URL, "http://"), stops
+}
+
+// The bug: on a machine that is a client of a daemon on another machine,
+// MEMSTATE_ADDR names that daemon. `memstated upgrade` stopped it, and
+// could not start it again, because only the other machine can.
+func TestUpgradeLeavesADaemonOfAnotherMachine(t *testing.T) {
+	addr, stops := daemonOfAnotherMachine(t)
+	dir := t.TempDir()
+	exe, download := filepath.Join(dir, "memstated"), filepath.Join(dir, "memstated.download")
+	if err := os.WriteFile(exe, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(download, []byte("new"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := installDownload(download, exe, addr); err != nil {
+		t.Errorf("installDownload: %v", err)
+	}
+	if n := stops.Load(); n != 0 {
+		t.Errorf("the daemon of another machine got %d shutdown requests, want 0", n)
+	}
+	if got, _ := os.ReadFile(exe); string(got) != "new" {
+		t.Errorf("binary holds %q, want the download", got)
+	}
+}
+
+// `memstated restart` has the same rule. It cannot start the daemon again,
+// so it must not stop it.
+func TestRestartLeavesADaemonOfAnotherMachine(t *testing.T) {
+	addr, stops := daemonOfAnotherMachine(t)
+	if code := cmdRestart([]string{"--addr", addr}); code == 0 {
+		t.Error("restart of a daemon of another machine reported success")
+	}
+	if n := stops.Load(); n != 0 {
+		t.Errorf("the daemon of another machine got %d shutdown requests, want 0", n)
+	}
+}
+
+func TestHostIsLocal(t *testing.T) {
+	// The machine of the bug: 192.168.1.196, a client of the daemon at
+	// 192.168.1.200.
+	local := []netip.Addr{netip.MustParseAddr("192.168.1.196"), netip.MustParseAddr("fe80::1c2")}
+	names := map[string][]string{
+		"localhost":   {"127.0.0.1", "::1"},
+		"this-box":    {"192.168.1.196"},
+		"desktop":     {"192.168.1.200"},
+		"two-homes":   {"192.168.1.196", "192.168.1.200"},
+		"no-address":  {},
+		"not-address": {"desktop"},
+	}
+	lookup := func(name string) ([]string, error) {
+		ips, ok := names[name]
+		if !ok {
+			return nil, fmt.Errorf("lookup %s: no such host", name)
+		}
+		return ips, nil
+	}
+	cases := []struct {
+		host string
+		want bool
+	}{
+		{"192.168.1.200", false}, // the bug input
+		{"100.64.0.10", false},
+		{"", true},
+		{"127.0.0.1", true},
+		{"127.8.9.10", true},
+		{"::1", true},
+		{"0.0.0.0", true},
+		{"::", true},
+		{"192.168.1.196", true},
+		{"::ffff:192.168.1.196", true},
+		{"::ffff:192.168.1.200", false},
+		{"fe80::1c2%eth0", true},
+		{"fe80::1c3%eth0", false},
+		{"localhost", true},
+		{"this-box", true},
+		{"desktop", false},
+		{"two-homes", false},
+		{"no-address", false},
+		{"not-address", false},
+		{"unknown.example", false},
+	}
+	for _, c := range cases {
+		if got := hostIsLocal(c.host, local, lookup); got != c.want {
+			t.Errorf("hostIsLocal(%q) = %v, want %v", c.host, got, c.want)
+		}
+	}
+}
+
+// An IP address is local exactly when it is a loopback address, the
+// unspecified address, or an address of an interface. The form of the
+// address (IPv4, IPv4 in IPv6, with a zone) does not change the answer.
+func TestHostIsLocalProperty(t *testing.T) {
+	noLookup := func(name string) ([]string, error) {
+		return nil, fmt.Errorf("lookup of %q: an IP address needs none", name)
+	}
+	ipv4 := rapid.Custom(func(t *rapid.T) netip.Addr {
+		// A small range, so that an address is often one of the interfaces.
+		return netip.AddrFrom4([4]byte{
+			rapid.SampledFrom([]byte{0, 10, 127, 192}).Draw(t, "a"), 0, 0,
+			byte(rapid.IntRange(0, 3).Draw(t, "d")),
+		})
+	})
+	ipv6 := rapid.Custom(func(t *rapid.T) netip.Addr {
+		var b [16]byte
+		b[0] = rapid.SampledFrom([]byte{0, 0xfd, 0xfe}).Draw(t, "first")
+		b[15] = byte(rapid.IntRange(0, 3).Draw(t, "last"))
+		return netip.AddrFrom16(b)
+	})
+	addr := rapid.OneOf(ipv4, ipv6)
+	rapid.Check(t, func(t *rapid.T) {
+		local := rapid.SliceOfN(addr, 0, 4).Draw(t, "interfaces")
+		ip := addr.Draw(t, "ip")
+		want := ip.IsLoopback() || ip.IsUnspecified() || slices.Contains(local, ip)
+
+		forms := []string{ip.String()}
+		if ip.Is4() {
+			forms = append(forms, netip.AddrFrom16(ip.As16()).String())
+		} else {
+			forms = append(forms, ip.WithZone("eth0").String())
+		}
+		for _, host := range forms {
+			if got := hostIsLocal(host, local, noLookup); got != want {
+				t.Fatalf("hostIsLocal(%q) with interfaces %v = %v, want %v", host, local, got, want)
+			}
+		}
+	})
+}
+
+func TestLocateDaemon(t *testing.T) {
+	// A daemon of this machine: the real router reports the PID of this
+	// process.
+	ts := httptest.NewServer(newRouter(newTestStore(t), nil, nil))
+	t.Cleanup(ts.Close)
+	here := strings.TrimPrefix(ts.URL, "http://")
+	if h, site := locateDaemon(here); site != daemonHere || h == nil || h.Pid != os.Getpid() {
+		t.Errorf("a daemon of this machine: site %d, report %+v", site, h)
+	}
+
+	// The address is local and nothing listens there.
+	if h, site := locateDaemon(reserveAndRelease(t)); site != daemonAbsent || h != nil {
+		t.Errorf("a free local port: site %d, report %+v", site, h)
+	}
+
+	// The address is local and the process is not: a forwarded port.
+	forwarded, _ := daemonOfAnotherMachine(t)
+	if h, site := locateDaemon(forwarded); site != daemonElsewhere || h == nil {
+		t.Errorf("a daemon behind a forwarded port: site %d, report %+v", site, h)
+	}
+
+	// The address is not one of this machine. 192.0.2.0/24 is the
+	// documentation range (RFC 5737): no interface has it and nothing
+	// answers there.
+	if h, site := locateDaemon("192.0.2.1:8765"); site != daemonElsewhere || h != nil {
+		t.Errorf("an address of another machine: site %d, report %+v", site, h)
+	}
+
+	// An old daemon reports no PID. Then the address decides.
+	old := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, healthResponse{Service: healthServiceName, Version: "0.5.0"})
+	}))
+	t.Cleanup(old.Close)
+	if _, site := locateDaemon(strings.TrimPrefix(old.URL, "http://")); site != daemonHere {
+		t.Errorf("a local daemon that reports no PID: site %d, want daemonHere", site)
+	}
+}
+
+// A restart with the address of another machine must not start a daemon
+// here either: the daemon cannot listen on that address.
+func TestRestartRefusesAnAddressOfAnotherMachine(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("MEMSTATE_DB", filepath.Join(t.TempDir(), "memstate.db"))
+	t.Setenv("MEMSTATE_CONFIG", "off")
+	start := time.Now()
+	if code := cmdRestart([]string{"--addr", "192.0.2.1:8765"}); code == 0 {
+		t.Error("restart at an address of another machine reported success")
+	}
+	// startDetachedDaemon waits 5 seconds for /health. A refusal does not.
+	if took := time.Since(start); took > 3*time.Second {
+		t.Errorf("restart took %v: it tried to start a daemon", took)
+	}
+}
+
+// Each address of an interface of this machine is local, in the form that
+// a user writes in --addr or MEMSTATE_ADDR.
+func TestAddrIsLocalOnThisMachine(t *testing.T) {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(addrs) == 0 {
+		t.Skip("this machine reports no interface address")
+	}
+	for _, a := range addrs {
+		host, _, _ := strings.Cut(a.String(), "/")
+		if addr := net.JoinHostPort(host, "8765"); !addrIsLocal(addr) {
+			t.Errorf("addrIsLocal(%q) = false for an address of this machine", addr)
+		}
+	}
+	for _, addr := range []string{"192.0.2.1:8765", "[2001:db8::1]:8765", "192.0.2.1", ""} {
+		if addrIsLocal(addr) {
+			t.Errorf("addrIsLocal(%q) = true", addr)
+		}
+	}
+	for _, addr := range []string{":8765", "127.0.0.1:8765", "localhost:8765", "[::1]:8765", "0.0.0.0:8765"} {
+		if !addrIsLocal(addr) {
+			t.Errorf("addrIsLocal(%q) = false", addr)
+		}
 	}
 }

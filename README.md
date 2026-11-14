@@ -515,6 +515,12 @@ memstated status --addr 127.0.0.1:8765               # GET /health
 memstated restart --addr 127.0.0.1:8765              # stop + start detached with the same config
 ```
 
+`memstated restart` and `memstated upgrade` stop a daemon only when it
+runs on this machine. If `MEMSTATE_ADDR` names the daemon of another
+machine, `restart` stops with a message and `upgrade` replaces only the
+binary. This machine cannot start that daemon again, so it does not
+stop it. Run the command on the machine that runs the daemon.
+
 Concurrent writers to the same database file are safe. The daemon uses
 SQLite in WAL mode with a small connection pool. Each write takes the
 write lock when its transaction starts, so other writers wait in a

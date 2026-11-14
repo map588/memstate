@@ -439,7 +439,8 @@ func printUsage() {
   memstated status [--addr HOST:PORT]   query /health
   memstated restart [--addr HOST:PORT]  stop the shared daemon and start it again,
                                    detached, with the same flags plus the current
-                                   environment and config.env
+                                   environment and config.env; only a daemon of
+                                   this machine
   memstated config                 every setting with its value and source, and
                                    whether the running daemon matches
   memstated config set KEY VALUE   persist a setting in ~/.memstate/config.env
@@ -455,7 +456,8 @@ func printUsage() {
                                    projects, status. See "memstate --help".
   memstated upgrade [--addr HOST:PORT]
                                    download the latest release binary over this
-                                   one and restart the shared daemon if running
+                                   one and restart the shared daemon of this
+                                   machine if it runs
   memstated export --project ID | --all [--out FILE] [--db PATH] [--overwrite]
                                    write project memory (full history) to a JSON file
   memstated import [--project ID] [--force] [--db PATH] FILE
@@ -833,6 +835,8 @@ func runningEmbedConfig(addr string) healthResponse {
 // a detached one with the config it reported in /health (restartPlan), so
 // no terminal is tied to the daemon. With nothing running it just starts
 // one on addr with the environment's defaults. Same path `upgrade` uses.
+// It refuses a daemon that does not run on this machine (locateDaemon):
+// it cannot start that one again.
 func cmdRestart(args []string) int {
 	addr := subAddr(args)
 	exePath, err := os.Executable()
@@ -840,8 +844,12 @@ func cmdRestart(args []string) int {
 		fmt.Fprintf(os.Stderr, "memstated restart: %v\n", err)
 		return 1
 	}
-	prev, err := fetchHealth(addr)
-	if err == nil && prev.Service == healthServiceName {
+	prev, site := locateDaemon(addr)
+	switch site {
+	case daemonElsewhere:
+		fmt.Fprintf(os.Stderr, "memstated restart: %s\n", elsewhereNote(addr, prev, "restart"))
+		return 1
+	case daemonHere:
 		if err := stopAndWait(addr, 5*time.Second); err != nil {
 			fmt.Fprintf(os.Stderr, "memstated restart: %v\n", err)
 			return 1
@@ -851,8 +859,7 @@ func cmdRestart(args []string) int {
 			fmt.Fprintf(os.Stderr, "memstated restart: replaying flags %s (flags beat env and config.env)\n",
 				strings.Join(flags, " "))
 		}
-	} else {
-		prev = nil
+	default:
 		fmt.Fprintf(os.Stderr, "memstated restart: nothing running at %s, starting fresh\n", addr)
 	}
 	if err := startDetachedDaemon(exePath, addr, prev); err != nil {
