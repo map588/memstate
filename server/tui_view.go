@@ -343,9 +343,9 @@ func (m *uiModel) footerView() string {
 	case m.screen == screenBrowser && m.search != nil:
 		hint = "enter open the match · esc close the list · s search again · tab pane · q quit"
 	case m.screen == screenTables:
-		hint = "tab pane · ←/→ columns · enter row · pgup/pgdn page · X purge (memories) · r reload · 1 browser · ? keys · q quit"
+		hint = "tab pane · h/l columns · enter row · pgup/pgdn page · X purge (memories) · r reload · 1 browser · ? keys · q quit"
 	default:
-		hint = "? keys · tab pane · / filter · s search · h history · n new · e edit · m meta · d delete · X purge · D delete project · 2 tables · q quit"
+		hint = "? keys · h/l pane · / filter · s search · v versions · n new · e edit · m meta · d delete · X purge · D delete project · 2 tables · q quit"
 	}
 	return line + "\n" + uiFaint.Render(fit(hint, m.width))
 }
@@ -470,13 +470,13 @@ func (m *uiModel) tablesView() string {
 const uiHelpText = `Keys
 
   1 / 2            browser screen / raw tables screen
-  tab, shift+tab   next / previous pane        left, right also move
+  h l, left right  the pane to the left / to the right; tab, shift+tab too
   j k, arrows      move        g G  first / last       pgup pgdn  page
   /                filter the projects or the keypaths by name (esc clears)
   s / S            search the content of this project / of each project;
                    enter opens a match, esc closes the list
   enter, space     fold or open a branch of the keypath tree
-  h                version history of the keypath (esc closes)
+  v                versions of the keypath, tombstones too (esc closes)
   r                read the store again
   q, ctrl+c        quit
 
@@ -496,7 +496,7 @@ Purge (direct on the store file; needs no daemon; no undo)
 
 Raw tables
 
-  left, right      show the columns to the left / to the right
+  h l, left right  show the columns to the left / to the right
   enter            open the row with each column in full
   pgup, pgdn       previous / next page of 100 rows
 

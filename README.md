@@ -617,7 +617,7 @@ shared daemon, reads still work and `search` falls back to FTS. `set`,
 project of the repository you are in and shows every live project.
 
 - **Screen 1, browser:** the projects, the keypath tree of the selected
-  project, and the content of the selected keypath. `h` shows the version
+  project, and the content of the selected keypath. `v` shows the version
   history of a keypath, with its tombstones. `/` filters the projects or the
   keypaths.
 - **Screen 2, raw tables:** the six SQLite tables (`projects`, `memories`,
@@ -629,12 +629,13 @@ project of the repository you are in and shows every live project.
 | Key | Action |
 |---|---|
 | `1` `2` | browser screen, raw tables screen |
+| `h` `l` `←` `→` | the pane to the left, to the right; on the raw tables screen, the columns to the left, to the right |
 | `tab` `shift+tab` | next pane, previous pane |
 | `j` `k` `g` `G` `pgup` `pgdn` | move |
 | `/` | filter the projects or the keypaths by name (`esc` clears it) |
 | `s` `S` | search the content of this project, of each project; `enter` opens a match |
 | `enter` `space` | fold or open a branch |
-| `h` | version history |
+| `v` | versions of the keypath |
 | `n` | new memory: keypath, category, topics, then `$EDITOR` |
 | `e` | edit the content in `$VISUAL` or `$EDITOR`; category and topics stay |
 | `m` | change category and topics |

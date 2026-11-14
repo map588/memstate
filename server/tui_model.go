@@ -521,7 +521,7 @@ func (m *uiModel) searchKey(k tea.KeyPressMsg) tea.Cmd {
 		m.startSearch(false)
 	case "S":
 		m.startSearch(true)
-	case "tab", "shift+tab", "left", "right":
+	case "tab", "shift+tab", "left", "right", "h", "l":
 		if m.focus == paneDetail {
 			m.focus = paneKeys
 		} else {
@@ -594,9 +594,9 @@ func (m *uiModel) browserKey(k tea.KeyPressMsg) tea.Cmd {
 		m.focus = (m.focus + 1) % 3
 	case "shift+tab":
 		m.focus = (m.focus + 2) % 3
-	case "left":
+	case "left", "h":
 		m.focus = max(m.focus-1, paneProjects)
-	case "right":
+	case "right", "l":
 		m.focus = min(m.focus+1, paneDetail)
 	case "/":
 		if m.focus == paneDetail {
@@ -620,7 +620,7 @@ func (m *uiModel) browserKey(k tea.KeyPressMsg) tea.Cmd {
 			m.keyFilter = ""
 			m.selectPath(path)
 		}
-	case "h":
+	case "v":
 		if m.showHistory {
 			m.showHistory, m.history = false, nil
 			break
@@ -724,7 +724,7 @@ func (m *uiModel) browserMove(k tea.KeyPressMsg, node *uiNode) tea.Cmd {
 func (m *uiModel) tablesKey(k tea.KeyPressMsg) tea.Cmd {
 	s := k.String()
 	if m.rowDetail {
-		if s == "esc" || s == "enter" || s == "left" {
+		if s == "esc" || s == "enter" || s == "left" || s == "h" {
 			m.rowDetail = false
 			return nil
 		}
@@ -737,14 +737,14 @@ func (m *uiModel) tablesKey(k tea.KeyPressMsg) tea.Cmd {
 		m.tabFocus ^= 1
 	case "esc":
 		m.tabFocus = 0
-	case "left":
+	case "left", "h":
 		if m.tabFocus == 1 && m.colOff > 0 {
 			m.colOff--
 			m.setGrid()
 			break
 		}
 		m.tabFocus = 0
-	case "right":
+	case "right", "l":
 		if m.tabFocus == 1 && m.colOff+m.colShown < len(m.rawCols) {
 			m.colOff++
 			m.setGrid()

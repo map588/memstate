@@ -233,7 +233,7 @@ func TestUIBrowseAndHistory(t *testing.T) {
 
 	// History shows each version, newest first.
 	uiSelect(t, m, "decisions.db")
-	uiKeys(t, m, "h")
+	uiKeys(t, m, "v")
 	if !m.showHistory || len(m.history) != 2 || m.history[0].Version != 2 {
 		t.Fatalf("history: show=%v versions=%v", m.showHistory, m.history)
 	}
@@ -355,6 +355,54 @@ func TestUINew(t *testing.T) {
 	uiKeys(t, m, "n", "esc")
 	if m.form != nil || !slices.EqualFunc(before, f.memoryRows(t), slices.Equal[[]string]) {
 		t.Fatal("esc did not cancel the form")
+	}
+}
+
+// `h` and `l` move between the panes, as the left key and the right key
+// do. `v` shows the versions; `h` had that job before.
+func TestUIPaneKeys(t *testing.T) {
+	f := newUIFixture(t)
+	m := f.m
+	uiSelect(t, m, "decisions.db")
+	m.focus = paneProjects
+
+	for _, want := range []int{paneKeys, paneDetail, paneDetail} {
+		uiKeys(t, m, "l")
+		if m.focus != want {
+			t.Fatalf("after l: pane %d, want %d", m.focus, want)
+		}
+	}
+	for _, want := range []int{paneKeys, paneProjects, paneProjects} {
+		uiKeys(t, m, "h")
+		if m.focus != want || m.showHistory {
+			t.Fatalf("after h: pane %d, want %d (history=%v)", m.focus, want, m.showHistory)
+		}
+	}
+
+	uiKeys(t, m, "l", "v")
+	if !m.showHistory || len(m.history) != 2 || m.focus != paneDetail {
+		t.Fatalf("v: history=%v versions=%d pane %d", m.showHistory, len(m.history), m.focus)
+	}
+	uiKeys(t, m, "v")
+	if m.showHistory {
+		t.Fatal("the second v did not close the versions")
+	}
+
+	// The list of search matches has two panes.
+	uiKeys(t, m, "s")
+	uiType(t, m, "sqlite")
+	uiKeys(t, m, "enter")
+	if m.search == nil || len(m.search.hits) == 0 {
+		t.Fatalf("search: %+v, status %q", m.search, m.status)
+	}
+	m.focus = paneKeys
+	uiKeys(t, m, "l")
+	if m.focus != paneDetail || m.search == nil {
+		t.Fatalf("l in the match list: pane %d", m.focus)
+	}
+	uiKeys(t, m, "h")
+	if m.focus != paneKeys || m.search == nil {
+		t.Fatalf("h in the match list: pane %d", m.focus)
 	}
 }
 
@@ -600,6 +648,24 @@ func TestUITables(t *testing.T) {
 		t.Fatalf("after left: offset %d, focus %d", m.colOff, m.tabFocus)
 	}
 
+	// `l` and `h` do what the right key and the left key do.
+	uiKeys(t, m, "l")
+	if m.tabFocus != 1 {
+		t.Fatalf("l did not move to the rows: focus %d", m.tabFocus)
+	}
+	for i := 0; i < 2*len(m.rawCols); i++ {
+		uiKeys(t, m, "l")
+	}
+	if m.colOff+m.colShown != len(m.rawCols) {
+		t.Fatalf("after l: offset %d, %d of %d shown", m.colOff, m.colShown, len(m.rawCols))
+	}
+	for i := 0; i < 2*len(m.rawCols); i++ {
+		uiKeys(t, m, "h")
+	}
+	if m.colOff != 0 || m.tabFocus != 0 {
+		t.Fatalf("after h: offset %d, focus %d", m.colOff, m.tabFocus)
+	}
+
 	// The write keys do nothing on this screen.
 	before := f.memoryRows(t)
 	uiKeys(t, m, "d", "e", "n", "m", "D")
@@ -799,7 +865,7 @@ func TestUIEscapeSequencesInContent(t *testing.T) {
 	uiKeys(t, m, "r")
 	uiSelect(t, m, "notes.evil")
 	for _, screen := range []string{uiScreenText(m), func() string {
-		uiKeys(t, m, "h")
+		uiKeys(t, m, "v")
 		return uiScreenText(m)
 	}(), func() string {
 		uiKeys(t, m, "2", "j", "enter", "G", "enter")
@@ -840,7 +906,7 @@ func TestUIKeysProperty(t *testing.T) {
 	dir := t.TempDir()
 	keys := []string{
 		"j", "k", "g", "G", "up", "down", "left", "right", "pgup", "pgdown",
-		"tab", "shift+tab", "enter", "space", "esc", "h", "r", "/", "?", "1", "2",
+		"tab", "shift+tab", "enter", "space", "esc", "h", "l", "v", "r", "/", "?", "1", "2",
 		"n", "e", "m", "d", "D", "a", "o", ".", "backspace", "ctrl+u",
 		"s", "S", "X",
 	}
