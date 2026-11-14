@@ -786,10 +786,17 @@ func (s *Store) WriteBatch(projectID string, sections []Section, meta WriteMeta)
 	return out, nil
 }
 
-// escapeLike backslash-escapes LIKE wildcards. Snake_case keypaths contain
-// `_` (the single-char wildcard), so unescaped prefixes silently over-match.
-func escapeLike(s string) string {
-	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
+// keypathScope is the SQL filter for "col is keypath, or is below keypath",
+// with its arguments. It is the one definition of a subtree for List, the
+// search filter and Purge, and it agrees with SearchFilter.Matches.
+//
+// The match is byte for byte. LIKE is not: it ignores the case of ASCII
+// letters, so "Notes.%" matches "notes.todo", and `_` in a snake_case
+// keypath is its wildcard. substr compares the prefix as it is.
+func keypathScope(col, keypath string) (string, []any) {
+	below := keypath + "."
+	return `(` + col + ` = ? OR substr(` + col + `, 1, length(?)) = ?)`,
+		[]any{keypath, below, below}
 }
 
 // List returns current-version, non-tombstoned memories matching keypath.
@@ -807,8 +814,9 @@ func (s *Store) List(projectID, keypath string) ([]*Memory, error) {
 	`
 	args := []any{projectID}
 	if keypath != "" {
-		q += ` AND (m.keypath = ? OR m.keypath LIKE ? ESCAPE '\')`
-		args = append(args, keypath, escapeLike(keypath)+".%")
+		scope, scopeArgs := keypathScope("m.keypath", keypath)
+		q += ` AND ` + scope
+		args = append(args, scopeArgs...)
 	}
 	q += ` ORDER BY m.keypath`
 	return s.queryMemories(q, args...)
@@ -934,8 +942,9 @@ func (s *Store) searchFTS(projectID, tokens string, filter SearchFilter, limit i
 		args = append(args, filter.Category)
 	}
 	if filter.KeypathPrefix != "" {
-		q += ` AND (m.keypath = ? OR m.keypath LIKE ? ESCAPE '\')`
-		args = append(args, filter.KeypathPrefix, escapeLike(filter.KeypathPrefix)+".%")
+		scope, scopeArgs := keypathScope("m.keypath", filter.KeypathPrefix)
+		q += ` AND ` + scope
+		args = append(args, scopeArgs...)
 	}
 	if len(filter.Topics) > 0 {
 		q += ` AND m.topics IS NOT NULL AND EXISTS (

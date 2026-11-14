@@ -1,8 +1,13 @@
 package main
 
 import (
+	"fmt"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
+
+	"pgregory.net/rapid"
 )
 
 func newTestStore(t *testing.T) *Store {
@@ -212,7 +217,7 @@ func TestProjectDeletedSemantics(t *testing.T) {
 	}
 }
 
-func TestStoreListEscapesLikeWildcards(t *testing.T) {
+func TestStoreListMatchesTheExactPrefix(t *testing.T) {
 	s := newTestStore(t)
 	_, _, _ = s.Write("p", "task_1.detail", "a", WriteMeta{}, false)
 	_, _, _ = s.Write("p", "taskx1.detail", "b", WriteMeta{}, false)
@@ -222,8 +227,119 @@ func TestStoreListEscapesLikeWildcards(t *testing.T) {
 		t.Fatalf("list: %v", err)
 	}
 	if len(list) != 1 || list[0].Keypath != "task_1.detail" {
-		t.Fatalf("underscore must not act as LIKE wildcard: %+v", list)
+		t.Fatalf("underscore must match only itself: %+v", list)
 	}
+}
+
+// A store can hold names that differ only in case: older clients wrote upper
+// case. A recursive delete of "Notes" must not take "notes.todo".
+func TestStoreDeleteSubtreeKeepsTheOtherCase(t *testing.T) {
+	s := newTestStore(t)
+	_, _, _ = s.Write("p", "Notes.old", "from an older client", WriteMeta{}, false)
+	_, _, _ = s.Write("p", "notes.todo", "the live note", WriteMeta{}, false)
+
+	killed, err := s.DeleteSubtree("p", "Notes")
+	if err != nil || !slices.Equal(killed, []string{"Notes.old"}) {
+		t.Fatalf("subtree delete of Notes: %v err=%v", killed, err)
+	}
+	if m, _ := s.GetLatest("p", "notes.todo"); m == nil || m.Tombstone {
+		t.Fatalf("the delete of Notes took notes.todo: %+v", m)
+	}
+}
+
+// The subtree of a keypath is the keypath and each keypath that starts with
+// the keypath and a dot, byte for byte. List, the search filter and
+// DeleteSubtree agree with that rule and with SearchFilter.Matches.
+func TestKeypathScopeProperty(t *testing.T) {
+	dir := t.TempDir()
+	run := 0
+	rapid.Check(t, func(rt *rapid.T) {
+		run++
+		s, err := OpenStore(filepath.Join(dir, fmt.Sprintf("scope%d.db", run)))
+		if err != nil {
+			rt.Fatal(err)
+		}
+		defer s.Close()
+		// Names that differ only in case, and "_", which is a wildcard of
+		// LIKE.
+		keys := []string{"a", "a.b", "a.b.c", "A", "A.b", "a.B", "a_b", "a_b.c", "axb.c", "ab", "ab.c", "a-b.c"}
+		var live []string
+		for _, kp := range keys {
+			switch rapid.IntRange(0, 3).Draw(rt, "state "+kp) {
+			case 0: // absent
+				continue
+			case 1: // tombstoned
+				_, _, _ = s.Write("p", kp, "tok", WriteMeta{}, false)
+				if _, _, err := s.Delete("p", kp); err != nil {
+					rt.Fatal(err)
+				}
+				continue
+			}
+			if _, _, err := s.Write("p", kp, "tok "+kp, WriteMeta{}, false); err != nil {
+				rt.Fatal(err)
+			}
+			live = append(live, kp)
+		}
+		slices.Sort(live)
+		prefix := rapid.SampledFrom(keys).Draw(rt, "prefix")
+		var want []string
+		for _, kp := range live {
+			if kp == prefix || strings.HasPrefix(kp, prefix+".") {
+				want = append(want, kp)
+			}
+		}
+		names := func(mems []*Memory) []string {
+			var out []string
+			for _, m := range mems {
+				out = append(out, m.Keypath)
+			}
+			slices.Sort(out)
+			return out
+		}
+
+		list, err := s.List("p", prefix)
+		if err != nil {
+			rt.Fatal(err)
+		}
+		if got := names(list); !slices.Equal(got, want) {
+			rt.Fatalf("List(%q): %v, want %v", prefix, got, want)
+		}
+		filter := SearchFilter{KeypathPrefix: prefix}
+		hits, err := s.Search("p", "tok", filter, 100)
+		if err != nil {
+			rt.Fatal(err)
+		}
+		if got := names(hits); !slices.Equal(got, want) {
+			rt.Fatalf("Search with prefix %q: %v, want %v", prefix, got, want)
+		}
+		for _, kp := range live {
+			if got := filter.Matches(&Memory{Keypath: kp}); got != slices.Contains(want, kp) {
+				rt.Fatalf("Matches(%q) with prefix %q = %v", kp, prefix, got)
+			}
+		}
+
+		killed, err := s.DeleteSubtree("p", prefix)
+		if err != nil {
+			rt.Fatal(err)
+		}
+		slices.Sort(killed)
+		if !slices.Equal(killed, want) {
+			rt.Fatalf("DeleteSubtree(%q): %v, want %v", prefix, killed, want)
+		}
+		rest, err := s.List("p", "")
+		if err != nil {
+			rt.Fatal(err)
+		}
+		var wantRest []string
+		for _, kp := range live {
+			if !slices.Contains(want, kp) {
+				wantRest = append(wantRest, kp)
+			}
+		}
+		if got := names(rest); !slices.Equal(got, wantRest) {
+			rt.Fatalf("after DeleteSubtree(%q): %v, want %v", prefix, got, wantRest)
+		}
+	})
 }
 
 func TestStoreSearchToleratesPunctuation(t *testing.T) {

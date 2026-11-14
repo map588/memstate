@@ -31,16 +31,13 @@ type PurgedKeypath struct {
 // columns project_id and keypath. recursive adds each keypath below.
 //
 // The match is exact. A purge has no undo, so it must not take a keypath
-// that only looks like the target: LIKE ignores the case of ASCII letters
-// ("Notes.%" matches "notes.x"), so the filter compares the prefix with
-// substr, which does not.
+// that only looks like the target; keypathScope gives the reason.
 func purgeWhere(projectID, keypath string, recursive bool) (string, []any) {
 	if !recursive {
 		return `project_id = ? AND keypath = ?`, []any{projectID, keypath}
 	}
-	below := keypath + "."
-	return `project_id = ? AND (keypath = ? OR substr(keypath, 1, length(?)) = ?)`,
-		[]any{projectID, keypath, below, below}
+	scope, args := keypathScope("keypath", keypath)
+	return `project_id = ? AND ` + scope, append([]any{projectID}, args...)
 }
 
 type rowQuerier interface {
