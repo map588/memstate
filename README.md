@@ -620,8 +620,8 @@ project of the repository you are in and shows every live project.
   project, and the content of the selected keypath. `h` shows the version
   history of a keypath, with its tombstones. `/` filters the projects or the
   keypaths.
-- **Screen 2, raw tables:** the five SQLite tables (`projects`, `memories`,
-  `memories_fts`, `keypath_embeddings`, `meta`) as rows, 100 on a page.
+- **Screen 2, raw tables:** the six SQLite tables (`projects`, `memories`,
+  `memories_fts`, `keypath_embeddings`, `meta`, `purged`) as rows, 100 on a page.
   `memories` shows each version and each tombstone. `enter` opens one row
   with each column in full. This screen only reads.
 

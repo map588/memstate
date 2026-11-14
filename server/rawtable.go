@@ -54,6 +54,12 @@ var rawTables = []rawTable{
 		sel:     "key, value",
 		orderBy: "key",
 	},
+	{
+		name:    "purged",
+		cols:    []string{"project_id", "keypath", "purged_at"},
+		sel:     "project_id, keypath, purged_at",
+		orderBy: "project_id, keypath",
+	},
 }
 
 func findRawTable(name string) (rawTable, bool) {

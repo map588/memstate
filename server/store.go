@@ -61,6 +61,15 @@ CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+-- One row per keypath that a human purged (purge.go). Import does not
+-- restore the versions of a keypath that are not newer than purged_at.
+CREATE TABLE IF NOT EXISTS purged (
+  project_id TEXT    NOT NULL,
+  keypath    TEXT    NOT NULL,
+  purged_at  INTEGER NOT NULL,
+  PRIMARY KEY (project_id, keypath)
+);
 `
 
 // embedSource names what the stored vectors were computed from. Bumping this

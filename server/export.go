@@ -115,6 +115,9 @@ type MergeStats struct {
 	// Relabeled lists the keypaths that have a category or a topic that
 	// the name rule refuses and that Merge converted.
 	Relabeled []string
+	// SkippedPurged lists the keypaths that Merge did not restore because
+	// a human purged them here and the file has no version after the purge.
+	SkippedPurged []string
 }
 
 // RenamedKeypath is one keypath of an export file that Merge converted.
@@ -131,6 +134,11 @@ type RenamedKeypath struct{ From, To string }
 //     through the normal write path, so it supersedes, tombstones, or
 //     dedupes to unchanged exactly as if it had been written by hand;
 //   - otherwise the local version wins and the keypath is skipped.
+//
+// A keypath that was purged here (Store.Purge) is the exception to the
+// first rule: the versions that are not newer than the purge stay out, with
+// force too, because the purge was a decision to erase them. The versions
+// after the purge come in.
 //
 // Ties keep local, so cross-machine clocks only need to be NTP-close.
 // Re-importing the same file is a no-op, which makes A→B→A ping-pong safe.
@@ -254,6 +262,21 @@ func mergeKeypath(tx dbExec, target string, chain []ExportMemory, st *MergeStats
 		if err := checkReservedWrite(target, kp); err != nil {
 			return err
 		}
+	}
+	if at, purged, err := purgedAt(tx, target, kp); err != nil {
+		return err
+	} else if purged {
+		// Keep only the versions after the purge. The chain is in version
+		// order, so they are its end.
+		first := len(chain)
+		for first > 0 && chain[first-1].CreatedAt > at {
+			first--
+		}
+		if first == len(chain) {
+			st.SkippedPurged = append(st.SkippedPurged, kp)
+			return nil
+		}
+		chain = chain[first:]
 	}
 	local, err := getLatestExec(tx, target, kp)
 	if err != nil {

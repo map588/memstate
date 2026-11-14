@@ -700,6 +700,9 @@ func cmdImport(args []string) int {
 		for _, kp := range st.Relabeled {
 			fmt.Printf("  converted the unsafe characters in a category or topic of %q\n", kp)
 		}
+		for _, kp := range st.SkippedPurged {
+			fmt.Printf("  did not restore %q (purged here with memstate ui)\n", kp)
+		}
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "memstated import: %v\n", err)
