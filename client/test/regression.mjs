@@ -343,6 +343,35 @@ async function main() {
     r = await call(client, "memstate_delete_project", { project_id: OUTLINE_PROJECT });
     check("outline: test project deleted", !r.isError, JSON.stringify(r));
 
+    // ---- read guard -------------------------------------------------------
+    // The input that showed the problem: memstate_get keypath="decisions"
+    // returned 29 KB in one session (2026-11). Above 8,000 bytes of content
+    // a subtree read answers with a preview per memory. One keypath still
+    // reads in full.
+    const GUARD_PROJECT = "guard_test";
+    const bigValue = (name) => (name + " " + "lorem ipsum dolor sit amet ".repeat(150)).trim();
+    let guardWrites = true;
+    for (const name of ["auth", "naming", "storage"]) {
+      const w = await call(client, "memstate_set", {
+        project_id: GUARD_PROJECT, new_project: true, keypath: `decisions.${name}`, value: bigValue(name),
+      });
+      guardWrites = guardWrites && !w.isError;
+    }
+    r = await call(client, "memstate_get", { project_id: GUARD_PROJECT, keypath: "decisions" });
+    check("get: a subtree above the content budget returns previews",
+      guardWrites && !r.isError && r.data.truncated === true && r.data.total_count === 3 &&
+        r.data.memories.every((m) => m.content === undefined && m.content_bytes > 4000 &&
+          typeof m.preview === "string" && m.preview.split(" ").length <= 41) &&
+        typeof r.data.note === "string" && r.text.length < 3000,
+      (r.text ?? JSON.stringify(r)).slice(0, 500));
+    r = await call(client, "memstate_get", { project_id: GUARD_PROJECT, keypath: "decisions.auth" });
+    check("get: one keypath above the budget reads in full",
+      !r.isError && r.data.truncated === undefined && r.data.memories.length === 1 &&
+        r.data.memories[0].content === bigValue("auth"),
+      (r.text ?? JSON.stringify(r)).slice(0, 300));
+    r = await call(client, "memstate_delete_project", { project_id: GUARD_PROJECT });
+    check("read guard: test project deleted", !r.isError, JSON.stringify(r));
+
     r = await call(client, "memstate_search", {
       project_id: PROJECT,
       query: "second value",
@@ -881,6 +910,11 @@ async function main() {
     const sysSlug = process.platform === "win32" ? "system32" : "usr";
     const sysEnv = env;
     await withProxy(sysEnv, sysCwd, async (s) => {
+      // Here the instructions name the directory and the way out, which is
+      // their longest form. They must still be below the cut of the client.
+      const sysChars = (s.getInstructions() ?? "").length;
+      check("budget: the instructions of a system directory fit below 4,096 characters",
+        sysChars > 0 && sysChars <= 4096, `${sysChars} chars`);
       let f = await call(s, "memstate_set", { keypath: "notes.a", value: "v" });
       check("system dir: a write to the default project is refused",
         f.isError && f.message.includes("system directory") && f.message.includes("project_name"),
@@ -1216,6 +1250,7 @@ async function main() {
   }
 
   await attachToSlowDaemon();
+  await readFromOlderDaemon();
   await attachRetriesHealth();
   await noDaemonForRemoteAddr();
   await reconnectAfterDaemonStop();
@@ -1289,6 +1324,63 @@ async function withSharedDaemon(env, fn) {
     execFileSync(DAEMON, ["stop", "--addr", addr], { env, stdio: "ignore" });
     await Promise.race([exited, new Promise((r) => setTimeout(r, 5000))]);
     if (child.exitCode === null) child.kill("SIGKILL");
+  }
+}
+
+// readFromOlderDaemon: a daemon from before the read guard refuses the
+// request field max_content_bytes, as it refuses each field it does not
+// know. A newer proxy then got HTTP 400 for each keypath read (a client
+// machine whose daemon is on another machine, or a daemon that was not
+// restarted after an upgrade). The proxy must read again without the field,
+// and must not ask that daemon a second time.
+async function readFromOlderDaemon() {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "memstate-older-"));
+  let refused = 0;
+  const fake = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => { body += chunk; });
+    req.on("end", () => {
+      const answer = (status, obj) => {
+        res.writeHead(status, { "content-type": "application/json" });
+        res.end(JSON.stringify(obj));
+      };
+      if (req.url.endsWith("/health")) {
+        answer(200, { service: "memstate", version: "0.10.1", embed_model: "" });
+      } else if (req.url.endsWith("/keypaths") && body.includes("max_content_bytes")) {
+        refused++;
+        answer(400, { error: 'json: unknown field "max_content_bytes"' });
+      } else if (req.url.endsWith("/keypaths")) {
+        answer(200, {
+          memories: [{ id: 1, project_id: "older", keypath: "notes.a", content: "from the older daemon", version: 1, created_at: 1794900000 }],
+          total_count: 1,
+        });
+      } else {
+        answer(404, { error: `no route ${req.url}` });
+      }
+    });
+  });
+  await new Promise((resolve) => fake.listen(0, "127.0.0.1", resolve));
+  const env = {
+    ...process.env,
+    MEMSTATE_ADDR: `127.0.0.1:${fake.address().port}`,
+    HOME: home,
+    MEMSTATE_NO_UPDATE_CHECK: "1",
+    MEMSTATE_CONFIG: "off",
+  };
+  try {
+    await withProxy(env, home, async (older) => {
+      let r = await call(older, "memstate_get", { project_id: "older", keypath: "notes" });
+      check("older daemon: a keypath read works without the content budget",
+        !r.isError && r.data.memories?.[0]?.content === "from the older daemon" && refused === 1,
+        JSON.stringify({ r, refused }));
+      r = await call(older, "memstate_get", { project_id: "older", keypath: "notes" });
+      check("older daemon: the proxy sends the field one time only",
+        !r.isError && refused === 1,
+        JSON.stringify({ r, refused }));
+    });
+  } finally {
+    fake.close();
+    fs.rmSync(home, { recursive: true, force: true });
   }
 }
 

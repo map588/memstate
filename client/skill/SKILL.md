@@ -278,6 +278,7 @@ queue. The operation is synchronous. **Response:** `method`
 ```bash
 python3 scripts/memstate_get.py                               # this repo's tree (names only)
 python3 scripts/memstate_get.py --keypath KP --include-content
+python3 scripts/memstate_get.py --keypath KP --include-content --full   # all content of a large subtree
 python3 scripts/memstate_get.py --list-projects               # all project ids
 python3 scripts/memstate_get.py --project ID --keypath KP     # another project
 python3 scripts/memstate_get.py --memory-id N                 # one memory by integer id
@@ -286,7 +287,10 @@ python3 scripts/memstate_get.py --memory-id N                 # one memory by in
 **Response:** the projects list returns `projects[]`. The tree returns
 `domains[]` and `total_memories`. A subtree returns `memories[]` and
 `total_count`. The tree gives names only. Pass a keypath (with
-`--include-content`) to read values.
+`--include-content`) to read values. A subtree with more than 8000 bytes
+of content returns `truncated: true` and, for each memory, a 40-word
+`preview` and `content_bytes` in place of `content`: read the keypaths
+you need, or pass `--full`. One keypath always returns its content.
 
 ### `memstate_search.py`: find current memories
 

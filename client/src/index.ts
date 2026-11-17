@@ -735,6 +735,31 @@ function slimMemories(out: Row): Row {
   return { ...out, memories };
 }
 
+// READ_BUDGET is the content, in bytes, that one subtree read returns in
+// full. Above it the daemon answers with a preview per memory, and the model
+// reads the keypaths that it needs. One keypath always reads in full. A read
+// of all "decisions" of one project returned 29 KB before this (2026-11).
+// The skill script memstate_get.py holds the same number.
+const READ_BUDGET = 8000;
+
+// daemonTakesReadBudget goes false when the daemon refuses the field: a
+// daemon from before the read guard refuses each field it does not know, and
+// each keypath read would fail. The proxy then reads without the field until
+// it stops; the read is complete, as it was before the guard.
+let daemonTakesReadBudget = true;
+
+async function readKeypaths(body: Row): Promise<Row> {
+  if (daemonTakesReadBudget) {
+    try {
+      return (await postJSON("/keypaths", { ...body, max_content_bytes: READ_BUDGET })) as Row;
+    } catch (err) {
+      if (!String(err).includes('unknown field "max_content_bytes"')) throw err;
+      daemonTakesReadBudget = false;
+    }
+  }
+  return (await postJSON("/keypaths", body)) as Row;
+}
+
 // slimSearch drops the row fields of each hit. A search of one project
 // names the project once; a search of all projects names it on each hit.
 function slimSearch(out: Row, project: string): Row {
@@ -1296,7 +1321,9 @@ const TOOLS: ToolDef[] = [
       "Read memories. No arguments → the keypath names of this repo as an " +
       "outline in `tree`, no content (`a: b, c` = a.b and a.c; `a*:` = a also " +
       "holds a value; indent nests). `keypath` → the memories at and below it, " +
-      "with content. `list_projects: true` → all project ids. Call at task start.",
+      "with content; a subtree above 8,000 bytes returns a `preview` per " +
+      "memory instead: read the keypaths you need. `list_projects: true` → all " +
+      "project ids. Call at task start.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1331,12 +1358,12 @@ const TOOLS: ToolDef[] = [
       const pid = await resolveProject(a);
       if (a.keypath) {
         return slimMemories(
-          (await postJSON("/keypaths", {
+          await readKeypaths({
             project_id: pid,
             keypath: a.keypath,
             recursive: a.recursive ?? true,
             include_content: a.include_content ?? true,
-          })) as Row
+          })
         );
       }
       const tree = (await getJSON(
@@ -1511,9 +1538,8 @@ const TOOLS: ToolDef[] = [
   {
     name: "memstate_delete_project",
     description:
-      "Soft-delete an entire project: reads and searches stop returning " +
-      "it. Any later write to the same project_id revives it with all " +
-      "memories intact. Nothing is destroyed.",
+      "Soft-delete a project: reads and searches stop returning it. A later " +
+      "write to the project_id revives it with all memories.",
     inputSchema: {
       type: "object",
       properties: { project_id: { type: "string" } },

@@ -738,6 +738,30 @@ type keypathsReq struct {
 	Keypath        string `json:"keypath,omitempty"`
 	Recursive      bool   `json:"recursive,omitempty"`
 	IncludeContent bool   `json:"include_content,omitempty"`
+	// MaxContentBytes is the read guard. A read of more than one memory
+	// whose content is above this size answers with a preview per memory.
+	// Zero means no limit: the CLI and older clients send none. The MCP
+	// proxy sends its budget, because a read of all "decisions" of one
+	// project put 29 KB into the context of a model (2026-11).
+	MaxContentBytes int `json:"max_content_bytes,omitempty"`
+}
+
+// memoryPreview stands for one memory in a read that is above its content
+// limit: the reference of the memory with a preview, and the size of the
+// content that the read left out.
+type memoryPreview struct {
+	MemoryRef
+	ContentBytes int `json:"content_bytes"`
+}
+
+// overContentLimit reports the content size of a read and whether the read
+// must answer with previews. One memory always reads in full, so each fact
+// stays readable whatever its size.
+func overContentLimit(list []*Memory, limit int) (total int, over bool) {
+	for _, m := range list {
+		total += len(m.Content)
+	}
+	return total, limit > 0 && len(list) > 1 && total > limit
 }
 
 func handleKeypaths(store *Store) http.HandlerFunc {
@@ -750,6 +774,10 @@ func handleKeypaths(store *Store) http.HandlerFunc {
 		in.ProjectID = legacyProject(in.ProjectID)
 		if in.ProjectID == "" {
 			writeErr(w, http.StatusBadRequest, "project_id required")
+			return
+		}
+		if in.MaxContentBytes < 0 {
+			writeErr(w, http.StatusBadRequest, "max_content_bytes must not be negative")
 			return
 		}
 		if err := checkProjectLive(store, in.ProjectID); err != nil {
@@ -767,10 +795,23 @@ func handleKeypaths(store *Store) http.HandlerFunc {
 				m.Content = ""
 			}
 		}
-		writeJSON(w, http.StatusOK, map[string]any{
+		resp := map[string]any{
 			"memories":    orEmpty(list),
 			"total_count": len(list),
-		})
+		}
+		if total, over := overContentLimit(list, in.MaxContentBytes); in.IncludeContent && over {
+			previews := make([]memoryPreview, len(list))
+			for i, m := range list {
+				previews[i] = memoryPreview{MemoryRef: *memoryRef(m, true), ContentBytes: len(m.Content)}
+			}
+			resp["memories"] = previews
+			resp["truncated"] = true
+			resp["note"] = fmt.Sprintf(
+				"%d memories hold %d bytes of content, above the limit of %d. "+
+					"Each carries a preview. Read the keypaths that you need.",
+				len(list), total, in.MaxContentBytes)
+		}
+		writeJSON(w, http.StatusOK, resp)
 	}
 }
 
