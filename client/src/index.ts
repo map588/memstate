@@ -294,8 +294,9 @@ const HOST_PROP = {
   type: "boolean",
   default: false,
   description:
-    "true: the fact holds only on this machine (a build path, a port). " +
-    `Adds the topic "${HOST_TOPIC}".`,
+    // No host name here: the size of the schemas must not follow it.
+    // INSTRUCTIONS names the topic.
+    "true: the fact holds only on this machine (a build path, a port); adds its host topic.",
 };
 
 // hostTopics returns the topics a write sends: the caller's, plus

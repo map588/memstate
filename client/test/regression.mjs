@@ -152,14 +152,28 @@ async function main() {
     // Measured 2026-11-17: the text was 7,816 characters, so the host tag and
     // the session project rules never reached the model. A loaded tool schema
     // is part of each request. These limits keep later edits inside that room.
-    const instructionChars = (client.getInstructions() ?? "").length;
+    // The instructions name the host slug, so their size follows the host
+    // name. The budget counts a slug of 8 characters, or a machine with a
+    // long name fails a check that is about the text. The schemas must not
+    // name the host: on 2026-11-17 the CI runner had a longer name than the
+    // machine of the author and the schemas were 9,504 characters there.
+    const budgetText = client.getInstructions() ?? "";
+    const budgetSlug = /host slug is "([a-z0-9_]+)"/.exec(budgetText)?.[1] ?? "";
+    const slugUses = budgetSlug === "" ? 0
+      : budgetText.split(`host.${budgetSlug}.`).length - 1 +
+        budgetText.split(`"${budgetSlug}"`).length - 1 +
+        budgetText.split(`host_${budgetSlug}`).length - 1;
+    const instructionChars = budgetText.length - slugUses * (budgetSlug.length - 8);
     check("budget: the instructions fit below the 4,096-character cut of the client",
-      instructionChars > 0 && instructionChars <= 3900,
-      `${instructionChars} chars`);
-    const schemaChars = JSON.stringify(tools).length;
+      budgetText.length > 0 && slugUses === 4 && instructionChars <= 3900,
+      `${instructionChars} chars with an 8-character host slug (${slugUses} uses), ${budgetText.length} here`);
+    const schemaText = JSON.stringify(tools);
     check("budget: the tool schemas stay within 9,500 characters",
-      schemaChars <= 9500,
-      `${schemaChars} chars`);
+      schemaText.length <= 9500,
+      `${schemaText.length} chars`);
+    check("budget: the tool schemas do not name this host",
+      budgetSlug !== "" && !schemaText.includes(`host_${budgetSlug}`),
+      "a schema carries the host topic, so its size follows the host name");
 
     // ---- denied prompts ---------------------------------------------------
     // Each text that tells the agent to save must also forbid saving a
