@@ -655,6 +655,113 @@ function countValues(nodes: TreeNode[]): number {
   return n;
 }
 
+// ---------- result rendering ----------
+//
+// A tool result goes into the context of a model, and each later turn reads
+// it again. The daemon answers with the rows as it stores them. The functions
+// below keep what the model can use and drop what the model sent (source,
+// topics) or cannot use (row ids of reads, epoch times). The REST shapes of
+// the daemon do not change: the CLI, the scripts and the hooks read them.
+// Measured 2026-11-17: the tree of one project was 24 KB as indented JSON and
+// 3 KB as an outline.
+
+type Row = Record<string, unknown>;
+
+function omit(row: Row, keys: string[]): Row {
+  const out: Row = {};
+  for (const [k, v] of Object.entries(row)) {
+    if (!keys.includes(k)) out[k] = v;
+  }
+  return out;
+}
+
+// treeOutline renders a keypath tree as text. A line "a, b" lists leaves. A
+// line "name: a, b" is a branch with its leaves, and "name*:" is a branch
+// that also holds a value. Two spaces of indent are one level. A name holds
+// no space, comma, colon or star (the daemon's name rule), so the outline
+// reads back to the same keypaths.
+function treeOutline(nodes: TreeNode[], depth = 0): string {
+  const pad = "  ".repeat(depth);
+  const isBranch = (n: TreeNode) => (n.children ?? []).length > 0;
+  const lines: string[] = [];
+  const leaves = nodes.filter((n) => !isBranch(n)).map((n) => n.name);
+  if (leaves.length) lines.push(pad + leaves.join(", "));
+  for (const n of nodes.filter(isBranch)) {
+    const children = n.children ?? [];
+    const names = children.filter((c) => !isBranch(c)).map((c) => c.name);
+    lines.push(
+      pad + n.name + (n.has_value ? "*" : "") + ":" + (names.length ? " " + names.join(", ") : "")
+    );
+    const below = treeOutline(children.filter(isBranch), depth + 1);
+    if (below) lines.push(below);
+  }
+  return lines.join("\n");
+}
+
+// slimTree replaces the node list of a /tree answer with its outline.
+function slimTree(tree: Row): Row {
+  return { ...omit(tree, ["domains"]), tree: treeOutline((tree.domains as TreeNode[]) ?? []) };
+}
+
+type WriteRef = {
+  id?: number;
+  project_id?: string;
+  keypath?: string;
+  version?: number;
+  preview?: string;
+};
+type WriteResult = { keypath?: string; action?: string; stored?: WriteRef; superseded?: WriteRef };
+
+// slimWrite names one write: what happened, where, and the 40-word preview
+// of the version that the write replaced. project_id stays, because it tells
+// the model which project the write went to.
+function slimWrite(out: WriteResult): Row {
+  const row: Row = {
+    action: out.action,
+    project_id: out.stored?.project_id,
+    keypath: out.stored?.keypath ?? out.keypath,
+    version: out.stored?.version,
+    id: out.stored?.id,
+  };
+  if (out.action === "superseded" && out.superseded?.preview) {
+    row.prior = out.superseded.preview;
+  }
+  return row;
+}
+
+// slimRemember is slimWrite for each section. All sections go to one
+// project, so the project is named once.
+function slimRemember(out: { method?: string; items?: WriteResult[] }): Row {
+  const items = out.items ?? [];
+  return {
+    method: out.method,
+    project_id: items[0]?.stored?.project_id,
+    items: items.map((item) => omit(slimWrite(item), ["project_id"])),
+  };
+}
+
+// slimMemories drops the row fields of a keypath read and gives the write
+// time as a date, which tells the model how old a fact is.
+function slimMemories(out: Row): Row {
+  const memories = ((out.memories as Row[]) ?? []).map((m) => {
+    const row = omit(m, ["id", "project_id", "parent_id", "created_at"]);
+    if (typeof m.created_at === "number") {
+      row.updated = new Date(m.created_at * 1000).toISOString().slice(0, 10);
+    }
+    return row;
+  });
+  return { ...out, memories };
+}
+
+// slimSearch drops the row fields of each hit. A search of one project
+// names the project once; a search of all projects names it on each hit.
+function slimSearch(out: Row, project: string): Row {
+  const drop = ["id", "source", "version", "created_at"];
+  if (project) drop.push("project_id");
+  const results = ((out.results as Row[]) ?? []).map((hit) => omit(hit, drop));
+  return { ...(project ? { project_id: project } : {}), ...omit(out, ["query"]), results };
+}
+
 // isOtherHost reports whether a shared-scope keypath describes another
 // machine.
 function isOtherHost(keypath: string): boolean {
@@ -1085,7 +1192,7 @@ const TOOLS: ToolDef[] = [
     description:
       "Save ONE short fact at ONE keypath (e.g. `config.port` = `8080`). " +
       "To update a fact, write the SAME keypath with the new value — the " +
-      "old version is preserved and named as `superseded` with a 40-word " +
+      "old version is preserved and the result carries `prior`, its 40-word " +
       "preview (memstate_history has it in full). Do not " +
       "create a new keypath for a new value of the same fact. For " +
       "multi-fact markdown summaries use memstate_remember instead.",
@@ -1140,14 +1247,16 @@ const TOOLS: ToolDef[] = [
       required: ["keypath", "value"],
     },
     handler: async (a) =>
-      postJSON("/memories/store", {
-        project_id: await resolveProject(a, true),
-        keypath: a.keypath,
-        content: a.value,
-        source: a.source,
-        category: a.category,
-        topics: hostTopics(a),
-      }),
+      slimWrite(
+        (await postJSON("/memories/store", {
+          project_id: await resolveProject(a, true),
+          keypath: a.keypath,
+          content: a.value,
+          source: a.source,
+          category: a.category,
+          topics: hostTopics(a),
+        })) as WriteResult
+      ),
   },
   {
     name: "memstate_remember",
@@ -1215,17 +1324,20 @@ const TOOLS: ToolDef[] = [
       required: ["content"],
     },
     handler: async (a) =>
-      postJSON("/memories/remember", {
-        ...stripProxyFields(a),
-        topics: hostTopics(a),
-        project_id: await resolveProject(a, true),
-      }),
+      slimRemember(
+        (await postJSON("/memories/remember", {
+          ...stripProxyFields(a),
+          topics: hostTopics(a),
+          project_id: await resolveProject(a, true),
+        })) as { method?: string; items?: WriteResult[] }
+      ),
   },
   {
     name: "memstate_get",
     description:
-      "Read memories. No arguments → this repo's keypath tree (NAMES " +
-      "ONLY, no content); pass `keypath` → the memories at that keypath " +
+      "Read memories. No arguments → this repo's keypath names as an " +
+      "outline in `tree`, no content (`a: b, c` means a.b and a.c; `a*:` " +
+      "means a also holds a value; indent nests); pass `keypath` → the memories at that keypath " +
       "and below, with content; pass `list_projects: true` → all project " +
       "ids in the store. Call at task start to load prior context.",
     inputSchema: {
@@ -1263,18 +1375,20 @@ const TOOLS: ToolDef[] = [
       }
       const pid = await resolveProject(a);
       if (a.keypath) {
-        return postJSON("/keypaths", {
-          project_id: pid,
-          keypath: a.keypath,
-          recursive: a.recursive ?? true,
-          include_content: a.include_content ?? true,
-        });
+        return slimMemories(
+          (await postJSON("/keypaths", {
+            project_id: pid,
+            keypath: a.keypath,
+            recursive: a.recursive ?? true,
+            include_content: a.include_content ?? true,
+          })) as Row
+        );
       }
       const tree = (await getJSON(
         `/tree?project_id=${encodeURIComponent(pid)}`
       )) as Record<string, unknown>;
       if (pid === SHARED_PROJECT) {
-        return tree;
+        return slimTree(tree);
       }
       // The shared scope rides along with every project tree, pruned to
       // this machine, so the agent sees env facts and lessons without
@@ -1290,8 +1404,8 @@ const TOOLS: ToolDef[] = [
       }
       const domains = pruneOtherHosts(shared.domains ?? []);
       return {
-        ...tree,
-        shared: { host: HOST_SLUG, domains, total_memories: countValues(domains) },
+        ...slimTree(tree),
+        shared: { host: HOST_SLUG, tree: treeOutline(domains), total_memories: countValues(domains) },
       };
     },
   },
@@ -1381,7 +1495,7 @@ const TOOLS: ToolDef[] = [
         out.results = out.results.filter((h) => !isOtherHost(h.keypath));
         out.total_found = out.results.length;
       }
-      return out;
+      return slimSearch(out as Row, all_projects ? "" : String(body.project_id));
     },
   },
   {
@@ -1691,7 +1805,7 @@ async function main(): Promise<void> {
     try {
       const result = withSessionProject(await tool.handler(request.params.arguments ?? {}));
       return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        content: [{ type: "text", text: JSON.stringify(result) }],
       };
     } catch (err) {
       return {

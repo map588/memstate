@@ -324,11 +324,13 @@ encode this loop.
 
 ### `memstate_remember`: write shape
 
-The tool returns `{ method, items: [{keypath, action, stored, superseded?}] }`
-for both the explicit-keypath mode and the heading-extract mode. `stored`
-and `superseded` name the versions and carry no content. `superseded` has
-a 40-word `preview`. Search hits carry a `preview` too, and the agent reads
-the keypaths it wants with `memstate_get`.
+The tool returns `{ method, project_id, items: [{keypath, action, version, id, prior?}] }`
+for both the explicit-keypath mode and the heading-extract mode. An item
+names the write and carries no content. `prior` is the 40-word preview of
+the version that the write replaced. Search hits carry a `preview` too, and
+the agent reads the keypaths it wants with `memstate_get`. The proxy makes
+these shapes from the daemon's answers (`stored`, `superseded`), which the
+CLI and the skill scripts still print in full.
 
 - `method` is `"explicit"` or `"headings"`.
 - `action` is `"created"`, `"superseded"`, or `"unchanged"`. `"superseded"` means a prior version existed at that keypath. `"unchanged"` means the content is identical to the current version, and no new row is written.
@@ -406,7 +408,7 @@ project_id = "my_app"
 ```
 
 Each write appends a new version. If a prior version existed, the
-response names it as `superseded` with a 40-word preview. The agent sees the conflict, and
+response carries `prior`, its 40-word preview. The agent sees the conflict, and
 no data is overwritten silently. `memstate_history` returns the full
 chain. `memstate_delete` appends a tombstone row. The data stays in
 history but no longer appears in reads or search.

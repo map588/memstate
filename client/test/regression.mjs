@@ -61,7 +61,42 @@ async function call(client, name, args) {
   const res = await client.callTool({ name, arguments: args });
   const text = res.content?.[0]?.text ?? "";
   if (res.isError) return { isError: true, message: text };
-  return { isError: false, data: JSON.parse(text) };
+  return { isError: false, data: JSON.parse(text), text };
+}
+
+// outlineKeypaths reads the outline that memstate_get returns as `tree` and
+// returns the keypaths that hold a value, sorted. A line "a, b" lists leaves;
+// a line "name: a, b" is a branch with its leaves; "name*:" is a branch that
+// also holds a value; two spaces of indent are one level.
+function outlineKeypaths(outline) {
+  const out = [];
+  const stack = [];
+  for (const line of String(outline ?? "").split("\n")) {
+    if (!line.trim()) continue;
+    const depth = (line.length - line.trimStart().length) / 2;
+    stack.length = depth;
+    const prefix = stack.length ? stack.join(".") + "." : "";
+    const text = line.trim();
+    const colon = text.indexOf(":");
+    if (colon < 0) {
+      for (const leaf of text.split(", ")) out.push(prefix + leaf);
+      continue;
+    }
+    let name = text.slice(0, colon);
+    if (name.endsWith("*")) {
+      name = name.slice(0, -1);
+      out.push(prefix + name);
+    }
+    stack[depth] = name;
+    const leaves = text.slice(colon + 1).trim();
+    if (leaves) for (const leaf of leaves.split(", ")) out.push(prefix + name + "." + leaf);
+  }
+  return out.sort();
+}
+
+// outlineTop returns the top-level names of an outline, sorted.
+function outlineTop(outline) {
+  return [...new Set(outlineKeypaths(outline).map((k) => k.split(".")[0]))].sort();
 }
 
 async function main() {
@@ -137,7 +172,7 @@ async function main() {
       new_project: true,
     });
     check("set: first write is created v1",
-      !r.isError && r.data.action === "created" && r.data.stored.version === 1,
+      !r.isError && r.data.action === "created" && r.data.version === 1,
       JSON.stringify(r));
 
     // The proxy writes the daemon log next to MEMSTATE_DB. A test daemon on a
@@ -155,11 +190,17 @@ async function main() {
     check("set: rewrite supersedes and returns prior version",
       !r.isError &&
         r.data.action === "superseded" &&
-        r.data.stored.version === 2 &&
-        r.data.stored.content === undefined &&
-        r.data.superseded?.content === undefined &&
-        r.data.superseded?.preview === "first value with zanzibar token",
+        r.data.version === 2 &&
+        r.data.keypath === "config.alpha" &&
+        r.data.prior === "first value with zanzibar token",
       JSON.stringify(r));
+    // The model sent the content, the source and the topics: the result
+    // names the write and does not repeat them.
+    check("set: the result is one line of JSON without the request's fields",
+      !r.isError && !r.text.includes("\n") &&
+        r.data.stored === undefined && r.data.superseded === undefined &&
+        r.data.topics === undefined && r.data.created_at === undefined,
+      r.text);
 
     r = await call(client, "memstate_set", {
       project_id: PROJECT,
@@ -167,7 +208,7 @@ async function main() {
       value: "second value",
     });
     check("set: identical rewrite is unchanged (no new version)",
-      !r.isError && r.data.action === "unchanged" && r.data.stored.version === 2,
+      !r.isError && r.data.action === "unchanged" && r.data.version === 2,
       JSON.stringify(r));
 
     // ---- host tag ---------------------------------------------------------
@@ -190,8 +231,9 @@ async function main() {
       topics: ["build"],
       host: true,
     });
+    r = await call(client, "memstate_get", { project_id: HOST_PROJECT, keypath: "config.host_only" });
     check("set: host=true adds the host topic next to the caller's topics",
-      !r.isError && JSON.stringify(r.data.stored.topics) === JSON.stringify(["build", hostTopic]),
+      !r.isError && JSON.stringify(r.data.memories[0].topics) === JSON.stringify(["build", hostTopic]),
       JSON.stringify(r));
 
     r = await call(client, "memstate_set", {
@@ -220,10 +262,14 @@ async function main() {
       content: "## Build\nneeds the arm toolchain\n\n## Ports\n8080 is taken\n",
       host: true,
     });
+    const tagged = await Promise.all(["build", "ports"].map((keypath) =>
+      call(client, "memstate_get", { project_id: HOST_PROJECT, keypath })));
     check("remember: host=true tags every section",
       !r.isError && r.data.items.length === 2 &&
-        r.data.items.every((i) => JSON.stringify(i.stored.topics) === JSON.stringify([hostTopic])),
-      JSON.stringify(r));
+        r.data.items.every((i) => i.action === "created" && i.version === 1 && i.stored === undefined) &&
+        tagged.every((g) => !g.isError &&
+          JSON.stringify(g.data.memories[0].topics) === JSON.stringify([hostTopic])),
+      JSON.stringify({ r, tagged }));
 
     r = await call(client, "memstate_set", {
       project_id: HOST_PROJECT,
@@ -242,6 +288,46 @@ async function main() {
 
     r = await call(client, "memstate_delete_project", { project_id: HOST_PROJECT });
     check("host tag: test project deleted", !r.isError, JSON.stringify(r));
+
+    // ---- tree outline -----------------------------------------------------
+    // memstate_get without a keypath returns the names as an outline. The
+    // outline must name each keypath that holds a value, and no other. The
+    // keypaths come from a fixed seed: 1 to 4 segments, shared prefixes, and
+    // branches that hold a value of their own.
+    const OUTLINE_PROJECT = "outline_test";
+    // mulberry32: 32-bit integer steps only, so the sequence is the same on
+    // every machine. A multiply above 2^53 loses bits in a JS number.
+    let seed = 20261117;
+    const rand = (n) => {
+      seed = (seed + 0x6d2b79f5) | 0;
+      let x = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x;
+      return ((x ^ (x >>> 14)) >>> 0) % n;
+    };
+    const segments = ["alpha", "beta", "gamma_2", "delta", "x", "task", "y_2026_11_17"];
+    const written = new Set();
+    while (written.size < 40) {
+      const depth = 1 + rand(4);
+      const parts = [];
+      for (let i = 0; i < depth; i++) parts.push(segments[rand(segments.length)]);
+      written.add(parts.join("."));
+    }
+    let outlineWrites = true;
+    for (const keypath of written) {
+      const w = await call(client, "memstate_set", {
+        project_id: OUTLINE_PROJECT, new_project: true, keypath, value: `value of ${keypath}`,
+      });
+      outlineWrites = outlineWrites && !w.isError;
+    }
+    r = await call(client, "memstate_get", { project_id: OUTLINE_PROJECT });
+    const outlined = r.isError ? [] : outlineKeypaths(r.data.tree);
+    check("get: the outline names each stored keypath and no other",
+      outlineWrites && !r.isError &&
+        JSON.stringify(outlined) === JSON.stringify([...written].sort()) &&
+        r.data.total_memories === written.size && r.data.domains === undefined,
+      JSON.stringify({ outlined, tree: r.data?.tree }));
+    r = await call(client, "memstate_delete_project", { project_id: OUTLINE_PROJECT });
+    check("outline: test project deleted", !r.isError, JSON.stringify(r));
 
     r = await call(client, "memstate_search", {
       project_id: PROJECT,
@@ -312,7 +398,7 @@ async function main() {
 
     // ---- reads ------------------------------------------------------------
     r = await call(client, "memstate_get", { project_id: PROJECT });
-    const domains = r.isError ? [] : r.data.domains.map((d) => d.name).sort();
+    const domains = r.isError ? [] : outlineTop(r.data.tree);
     check("get: tree lists top-level domains and counts memories",
       !r.isError &&
         JSON.stringify(domains) ===
@@ -328,6 +414,11 @@ async function main() {
       !r.isError &&
         r.data.memories.length === 1 &&
         r.data.memories[0].content === "second value",
+      JSON.stringify(r));
+    check("get: a memory carries a date and no row fields",
+      !r.isError && /^\d{4}-\d{2}-\d{2}$/.test(r.data.memories[0].updated) &&
+        r.data.memories[0].id === undefined && r.data.memories[0].created_at === undefined &&
+        r.data.memories[0].project_id === undefined && r.data.memories[0].version === 2,
       JSON.stringify(r));
 
     r = await call(client, "memstate_get", {
@@ -545,11 +636,11 @@ async function main() {
       JSON.stringify(r));
     r = await call(client, "memstate_set", { scope: "shared", keypath: "lessons.zsh_word_splitting", value: "quote it" });
     check("shared scope: a lesson is accepted",
-      !r.isError && r.data.stored.project_id === "_shared",
+      !r.isError && r.data.project_id === "_shared",
       JSON.stringify(r));
     r = await call(client, "memstate_set", { scope: "shared", keypath: "practices.go_table_tests", value: "name subtests after the input" });
     check("shared scope: a practice is accepted",
-      !r.isError && r.data.stored.project_id === "_shared",
+      !r.isError && r.data.project_id === "_shared",
       JSON.stringify(r));
     r = await call(client, "memstate_set", { scope: "user", keypath: "preferences.x", value: "v" });
     check("shared scope: the old scope name is refused with the new one",
@@ -580,12 +671,13 @@ async function main() {
       !r.isError,
       JSON.stringify(r));
     r = await call(client, "memstate_get", { project_id: PROJECT });
-    const hostNode = r.data?.shared?.domains?.find((d) => d.name === "host");
+    const sharedKeys = outlineKeypaths(r.data?.shared?.tree);
+    const hostKeys = sharedKeys.filter((k) => k.startsWith("host."));
     check("get: tree carries the shared scope pruned to this host",
       !r.isError && r.data.shared.host === hostSlug &&
-        r.data.shared.domains.some((d) => d.name === "preferences") &&
-        hostNode && hostNode.children.length === 1 &&
-        hostNode.children[0].name === hostSlug &&
+        sharedKeys.some((k) => k.startsWith("preferences.")) &&
+        hostKeys.length > 0 && hostKeys.every((k) => k.startsWith(`host.${hostSlug}.`)) &&
+        sharedKeys.length === 4 &&
         r.data.shared.total_memories === 4,
       JSON.stringify(r.data?.shared));
     r = await call(client, "memstate_search", { scope: "shared", query: "go binaries live", mode: "fts" });
@@ -611,7 +703,7 @@ async function main() {
       JSON.stringify(r));
     r = await call(client, "memstate_get", { project_id: PROJECT });
     check("get: a deleted shared scope yields an empty shared block, not an error",
-      !r.isError && r.data.domains.length > 0 && r.data.shared.total_memories === 0,
+      !r.isError && r.data.tree.length > 0 && r.data.shared.total_memories === 0,
       JSON.stringify(r));
     r = await call(client, "memstate_set", {
       scope: "shared", keypath: "preferences.commit_style",
@@ -663,7 +755,7 @@ async function main() {
       JSON.stringify(r));
     r = await call(client, "memstate_set", { keypath: "notes.b", value: "pinned write" });
     check("session: later calls without project_id use the pinned project",
-      !r.isError && r.data.stored.project_id === "taxes_2026" && r.data.session_project === "taxes_2026",
+      !r.isError && r.data.project_id === "taxes_2026" && r.data.session_project === "taxes_2026",
       JSON.stringify(r));
     r = await call(client, "memstate_get", { project_name: "other_proj" });
     check("session: a second different project_name is an error",
@@ -675,7 +767,7 @@ async function main() {
       JSON.stringify(r));
     r = await call(client, "memstate_set", { project_id: PROJECT, keypath: "config.gamma", value: "explicit id beats the pin" });
     check("session: explicit project_id still reaches another project",
-      !r.isError && r.data.stored.project_id === PROJECT,
+      !r.isError && r.data.project_id === PROJECT,
       JSON.stringify(r));
     const projects = await call(client, "memstate_get", { list_projects: true });
     const ids = projects.data.projects.map((p) => p.id);
@@ -698,7 +790,8 @@ async function main() {
         JSON.stringify(f));
       f = await call(fresh, "memstate_search", { query: "seed", mode: "fts" });
       check("session: search without project_id uses the pin",
-        !f.isError && f.data.results.length === 1 && f.data.results[0].project_id === "other_proj",
+        !f.isError && f.data.results.length === 1 && f.data.project_id === "other_proj" &&
+          f.data.results[0].project_id === undefined && f.data.results[0].id === undefined,
         JSON.stringify(f));
       // The pin is published for the recall hook: one file per proxy
       // process under <db dir>/recall/pins, "cwd\nproject\n".
@@ -736,15 +829,15 @@ async function main() {
         JSON.stringify(f));
       f = await call(g, "memstate_set", { project_id: PROJECT, keypath: "config.delta", value: "explicit" });
       check("gate: explicit project_id bypasses the gate",
-        !f.isError && f.data.stored.project_id === PROJECT,
+        !f.isError && f.data.project_id === PROJECT,
         JSON.stringify(f));
       f = await call(g, "memstate_set", { keypath: "notes.a", value: "v", new_project: true });
       check("gate: new_project=true creates the cwd project",
-        !f.isError && f.data.stored.project_id === "gate_dir",
+        !f.isError && f.data.project_id === "gate_dir",
         JSON.stringify(f));
       f = await call(g, "memstate_set", { keypath: "notes.b", value: "w" });
       check("gate: once the project exists, writes need no flag",
-        !f.isError && f.data.stored.project_id === "gate_dir",
+        !f.isError && f.data.project_id === "gate_dir",
         JSON.stringify(f));
     });
     // The cwd basename resembles an existing project: refused, the existing
@@ -758,7 +851,7 @@ async function main() {
         JSON.stringify(f));
       f = await call(n, "memstate_set", { project_name: PROJECT, keypath: "notes.near", value: "pinned" });
       check("gate: pinning the existing project is the way out",
-        !f.isError && f.data.stored.project_id === PROJECT && f.data.session_project === PROJECT,
+        !f.isError && f.data.project_id === PROJECT && f.data.session_project === PROJECT,
         JSON.stringify(f));
     });
     // ---- system directory ------------------------------------------------------
@@ -788,11 +881,11 @@ async function main() {
         JSON.stringify(f));
       f = await call(s, "memstate_set", { project_id: PROJECT, keypath: "config.sys", value: "explicit" });
       check("system dir: an explicit project_id works",
-        !f.isError && f.data.stored.project_id === PROJECT,
+        !f.isError && f.data.project_id === PROJECT,
         JSON.stringify(f));
       f = await call(s, "memstate_set", { project_name: PROJECT, keypath: "config.sys2", value: "pinned" });
       check("system dir: pinning an existing project works",
-        !f.isError && f.data.stored.project_id === PROJECT,
+        !f.isError && f.data.project_id === PROJECT,
         JSON.stringify(f));
     });
     // A client that offers workspace roots names the directory the session
@@ -815,7 +908,7 @@ async function main() {
           JSON.stringify(f));
         const w = await call(rc, "memstate_set", { keypath: "notes.r", value: "v", new_project: true });
         check("roots: a write creates the root's project, not the cwd's",
-          !w.isError && w.data.stored.project_id === "roots_proj",
+          !w.isError && w.data.project_id === "roots_proj",
           JSON.stringify(w));
       } finally {
         await rc.close();
@@ -846,11 +939,11 @@ async function main() {
           JSON.stringify(f));
         f = await call(h, "memstate_set", { scope: "shared", keypath: "preferences.gate", value: "v" });
         check("gate: the shared scope is open from the home directory",
-          !f.isError && f.data.stored.project_id === "_shared",
+          !f.isError && f.data.project_id === "_shared",
           JSON.stringify(f));
         f = await call(h, "memstate_set", { project_name: "other_proj", keypath: "notes.home", value: "v" });
         check("gate: a pin from the home directory writes to the pinned project",
-          !f.isError && f.data.stored.project_id === "other_proj" && f.data.session_project === "other_proj",
+          !f.isError && f.data.project_id === "other_proj" && f.data.session_project === "other_proj",
           JSON.stringify(f));
       });
     }
@@ -866,11 +959,11 @@ async function main() {
       JSON.stringify(r));
     r = await call(client, "memstate_remember", { project_id: "fresh_explicit", content: "## Notes\nbody\n", new_project: true });
     check("gate: new_project=true creates an explicit project",
-      !r.isError && r.data.items[0].stored.project_id === "fresh_explicit",
+      !r.isError && r.data.project_id === "fresh_explicit",
       JSON.stringify(r));
     r = await call(client, "memstate_set", { project_id: "fresh_explicit", keypath: "notes.b", value: "w" });
     check("gate: an existing explicit project needs no flag",
-      !r.isError && r.data.stored.project_id === "fresh_explicit",
+      !r.isError && r.data.project_id === "fresh_explicit",
       JSON.stringify(r));
 
     // The Python skill scripts apply the same rule, one-shot, with
@@ -972,7 +1065,7 @@ async function main() {
         JSON.stringify(f));
       f = await call(l, "memstate_set", { keypath: "notes.a", value: "v" });
       check("loose: a write creates the cwd project without new_project",
-        !f.isError && f.data.stored.project_id === "loose_dir" && f.data.strict_scope === false,
+        !f.isError && f.data.project_id === "loose_dir" && f.data.strict_scope === false,
         JSON.stringify(f));
       f = await call(l, "memstate_set", { project_id: "regress_tests", keypath: "notes.a", value: "v" });
       check("loose: a near-duplicate is still refused",
