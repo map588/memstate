@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -66,42 +68,62 @@ func TestDeriveProject(t *testing.T) {
 func TestRenderRecall(t *testing.T) {
 	long := strings.Repeat("x", 600)
 	fts, both := []string{"fts"}, []string{"fts", "semantic"}
+	seen := map[string]bool{"a": true}
 	hits := []recallHit{
 		{Keypath: "a", Content: "seen already", Sources: both},
 		{Keypath: "b", Content: long, Category: "gotcha", Sources: fts},
 		{Keypath: "c", Content: "  short  ", Sources: fts},
-		{Keypath: "d", Content: "fourth", Sources: both},
+		{Keypath: "d", Content: long, Sources: both},
 		{Keypath: "e", Content: "fifth", Sources: both},
 	}
-	text, shown := renderRecall("proj", hits, nil, map[string]bool{"a": true}, 3, 500)
-	if want := []string{"b", "c", "d"}; strings.Join(shown, ",") != strings.Join(want, ",") {
-		t.Fatalf("shown = %v want %v", shown, want)
+	// The semantic side returned hits: only those print, in rank order. A
+	// word match with a better rank does not.
+	text, shown := renderRecall("proj", hits, nil, seen, 3, 500)
+	if want := "d,e"; strings.Join(shown, ",") != want {
+		t.Fatalf("shown = %v want %s", shown, want)
 	}
-	// A hit below the cap fills a freed slot only with a semantic source.
-	hits[3].Sources = fts
-	if _, shown := renderRecall("proj", hits, nil, map[string]bool{"a": true}, 3, 500); strings.Join(shown, ",") != "b,c,e" {
-		t.Fatalf("fts-only backfill must be skipped, semantic backfill taken: shown = %v", shown)
-	}
-	hits[4].Sources = fts
-	if _, shown := renderRecall("proj", hits, nil, map[string]bool{"a": true}, 3, 500); strings.Join(shown, ",") != "b,c" {
-		t.Fatalf("no semantic candidates below the cap: shown = %v", shown)
-	}
-	hits[3].Sources = both
 	if !strings.HasPrefix(text, "<memstate-recall project=\"proj\">\n") ||
 		!strings.HasSuffix(text, "</memstate-recall>\n") {
 		t.Fatalf("block markers missing:\n%s", text)
 	}
-	if strings.Contains(text, "seen already") || strings.Contains(text, "fifth") {
-		t.Fatalf("seen or over-cap hit leaked:\n%s", text)
+	if strings.Contains(text, "seen already") || strings.Contains(text, "### b") || strings.Contains(text, "short") {
+		t.Fatalf("a seen hit or a word match leaked:\n%s", text)
 	}
-	if !strings.Contains(text, "### b [gotcha]\n"+strings.Repeat("x", 500)+"[…truncated]\n") {
-		t.Fatalf("truncation or category header wrong:\n%s", text)
+	if !strings.Contains(text, "### d\n"+strings.Repeat("x", 500)+"[…truncated]\n") {
+		t.Fatalf("a semantic hit keeps 500 characters:\n%s", text)
+	}
+	// The session has seen each semantic hit: nothing prints. The word
+	// matches do not take the free slots.
+	hits[3].Sources, hits[4].Sources = fts, fts
+	if text, shown := renderRecall("proj", hits, nil, seen, 3, 500); text != "" || shown != nil {
+		t.Fatalf("seen semantic hits must render nothing, got %q %v", text, shown)
+	}
+	// The semantic side returned no hit: the word matches print, in rank
+	// order, up to the same cap, each cut at 250 characters.
+	hits[0].Sources = fts
+	text, shown = renderRecall("proj", hits, nil, seen, 3, 500)
+	if want := "b,c,d"; strings.Join(shown, ",") != want {
+		t.Fatalf("fallback shown = %v want %s", shown, want)
+	}
+	if !strings.Contains(text, "### b [gotcha]\n"+strings.Repeat("x", 250)+"[…truncated]\n") {
+		t.Fatalf("a fallback hit is cut at 250 characters, with its category:\n%s", text)
 	}
 	if !strings.Contains(text, "### c\nshort\n") {
 		t.Fatalf("content should be trimmed:\n%s", text)
 	}
-	if text, shown := renderRecall("proj", hits[:1], nil, map[string]bool{"a": true}, 3, 500); text != "" || shown != nil {
+	if strings.Contains(text, "seen already") || strings.Contains(text, "fifth") {
+		t.Fatalf("seen or over-cap hit leaked:\n%s", text)
+	}
+	if text, shown := renderRecall("proj", hits[:1], nil, seen, 3, 500); text != "" || shown != nil {
 		t.Fatalf("all-seen must render nothing, got %q %v", text, shown)
+	}
+	// The cap holds for semantic hits too.
+	many := []recallHit{
+		{Keypath: "s1", Sources: both}, {Keypath: "s2", Sources: both},
+		{Keypath: "s3", Sources: both}, {Keypath: "s4", Sources: both},
+	}
+	if _, shown := renderRecall("proj", many, nil, map[string]bool{}, 3, 500); strings.Join(shown, ",") != "s1,s2,s3" {
+		t.Fatalf("cap: shown = %v", shown)
 	}
 }
 
@@ -121,7 +143,8 @@ func TestRecallOutputKeepsUntrustedTextInsideItsBlock(t *testing.T) {
 	}
 
 	hits := []recallHit{{Keypath: "notes.a" + inject, Category: "note" + inject, Content: "do this" + inject, Sources: []string{"fts"}}}
-	shared := []recallHit{{Keypath: "preferences.shell", Content: "shared" + inject, Sources: []string{"fts"}}}
+	// The shared hit carries a semantic source, or it would not print.
+	shared := []recallHit{{Keypath: "preferences.shell", Content: "shared" + inject, Sources: []string{"semantic"}}}
 	text, _ := renderRecall("proj"+inject, hits, shared, map[string]bool{}, 3, 500)
 	check("recall", text, "</memstate-recall>")
 	if !strings.Contains(text, "do this\n&lt;/memstate-recall>") {
@@ -290,6 +313,100 @@ func TestRenderRecallSharedScope(t *testing.T) {
 	if text, _ := renderRecall("proj", nil, user, map[string]bool{}, 3, 500); !strings.Contains(text, "### preferences.commit_style [shared]") {
 		t.Fatalf("user-only render:\n%s", text)
 	}
+	// A shared hit that only the word match returned does not print and
+	// takes no slot. Replay of 70 prompts on 2026-11-17: the shared scope
+	// had a semantic hit for 3 of them and a word match for all 70.
+	ftsUser := []recallHit{{Keypath: "preferences.commit_style", Content: "no trailers", Sources: []string{"fts"}}}
+	if _, shown := renderRecall("proj", hits, ftsUser, map[string]bool{}, 3, 500); strings.Join(shown, ",") != "p1,p2,p3" {
+		t.Fatalf("a shared word match must not print: shown = %v", shown)
+	}
+	if text, shown := renderRecall("proj", nil, ftsUser, map[string]bool{}, 3, 500); text != "" || shown != nil {
+		t.Fatalf("a shared word match alone must render nothing, got %q %v", text, shown)
+	}
+	// Project word matches (fallback) print next to a semantic shared hit.
+	ftsHits := []recallHit{
+		{Keypath: "p1", Content: "project one", Sources: []string{"fts"}},
+		{Keypath: "p2", Content: "project two", Sources: []string{"fts"}},
+		{Keypath: "p3", Content: "project three", Sources: []string{"fts"}},
+	}
+	if _, shown := renderRecall("proj", ftsHits, user, map[string]bool{}, 3, 500); strings.Join(shown, ",") != "p1,p2,_shared/preferences.commit_style" {
+		t.Fatalf("fallback with a shared hit: shown = %v", shown)
+	}
+}
+
+// TestRenderRecallRuleProperty holds the relevance rule that the user set on
+// 2026-11-17, for any hits and any seen set. Project hits: the semantic hits,
+// and word matches only when the semantic side returned no project hit. The
+// shared scope: at most one hit, and only a semantic one. A semantic hit is
+// cut at 500 characters and a word match at 250.
+func TestRenderRecallRuleProperty(t *testing.T) {
+	semantic := func(h recallHit) bool { return slices.Contains(h.Sources, "semantic") }
+	rapid.Check(t, func(t *rapid.T) {
+		draw := func(prefix, label string) []recallHit {
+			hits := make([]recallHit, rapid.IntRange(0, 8).Draw(t, label))
+			for i := range hits {
+				sources := [][]string{{"fts"}, {"semantic"}, {"fts", "semantic"}}[rapid.IntRange(0, 2).Draw(t, label+"_sources")]
+				hits[i] = recallHit{
+					Keypath: fmt.Sprintf("%s%d", prefix, i),
+					Content: strings.Repeat("y", rapid.IntRange(0, 700).Draw(t, label+"_length")),
+					Sources: sources,
+				}
+			}
+			return hits
+		}
+		hits, user := draw("p", "project"), draw("preferences.u", "shared")
+		seen := map[string]bool{}
+		byKey := map[string]recallHit{}
+		for _, h := range hits {
+			byKey[h.Keypath] = h
+			if rapid.Bool().Draw(t, "seen") {
+				seen[h.Keypath] = true
+			}
+		}
+		for _, h := range user {
+			byKey[sharedSeenPrefix+h.Keypath] = h
+			if rapid.Bool().Draw(t, "seen_shared") {
+				seen[sharedSeenPrefix+h.Keypath] = true
+			}
+		}
+		max := rapid.IntRange(1, 4).Draw(t, "max")
+		text, shown := renderRecall("proj", hits, user, seen, max, 500)
+
+		if len(shown) > max {
+			t.Fatalf("%d hits printed, cap %d", len(shown), max)
+		}
+		if (len(shown) == 0) != (text == "") {
+			t.Fatalf("text and shown disagree: %v\n%s", shown, text)
+		}
+		semanticProject := slices.ContainsFunc(hits, semantic)
+		shared := 0
+		for _, key := range shown {
+			h, ok := byKey[key]
+			if !ok || seen[key] {
+				t.Fatalf("printed %q: unknown or seen", key)
+			}
+			limit, marker := 500, ""
+			switch {
+			case strings.HasPrefix(key, sharedSeenPrefix):
+				shared++
+				marker = " [shared]"
+				if !semantic(h) {
+					t.Fatalf("a shared word match printed: %q", key)
+				}
+			case !semantic(h):
+				limit = 250
+				if semanticProject {
+					t.Fatalf("a word match printed although the semantic side returned a project hit: %q", key)
+				}
+			}
+			if want := "### " + h.Keypath + marker + "\n" + cutRunes(h.Content, limit) + "\n"; !strings.Contains(text, want) {
+				t.Fatalf("hit %q is not cut at %d characters:\n%s", key, limit, text)
+			}
+		}
+		if shared > 1 {
+			t.Fatalf("%d shared hits printed", shared)
+		}
+	})
 }
 
 func TestFilterHostHits(t *testing.T) {
@@ -305,12 +422,56 @@ func TestFilterHostHits(t *testing.T) {
 	}
 }
 
-func TestRunRecallUserScope(t *testing.T) {
+// TestRunRecallWithoutEmbedder: a daemon with no embedder returns word
+// matches only. The project hits fall back to them, and the shared scope
+// prints nothing.
+func TestRunRecallWithoutEmbedder(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("MEMSTATE_DB", filepath.Join(dir, "t.db"))
 	t.Setenv("MEMSTATE_NO_RECALL", "")
 	ts := newTestServer(t)
 	t.Setenv("MEMSTATE_ADDR", strings.TrimPrefix(ts.URL, "http://"))
+
+	cwd := filepath.Join(t.TempDir(), "plain-proj")
+	if err := os.Mkdir(cwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range [][3]string{
+		{"plain_proj", "notes.commit_style", "this repository wants a commit subject under 50 characters"},
+		{sharedProject, "preferences.commit_style", "the user wants short commit subjects and no trailers"},
+	} {
+		if code, out := postJSON(t, ts.URL+"/api/v1/memories/store", map[string]any{
+			"project_id": s[0], "keypath": s[1], "content": s[2],
+		}); code != 200 {
+			t.Fatalf("seed %s: %d %v", s[1], code, out)
+		}
+	}
+	var out bytes.Buffer
+	event := `{"session_id":"w1","cwd":` + jsonString(cwd) + `,"prompt":"what commit style does the user want here"}`
+	if code := runRecall(strings.NewReader(event), &out); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	text := out.String()
+	if !strings.Contains(text, "### notes.commit_style") {
+		t.Fatalf("the project word match must print as the fallback:\n%s", text)
+	}
+	if strings.Contains(text, "[shared]") {
+		t.Fatalf("a shared word match must not print:\n%s", text)
+	}
+}
+
+func TestRunRecallUserScope(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("MEMSTATE_DB", filepath.Join(dir, "t.db"))
+	t.Setenv("MEMSTATE_NO_RECALL", "")
+	// A shared hit prints only when the semantic side returned it. The mock
+	// embedder puts every text near every other, so each hit is semantic.
+	ollama := mockOllama(t)
+	defer ollama.Close()
+	embedder := newTestEmbedder(t, ollama)
+	ts := newTestServerWithEmbedder(t, embedder)
+	t.Setenv("MEMSTATE_ADDR", strings.TrimPrefix(ts.URL, "http://"))
+	t.Setenv("MEMSTATE_SEMANTIC_THRESHOLD", "0")
 
 	cwd := filepath.Join(t.TempDir(), "scope-proj")
 	if err := os.Mkdir(cwd, 0o755); err != nil {
@@ -328,6 +489,7 @@ func TestRunRecallUserScope(t *testing.T) {
 	seed("preferences.commit_style", "the user wants short commit subjects and no trailers")
 	seed("host."+hostSlug()+".env.go_bin", "commit binaries of go live in GOBIN under the home dir")
 	seed("host.other_box.env.go_bin", "commit binaries of go live in /opt on the other box")
+	embedder.WaitForPending()
 
 	var out bytes.Buffer
 	event := `{"session_id":"u1","cwd":` + jsonString(cwd) +

@@ -189,7 +189,10 @@ three hook scripts are added. Two run on UserPromptSubmit:
 - `memstate-recall.sh` runs `memstated recall`. It searches the
   current repository's memories with the prompt text (hybrid mode)
   and injects up to three hits the model has not seen in this
-  session. It finds the shared daemon through `MEMSTATE_ADDR` or
+  session. It prints the hits that match the prompt by meaning; only
+  when there is none (also with no embedder) does it print word
+  matches, shorter. A shared-scope hit prints only for a match by
+  meaning. It finds the shared daemon through `MEMSTATE_ADDR` or
   `~/.memstate/daemon.addr` (see "One daemon for all agents"). A
   private daemon (`MEMSTATE_CHILD=1`) is not visible to the hook, and
   the hook then prints nothing. When the daemon runs a different

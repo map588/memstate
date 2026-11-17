@@ -24,12 +24,13 @@ import (
 // hook that fails must never block the prompt.
 
 const (
-	recallMinWords  = 4   // shorter prompts ("yes", "continue") carry no topic
-	recallMaxHits   = 3   // hits printed per prompt
-	recallMaxChars  = 500 // content cut per hit
-	recallSearchLim = 10  // candidates fetched, so dedupe still leaves hits
-	recallTimeout   = 3 * time.Second
-	recallSeenTTL   = 7 * 24 * time.Hour
+	recallMinWords      = 4   // shorter prompts ("yes", "continue") carry no topic
+	recallMaxHits       = 3   // hits printed per prompt
+	recallMaxChars      = 500 // content cut of a hit that the semantic side returned
+	recallFallbackChars = 250 // content cut of a word-match hit, which is less often about the prompt
+	recallSearchLim     = 10  // candidates fetched, so dedupe still leaves hits
+	recallTimeout       = 3 * time.Second
+	recallSeenTTL       = 7 * 24 * time.Hour
 )
 
 type hookEvent struct {
@@ -465,55 +466,78 @@ func filterHostHits(hits []recallHit, host string) []recallHit {
 	return out
 }
 
-// pickRecall selects up to max unseen hits. Hits ranked below max fill the
-// slots that seen hits free up, but only when the semantic side returned
-// them: an FTS-only hit that deep is a common-word match, not a topic match.
-func pickRecall(hits []recallHit, seen map[string]bool, seenPrefix string, max int) []recallHit {
+// isSemantic reports whether the semantic side of the hybrid search returned
+// the hit. A hit with only the "fts" source matched a word of the prompt.
+func isSemantic(h recallHit) bool {
+	return slices.Contains(h.Sources, "semantic")
+}
+
+// pickRecall selects up to max unseen hits, in rank order. The semantic hits
+// print alone: when the semantic side returned a hit, no word match prints,
+// also when the session has seen each semantic hit. When the semantic side
+// returned no hit and fallback is set, the word matches print instead, and
+// the second result reports that. A daemon with no embedder returns word
+// matches only, so it always takes the fallback.
+//
+// This is the rule of 2026-11-17 (user decision). Before it, the first max
+// ranks printed with any source. A replay of 70 prompts found a semantic
+// source on 48% of those project hits, and the model later read 11% of 1504
+// recalled hits.
+func pickRecall(hits []recallHit, seen map[string]bool, seenPrefix string, max int, fallback bool) ([]recallHit, bool) {
+	wordMatches := !slices.ContainsFunc(hits, isSemantic)
+	if wordMatches && !fallback {
+		return nil, false
+	}
 	var out []recallHit
-	for i, h := range hits {
-		if len(out) == max {
+	for _, h := range hits {
+		if len(out) >= max {
 			break
 		}
-		if seen[seenPrefix+h.Keypath] {
-			continue
-		}
-		if i >= max && !slices.Contains(h.Sources, "semantic") {
+		if seen[seenPrefix+h.Keypath] || (!wordMatches && !isSemantic(h)) {
 			continue
 		}
 		out = append(out, h)
 	}
-	return out
+	return out, wordMatches
 }
 
-// renderRecall formats up to maxHits hits from the project and the user
-// scope. One slot is reserved for the best shared-scope hit, marked [shared];
-// project hits fill the rest. It returns the block and the seen-file keys it
-// printed. An empty block means nothing new to show.
+// renderRecall formats up to maxHits hits from the project and the shared
+// scope. The shared scope gets at most one slot, marked [shared], and only
+// for a semantic hit: it has no fallback to word matches, because a word of
+// the prompt matched a shared fact on each of 70 replayed prompts and the
+// semantic side on 3. Project hits fill the other slots (pickRecall). A
+// semantic hit is cut at maxChars, a word match at recallFallbackChars. It
+// returns the block and the seen-file keys it printed. An empty block means
+// nothing new to show.
 func renderRecall(project string, hits, userHits []recallHit, seen map[string]bool, maxHits, maxChars int) (string, []string) {
-	user := pickRecall(userHits, seen, sharedSeenPrefix, 1)
-	proj := pickRecall(hits, seen, "", maxHits-len(user))
+	user, _ := pickRecall(userHits, seen, sharedSeenPrefix, 1, false)
+	proj, wordMatches := pickRecall(hits, seen, "", maxHits-len(user), true)
 	if len(user)+len(proj) == 0 {
 		return "", nil
+	}
+	projChars := maxChars
+	if wordMatches {
+		projChars = min(maxChars, recallFallbackChars)
 	}
 	// The hits are stored text: names stay on their line and "<" is escaped,
 	// so a note cannot end this block or start another one.
 	var notes strings.Builder
 	var shown []string
-	write := func(h recallHit, marker, seenKey string) {
+	write := func(h recallHit, marker, seenKey string, chars int) {
 		fmt.Fprintf(&notes, "### %s%s", safeInline(h.Keypath), marker)
 		if h.Category != "" {
 			fmt.Fprintf(&notes, " [%s]", safeInline(h.Category))
 		}
 		notes.WriteString("\n")
-		notes.WriteString(escapeMarkup(cutRunes(strings.TrimSpace(h.Content), maxChars)))
+		notes.WriteString(escapeMarkup(cutRunes(strings.TrimSpace(h.Content), chars)))
 		notes.WriteString("\n\n")
 		shown = append(shown, seenKey)
 	}
 	for _, h := range proj {
-		write(h, "", h.Keypath)
+		write(h, "", h.Keypath, projChars)
 	}
 	for _, h := range user {
-		write(h, " [shared]", sharedSeenPrefix+h.Keypath)
+		write(h, " [shared]", sharedSeenPrefix+h.Keypath, maxChars)
 	}
 
 	var b strings.Builder
