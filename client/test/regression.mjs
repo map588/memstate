@@ -147,6 +147,20 @@ async function main() {
       `got ${names.join(", ")}`
     );
 
+    // ---- context budget ---------------------------------------------------
+    // Claude Code cuts the instructions of an MCP server at 4,096 characters.
+    // Measured 2026-11-17: the text was 7,816 characters, so the host tag and
+    // the session project rules never reached the model. A loaded tool schema
+    // is part of each request. These limits keep later edits inside that room.
+    const instructionChars = (client.getInstructions() ?? "").length;
+    check("budget: the instructions fit below the 4,096-character cut of the client",
+      instructionChars > 0 && instructionChars <= 3900,
+      `${instructionChars} chars`);
+    const schemaChars = JSON.stringify(tools).length;
+    check("budget: the tool schemas stay within 9,500 characters",
+      schemaChars <= 9500,
+      `${schemaChars} chars`);
+
     // ---- denied prompts ---------------------------------------------------
     // Each text that tells the agent to save must also forbid saving a
     // denied prompt.

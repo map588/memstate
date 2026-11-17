@@ -237,10 +237,7 @@ const SCOPE_PROP = {
   enum: ["project", "shared"],
   default: "project",
   description:
-    '"project" (default) = the cwd project\'s memories. "shared" = the reserved ' +
-    "shared scope: facts that hold in every repo (preferences, profile, " +
-    "practices, lessons, this host's env and tools). Never both scope " +
-    '"shared" and project_id.',
+    '"shared" = facts that hold in every repository. Not with project_id.',
 };
 
 type ToolArgs = Record<string, unknown>;
@@ -260,23 +257,14 @@ const PROJECT_ID_RE = /^[a-z0-9]+(_[a-z0-9]+)*$/;
 const PROJECT_NAME_PROP = {
   type: "string",
   description:
-    "Pin this session to a project other than the cwd project, when the " +
-    "prompt is clearly about another subject. One pin per session: later " +
-    "calls without project_id use it. Prefer an id that " +
-    "memstate_get(list_projects=true) lists. A new id also needs " +
-    "new_project=true and must not resemble an existing id. Not with " +
-    'project_id or scope="shared".',
+    "Pin this session to another project (one pin). A new id also needs new_project=true.",
 };
 
 const NEW_PROJECT_PROP = {
   type: "boolean",
   default: false,
   description:
-    "Allow this call to create a project that does not exist yet, or revive " +
-    "a soft-deleted one: with project_name, or on a write with project_id " +
-    "or with the cwd project outside a git repository. Refused when the id " +
-    "looks like a misspelling of an existing project, and an error where " +
-    "nothing can be created.",
+    "Allow this call to create a project or revive a deleted one.",
 };
 
 let sessionProject = "";
@@ -291,11 +279,7 @@ const STRICT_SCOPE_PROP = {
   type: "boolean",
   default: true,
   description:
-    "false lifts one rule for the rest of this session: a write or a pin " +
-    "to a project that does not exist no longer needs new_project=true. " +
-    "The home and system directory refusals, the near-duplicate refusal, " +
-    "reserved ids and the shared-scope allowlist stay. Results carry " +
-    "strict_scope: false while loose; true restores the default.",
+    "false: a missing project needs no new_project=true for the rest of this session.",
 };
 
 let strictScope = true;
@@ -310,10 +294,8 @@ const HOST_PROP = {
   type: "boolean",
   default: false,
   description:
-    `true adds the topic "${HOST_TOPIC}" to every memory this call writes: ` +
-    "for a project fact that holds only on this machine (a build path, a " +
-    "toolchain, a port), not elsewhere. Filter with memstate_search " +
-    `topics=["${HOST_TOPIC}"].`,
+    "true: the fact holds only on this machine (a build path, a port). " +
+    `Adds the topic "${HOST_TOPIC}".`,
 };
 
 // hostTopics returns the topics a write sends: the caller's, plus
@@ -1190,21 +1172,16 @@ const TOOLS: ToolDef[] = [
   {
     name: "memstate_set",
     description:
-      "Save ONE short fact at ONE keypath (e.g. `config.port` = `8080`). " +
-      "To update a fact, write the SAME keypath with the new value — the " +
-      "old version is preserved and the result carries `prior`, its 40-word " +
-      "preview (memstate_history has it in full). Do not " +
-      "create a new keypath for a new value of the same fact. For " +
-      "multi-fact markdown summaries use memstate_remember instead.",
+      "Save ONE short fact at ONE keypath (e.g. `config.port` = `8080`). To " +
+      "update a fact, write the SAME keypath: the result carries `prior`, a " +
+      "40-word preview of the old version. For a summary use memstate_remember.",
     inputSchema: {
       type: "object",
       properties: {
         project_id: {
           type: "string",
           description:
-            "OMIT to use the cwd project (this session\'s default). " +
-            "Only pass an id that memstate_get(list_projects=true) " +
-            "lists — never invent a variant.",
+            "OMIT for the cwd project. Else only an id that list_projects lists.",
         },
         scope: SCOPE_PROP,
         project_name: PROJECT_NAME_PROP,
@@ -1214,10 +1191,8 @@ const TOOLS: ToolDef[] = [
         keypath: {
           type: "string",
           description:
-            "dot-joined lowercase snake_case segments, shape " +
-            "<area>.<topic>[.<detail>], e.g. \"config.port\" or " +
-            "\"decisions.auth_provider\". Dates as YYYY_MM_DD. No kebab-case, " +
-            "camelCase, or spaces.",
+            "lowercase snake_case segments joined by dots, <area>.<topic>[.<detail>], " +
+            "e.g. \"decisions.auth_provider\". Dates as YYYY_MM_DD.",
         },
         value: {
           type: "string",
@@ -1226,22 +1201,18 @@ const TOOLS: ToolDef[] = [
         source: {
           type: "string",
           description:
-            "provenance of the fact, e.g. \"claude-code session 2026_07_04\" " +
-            "or \"user decision\" — shown in history",
+            "provenance, e.g. \"claude-code session 2026_07_04\" or \"user decision\"",
         },
         category: {
           type: "string",
           description:
-            "kind of memory, ONE lowercase word from: decision, config, " +
-            "status, note, gotcha, reference, learning. Filterable in " +
-            "memstate_search.",
+            "ONE word from: decision, config, status, note, gotcha, reference, learning",
         },
         topics: {
           type: "array",
           items: { type: "string" },
           description:
-            "subject tags, lowercase snake_case, e.g. [\"auth\", " +
-            "\"embeddings\"]. Search matches ANY listed topic.",
+            "subject tags, lowercase snake_case, e.g. [\"auth\"]",
         },
       },
       required: ["keypath", "value"],
@@ -1261,24 +1232,18 @@ const TOOLS: ToolDef[] = [
   {
     name: "memstate_remember",
     description:
-      "Save a markdown summary at end-of-task (decisions, progress, key " +
-      "facts). Two modes: pass `keypath` to store the whole content as ONE " +
-      "memory there; omit `keypath` to split the markdown by `##` headings " +
-      "into one memory per section. When splitting, each heading becomes a " +
-      "top-level snake_case keypath (`## Auth` → keypath `auth`; `###` " +
-      "headings nest as a further dot segment; prose before the first " +
-      "heading lands at `preamble`). Heading names TODOs, Decisions, Open " +
-      "Questions, Files, Notes, Gotchas map to the canonical segments " +
-      "todo, decisions, questions, files, notes, gotchas.",
+      "Save a markdown summary at task end. With `keypath`: ALL content is one " +
+      "memory there. Without: one memory per `##` heading at the top level " +
+      "(`## Auth` → `auth`; `###` nests as a further segment; text before the " +
+      "first heading → `preamble`). Common headings map to the area names " +
+      "(TODOs → todo, Open Questions → questions).",
     inputSchema: {
       type: "object",
       properties: {
         project_id: {
           type: "string",
           description:
-            "OMIT to use the cwd project (this session\'s default). " +
-            "Only pass an id that memstate_get(list_projects=true) " +
-            "lists — never invent a variant.",
+            "OMIT for the cwd project. Else only an id that list_projects lists.",
         },
         scope: SCOPE_PROP,
         project_name: PROJECT_NAME_PROP,
@@ -1288,37 +1253,30 @@ const TOOLS: ToolDef[] = [
         keypath: {
           type: "string",
           description:
-            "store ALL content as one memory at this exact keypath " +
-            "(lowercase snake_case segments, dates YYYY_MM_DD, e.g. " +
-            "\"task.summary.2026_07_04\"). Omit to split by ## headings " +
-            "instead.",
+            "store ALL content as one memory here, e.g. \"task.summary.2026_07_04\". " +
+            "Omit to split by ## headings.",
         },
         content: { type: "string", description: "markdown (or plain text)" },
         source: {
           type: "string",
           description:
-            "provenance, e.g. \"claude-code session 2026_07_04\" — shown in history",
+            "provenance, e.g. \"claude-code session 2026_07_04\"",
         },
         category: {
           type: "string",
           description:
-            "kind of memory applied to EVERY section written by this call, " +
-            "ONE lowercase word from: decision, config, status, note, " +
-            "gotcha, reference, learning",
+            "ONE word for EVERY section: decision, config, status, note, gotcha, reference, learning",
         },
         topics: {
           type: "array",
           items: { type: "string" },
           description:
-            "subject tags applied to EVERY section written by this call — " +
-            "lowercase snake_case",
+            "subject tags for EVERY section, lowercase snake_case",
         },
         root: {
           type: "string",
           description:
-            "heading-split mode only: optional prefix for extracted " +
-            "keypaths, e.g. \"notes\" stores `## Auth` at `notes.auth`. " +
-            "Default is none — sections are stored at the top level.",
+            "split mode only: prefix for the keypaths, e.g. \"notes\" stores `## Auth` at `notes.auth`",
         },
       },
       required: ["content"],
@@ -1335,18 +1293,17 @@ const TOOLS: ToolDef[] = [
   {
     name: "memstate_get",
     description:
-      "Read memories. No arguments → this repo's keypath names as an " +
-      "outline in `tree`, no content (`a: b, c` means a.b and a.c; `a*:` " +
-      "means a also holds a value; indent nests); pass `keypath` → the memories at that keypath " +
-      "and below, with content; pass `list_projects: true` → all project " +
-      "ids in the store. Call at task start to load prior context.",
+      "Read memories. No arguments → the keypath names of this repo as an " +
+      "outline in `tree`, no content (`a: b, c` = a.b and a.c; `a*:` = a also " +
+      "holds a value; indent nests). `keypath` → the memories at and below it, " +
+      "with content. `list_projects: true` → all project ids. Call at task start.",
     inputSchema: {
       type: "object",
       properties: {
         project_id: {
           type: "string",
           description:
-            "OMIT to use the cwd project (this session's default)",
+            "OMIT for the cwd project",
         },
         scope: SCOPE_PROP,
         project_name: PROJECT_NAME_PROP,
@@ -1355,14 +1312,12 @@ const TOOLS: ToolDef[] = [
         keypath: {
           type: "string",
           description:
-            "subtree to read, e.g. \"decisions\" or \"task.summary\". " +
-            "Omit to get the tree of keypath names only — you must pass a " +
-            "keypath to read actual content.",
+            "subtree to read with content, e.g. \"decisions\"",
         },
         list_projects: {
           type: "boolean",
           default: false,
-          description: "list every project id in the store instead of reading memories",
+          description: "list every project id",
         },
         recursive: { type: "boolean", default: true },
         include_content: { type: "boolean", default: true },
@@ -1412,25 +1367,22 @@ const TOOLS: ToolDef[] = [
   {
     name: "memstate_search",
     description:
-      "Find current memories when you don't know the exact keypath. Only " +
-      "the latest version of each keypath is searched; deleted keypaths " +
-      "and deleted projects never match. Searches this repo's project by " +
-      "default; pass all_projects=true to search the whole store. Each hit " +
-      "carries `preview` (its first 40 words), not the content: pick the " +
-      "keypaths that matter and read them with memstate_get(keypath).",
+      "Find current memories when you don't know the keypath (latest versions " +
+      "only; deleted ones never match). Searches the project of this repo; " +
+      "all_projects=true searches the store. A hit carries `preview` (40 " +
+      "words): read the keypaths that matter with memstate_get(keypath).",
     inputSchema: {
       type: "object",
       properties: {
         query: {
           type: "string",
           description:
-            "plain words — no quoting or boolean operators needed; " +
-            "punctuation is handled",
+            "plain words; no operators needed",
         },
         project_id: {
           type: "string",
           description:
-            "OMIT to use the cwd project (this session's default)",
+            "OMIT for the cwd project",
         },
         scope: SCOPE_PROP,
         project_name: PROJECT_NAME_PROP,
@@ -1439,7 +1391,7 @@ const TOOLS: ToolDef[] = [
         all_projects: {
           type: "boolean",
           default: false,
-          description: "search every project in the store instead of just this repo's",
+          description: "search every project",
         },
         limit: { type: "integer", default: 10 },
         mode: {
@@ -1447,36 +1399,28 @@ const TOOLS: ToolDef[] = [
           enum: ["hybrid", "fts", "semantic"],
           default: "hybrid",
           description:
-            "\"hybrid\" (default) merges a literal-word match (any word " +
-            "may hit) with a match by MEANING and ranks by both; when the " +
-            "embedder is unavailable it returns the literal matches alone " +
-            "and sets `degraded` to the reason. \"fts\" requires EVERY " +
-            "word to match. \"semantic\" matches by meaning only and " +
-            "fails when Ollama is down.",
+            "hybrid: any word OR meaning, ranked by both; words only, with `degraded` " +
+            "set, when the embedder is down. fts: EVERY word. semantic: meaning only.",
         },
         category: {
           type: "string",
           description:
-            "only memories stored with exactly this category (lowercase " +
-            "word, e.g. \"decision\")",
+            "only this category, e.g. \"decision\"",
         },
         topics: {
           type: "array",
           items: { type: "string" },
-          description: "only memories tagged with AT LEAST ONE of these topics",
+          description: "only memories with ANY of these topics",
         },
         keypath_prefix: {
           type: "string",
           description:
-            "only memories at this keypath or below (dot-boundary), e.g. " +
-            "\"branches.feature_foo_bar\" to search one branch's state, or " +
-            "\"decisions\" to search only decisions",
+            "only memories at or below this keypath, e.g. \"decisions\"",
         },
         threshold: {
           type: "number",
           description:
-            "semantic and hybrid modes: similarity floor 0..1 (default " +
-            "0.5). Raise to tighten, lower to widen.",
+            "similarity floor 0..1 for hybrid and semantic (default 0.5)",
         },
       },
       required: ["query"],
@@ -1501,18 +1445,15 @@ const TOOLS: ToolDef[] = [
   {
     name: "memstate_history",
     description:
-      "Every stored version of ONE keypath, newest first, including " +
-      "tombstones. Use to see what a fact was before it changed. Identify " +
-      "the keypath either by `keypath` (project_id defaults to this " +
-      "repo's), or by the integer `id` of any memory in the chain (from a " +
-      "previous response).",
+      "Every stored version of ONE keypath, newest first, with tombstones: " +
+      "what a fact was before it changed. Name it by `keypath`, or by `memory_id`.",
     inputSchema: {
       type: "object",
       properties: {
         project_id: {
           type: "string",
           description:
-            "OMIT to use the cwd project (this session's default)",
+            "OMIT for the cwd project",
         },
         scope: SCOPE_PROP,
         project_name: PROJECT_NAME_PROP,
@@ -1522,7 +1463,7 @@ const TOOLS: ToolDef[] = [
         memory_id: {
           type: "integer",
           description:
-            "integer `id` from any prior response — alternative to keypath",
+            "the `id` from a write result or a history row, in place of keypath",
         },
       },
     },
@@ -1537,18 +1478,16 @@ const TOOLS: ToolDef[] = [
   {
     name: "memstate_delete",
     description:
-      "Tombstone a keypath so it stops appearing in reads and search. " +
-      "With recursive=true, also tombstones every keypath below it (e.g. " +
-      "a whole branches.<slug> subtree after a merge). Not destructive: " +
-      "all prior versions remain readable via memstate_history, and " +
-      "writing the keypath again resurrects it.",
+      "Tombstone a keypath: reads and searches stop returning it. " +
+      "recursive=true also takes every keypath below it. History stays " +
+      "(memstate_history), and a new write brings the keypath back.",
     inputSchema: {
       type: "object",
       properties: {
         project_id: {
           type: "string",
           description:
-            "OMIT to use the cwd project (this session's default)",
+            "OMIT for the cwd project",
         },
         scope: SCOPE_PROP,
         project_name: PROJECT_NAME_PROP,
@@ -1558,7 +1497,7 @@ const TOOLS: ToolDef[] = [
         recursive: {
           type: "boolean",
           default: false,
-          description: "also delete every keypath under this prefix",
+          description: "also delete every keypath below",
         },
       },
       required: ["keypath"],
@@ -1590,140 +1529,50 @@ const TOOLS: ToolDef[] = [
 // DEFAULT_ORIGIN tells the model where its default project id came from
 // and, outside a repository, that writes to it are gated.
 const DEFAULT_ORIGIN = CWD_IN_REPO
-  ? "derived from the git repository name"
+  ? "the git repository name"
   : CWD_IS_HOME
-    ? "derived from the home directory, which has no default project for writes; see Session project"
+    ? "the home directory, which has no default project for writes; see Session project"
     : CWD_SYSTEM_REASON
-      ? `derived from ${CWD_SYSTEM_REASON} (${WORKSPACE_DIR}) that the MCP client started this ` +
-        "proxy in, which has no default project for writes. On your first call pass " +
-        "project_name=<the project the recall hook's <memstate-scope cwd_project> names>, " +
-        "or project_id on every call; see Session project"
-      : "derived from the directory name, which is not a git repository; see Session project";
+      ? `${CWD_SYSTEM_REASON} (${WORKSPACE_DIR}), which has no default project for writes: ` +
+        "on your first call pass project_name=<the cwd_project of <memstate-scope>>, " +
+        "or pass project_id on each call"
+      : "the directory name; not a git repository, see Session project";
 
-const INSTRUCTIONS = `memstate — persistent memory across sessions, scoped per project.
+// INSTRUCTIONS must stay under 3,900 characters, with the most important
+// rule first. Claude Code cuts the instructions of an MCP server at 4,096
+// characters (older versions at 2,048). Until 2026-11-17 this text was 7,816
+// characters, so the host tag and the session project rules never reached
+// the model. The regression suite holds the limit. A rule belongs here once;
+// a field description names what the field does in one line, and a refused
+// call gives the reason.
+const INSTRUCTIONS = `memstate: persistent memory across sessions, one store per project.
 
-When to use:
-- Task start: memstate_get(project_id=...) to load prior context.
-- Task end: memstate_remember to save decisions, progress, and key facts.
-- Mid-task: memstate_search when you suspect prior context exists but don't
-  know the keypath; memstate_set for single-fact updates (config, status).
+Use: memstate_get() at task start (keypath names; pass keypath for content). memstate_remember at task end (decisions, reasons, unfinished work, gotchas). memstate_search when you do not know the keypath. memstate_set for one fact.
 
-Never save a denied prompt, for any reason. A denied prompt is a tool call
-that the user or a permission check denied. Do not save its tool name, its
-command, its arguments, or the fact of the denial. Do not save it under any
-keypath or category, in a task summary, or as a warning for a later session.
+Never save a denied prompt, for any reason. A denied prompt is a tool call that the user or a permission check denied. Do not save its tool name, command, arguments, or the fact of the denial, under any keypath, in a summary, or as a warning. Never store secrets, tokens or credentials.
 
-Writes are versioned: writing an existing keypath supersedes the old value.
-The response names the new and the prior version (keypath, version, and a
-40-word preview of the prior content). It never echoes the content you
-sent; memstate_history returns prior versions in full. Deletes keep history.
+Project: OMIT project_id. The cwd project is "${DEFAULT_PROJECT}" (${DEFAULT_ORIGIN}). Pass project_id only to reach another project that memstate_get(list_projects=true) lists. Never invent a variant: "my-app", "myapp" and "my_app_dev" are three projects.
 
-Conventions — follow these EXACTLY; every deviation fragments the store:
-- project_id: OMIT it. The cwd project is "${DEFAULT_PROJECT}"
-  (${DEFAULT_ORIGIN}); it is used whenever project_id
-  is absent. Only pass project_id to reach a DIFFERENT project, and then
-  only an id that memstate_get(list_projects=true) actually lists — NEVER
-  invent a variant: "my-app", "myapp", and "my_app_dev" each create a
-  separate, disconnected project.
-- keypath segments: lowercase snake_case only ([a-z0-9_]), joined by dots.
-  Dates are YYYY_MM_DD inside a segment: "task.summary.2026_07_03" — never
-  "2026-07-03" (kebab) and never camelCase or spaces anywhere.
-- keypath shape: <area>.<topic> or <area>.<topic>.<detail>. Prefer these
-  area segments: decisions, todo, notes, gotchas, questions, files, config,
-  arch, task.summary.<date>.
-- task.compact.<date> belongs to the compact hook: after a compact it holds
-  the session text of the summary, and the hook files each "###" section of
-  the summary at decisions|gotchas|todo|questions|notes.<topic> (topic
-  "compact"). Read it for the state at the last compact; do not write it.
-- One keypath = one fact. To update a fact, write the SAME keypath with the
-  new value; versioning preserves the old one. Do not create a sibling
-  keypath for a new value of the same fact.
-- Git branches: keypaths describe the MAIN/default branch unless said
-  otherwise. Facts that are only true on an unmerged branch go under
-  branches.<branch_slug>.<area>... with the branch name slugged to
-  snake_case ("feature/foo-bar" → branches.feature_foo_bar.todo). When the
-  branch merges, write the durable outcomes to normal top-level keypaths
-  and memstate_delete the branches.<branch_slug> subtree (recursive=true);
-  if it is abandoned, just delete the subtree. Branch-independent
-  knowledge (decisions taken, gotchas, architecture) always goes at the
-  top level, never under branches. Scope a search to one branch with
-  memstate_search's keypath_prefix="branches.<branch_slug>".
-- Heading extraction (memstate_remember without keypath) writes each
-  "## Section" at the top level — "## Auth" lands at keypath "auth",
-  exactly like an explicit write. Pass root="notes" (etc.) only when you
-  deliberately want sections nested under a prefix.
+Keypaths (follow exactly; a deviation fragments the store):
+- Segments are lowercase snake_case [a-z0-9_], joined by dots. Dates are YYYY_MM_DD: task.summary.2026_07_03, never 2026-07-03.
+- Shape <area>.<topic>[.<detail>]. Areas: decisions, todo, notes, gotchas, questions, files, config, arch, task.summary.<date>.
+- One keypath = one fact. To update a fact, write the SAME keypath; memstate_history keeps the old versions, and deletes keep history. A write result carries "prior", a 40-word preview of the version it replaced.
+- memstate_remember without keypath splits by "## " headings: "## Auth" lands at "auth". root="notes" nests the sections.
+- A fact true only on an unmerged branch goes under branches.<branch_slug>.<area> ("feature/foo-bar" → branches.feature_foo_bar). After the merge, write the outcomes at the top level and delete the subtree (recursive=true). Decisions, gotchas and architecture always go at the top level.
+- task.compact.<date> belongs to the compact hook, which also files sections under the areas above (topic "compact"). Read it; do not write it.
 
-Shared scope — facts that hold in every repository:
-- Pass scope="shared" (never a project_id) to reach the reserved shared
-  scope. memstate_get() with no arguments already returns it under
-  "shared", pruned to this machine, so read it there first.
-- A fact belongs in the shared scope only when BOTH hold: (1) it stays
-  true if this repo is deleted; (2) it is true in every repo: it describes
-  the user, this machine, or how you work across repos. Never a decision,
-  todo, task summary, or note about one repo's code — those stay in the
-  project.
-- The daemon enforces a keypath allowlist there and rejects everything
-  else with 400. Allowed shapes:
-    preferences.<topic>                 stated global working preferences
-    profile.<topic>                     who the user is; never credentials
-    practices.<topic>                   a way of working that holds in every
-                                        repo, with the case where it helped
-    lessons.<topic>                     a trap that cost trial and error
-                                        anywhere (a shell quirk, a tool whose
-                                        interface changed): how to spot it,
-                                        and the fix
-    host.${HOST_SLUG}.env.<topic>       OS, shell, paths, runtimes, ports
-    host.${HOST_SLUG}.tools.<topic>     how an installed tool is configured
-  This machine's host slug is "${HOST_SLUG}". Host facts need an explicit
-  keypath; heading extraction fits only "## Preferences", "## Profile",
-  "## Practices" and "## Lessons".
-- Never store secrets, tokens, or credentials in any scope. The denied-prompt
-  rule applies to the shared scope too.
+Shared scope (scope="shared", never a project_id): facts that hold in every repository and stay true if this repo is deleted: the user, this machine, how you work across repos. Never a decision, todo or note about one repo's code. memstate_get() already returns it under "shared". The daemon refuses each keypath there except:
+  preferences.<topic>, profile.<topic> (never credentials),
+  practices.<topic> (a way of working, with the case where it helped),
+  lessons.<topic> (a trap anywhere: how to spot it, and the fix),
+  host.${HOST_SLUG}.env.<topic>, host.${HOST_SLUG}.tools.<topic>.
+This machine's host slug is "${HOST_SLUG}". Host facts need an explicit keypath; headings fit only Preferences, Profile, Practices, Lessons.
+Host tag: host=true on a write marks a project fact true only on this machine (a build path, a port); it adds the topic "${HOST_TOPIC}".
 
-Host tag — a project fact that holds only on this machine:
-- Pass host=true on memstate_set or memstate_remember when the fact is
-  about this repository but true only here (a build path, a toolchain, a
-  port). The proxy adds the topic "${HOST_TOPIC}" to every memory the
-  call writes; the keypath stays the normal one. Filter with
-  memstate_search topics=["${HOST_TOPIC}"]. Facts true on every machine
-  take no tag.
-
-Session project — when the prompt is not about this directory:
-- The cwd project is the default and almost always right. On the first
-  prompt the recall hook shows a <memstate-scope> block: the cwd project and
-  the other projects the prompt matches. Judge from it. When the user
-  clearly works on another subject (for example "set up my nginx config"
-  from the home directory), pin this session with project_name on your
-  first memstate call. Later calls without project_id use that project.
-  Results then carry session_project.
-- Prefer an id that memstate_get(list_projects=true) lists. A new id needs
-  new_project=true as well, and is refused when it looks like an existing
-  id ("regress_tests" vs "regress_test", "my_app_dev" vs "my_app"). Never
-  invent a variant of an existing name.
-- One pin per session; a different project_name later is an error. Pass
-  project_id to reach another project for one call.
-- One rule for creating projects: a write (memstate_set, memstate_remember)
-  never creates a project unless it targets the git repository this
-  session runs in, or the call carries new_project=true. This holds for
-  the cwd project outside a git repository, for an explicit project_id,
-  and for a soft-deleted project (new_project=true revives it). A name
-  that resembles an existing project is always refused: use the existing
-  project. Reads are never gated, and a refusal creates nothing.
-- The home directory has no default project for writes at all, and its
-  name is never a project: pin another project with project_name, or use
-  scope="shared" for facts that hold in every repository.
-- Ids that start with "_" are reserved. The shared scope is scope="shared",
-  never a project_id or project_name; list_projects does not show it.
-- new_project=true is an error where nothing can be created: on a read
-  without project_name, with scope="shared", or for the git repository's
-  own project. Pass it only on the call that creates or revives a project.
-- strict_scope=false on any call lifts one rule for the rest of this
-  session: a write or a pin to a project that does not exist no longer
-  needs new_project=true. The home and system directory refusals, the
-  near-duplicate refusal, reserved ids and the shared-scope allowlist all
-  stay. Results carry strict_scope: false while loose; strict_scope=true
-  restores the default. Use it only when the user wants this session to
-  create scratch projects freely.`;
+Session project: the cwd project is almost always right. On the first prompt the recall hook shows <memstate-scope>: the cwd project and other projects that match the prompt. When the user clearly works on another subject, pass project_name on your first call to pin the session. One pin per session; project_id reaches another project for one call.
+- A write never creates a project unless it targets the git repository of this session or carries new_project=true. That holds outside a repository, for an explicit project_id and for a deleted project. A name that resembles an existing project is always refused: use that project. new_project=true is an error where nothing can be created.
+- The home directory has no default project for writes: pin a project or use scope="shared". Ids that start with "_" are reserved.
+- strict_scope=false lifts the new_project rule for the rest of the session. Use it only when the user wants scratch projects.`;
 
 // ---------- main ----------
 
