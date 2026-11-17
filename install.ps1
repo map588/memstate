@@ -191,8 +191,19 @@
         $hooksDir = Join-Path $ClaudeHome 'hooks'
         New-Item -ItemType Directory -Force -Path $hooksDir | Out-Null
         $hookPaths = @()
+        # This script installs a release that can be older than the script:
+        # the latest release until the next one is published, or
+        # MEMSTATE_VERSION. A release from before a hook has no file for it
+        # (the compact hook came with v0.11.0), and its
+        # configure-claude-hook.py does not know the name. So the script
+        # installs the hooks that the release holds.
         foreach ($hook in @('memstate-persist-reminder.sh', 'memstate-recall.sh', 'memstate-compact.sh')) {
-            Copy-Item -LiteralPath (Join-Path $Root "hooks\$hook") -Destination (Join-Path $hooksDir $hook) -Force
+            $hookSource = Join-Path $Root "hooks\$hook"
+            if (-not (Test-Path -LiteralPath $hookSource)) {
+                Say "this release has no $hook. Skipped it."
+                continue
+            }
+            Copy-Item -LiteralPath $hookSource -Destination (Join-Path $hooksDir $hook) -Force
             # Git Bash reads a backslash as an escape character, so the hook
             # command uses forward slashes.
             $hookPaths += ((Join-Path $hooksDir $hook) -replace '\\', '/')

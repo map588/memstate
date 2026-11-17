@@ -122,10 +122,23 @@ install_skill() {
   rm -rf "$skill_dir" "$precompact_dir"
   cp -R "$ROOT/skill" "$skill_dir"
   local hook hook_paths=()
+  # This script installs a release that can be older than the script: the
+  # latest release until the next one is published, or MEMSTATE_VERSION. A
+  # release from before a hook has no file for it (the compact hook came
+  # with v0.11.0), and its configure-claude-hook.py does not know the name.
+  # So the script installs the hooks that the release holds.
   for hook in memstate-persist-reminder.sh memstate-recall.sh memstate-compact.sh; do
+    if [ ! -f "$ROOT/hooks/$hook" ]; then
+      log "this release has no $hook. Skipped it."
+      continue
+    fi
     install -m 0755 "$ROOT/hooks/$hook" "$hooks_dir/$hook"
     hook_paths+=("$hooks_dir/$hook")
   done
+  if [ "${#hook_paths[@]}" -eq 0 ]; then
+    log "installed the skill in $skill_dir. This release has no hooks."
+    return 0
+  fi
   python3 "$ROOT/configure-claude-hook.py" install "${hook_paths[@]}" </dev/null
   log "installed the skill in $skill_dir"
   log "installed the hooks in $hooks_dir and added them to $CLAUDE_HOME/settings.json"
