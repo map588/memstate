@@ -1008,8 +1008,43 @@ interface ToolDef {
   handler: (args: Record<string, unknown>) => Promise<unknown>;
 }
 
+// reconnecting is the one ensureDaemon call that runs after a request could
+// not connect. Requests that fail together wait for the same call, so they
+// start one daemon.
+let reconnecting: Promise<void> | null = null;
+
+// daemonFetch sends one request to the daemon. A shared daemon can stop
+// while this proxy runs: its idle timeout ends it during a long turn, or
+// someone restarts it. Before 2026-11-15 the proxy looked for its daemon one
+// time, at startup, and each later tool call failed with "fetch failed"
+// until a person started the daemon again. Now a request that cannot
+// connect makes the proxy choose its daemon again with the startup rule
+// (ensureDaemon: attach, or start one where the rule permits it) and send
+// the request one more time. A write that the daemon did store before the
+// connection broke is not stored twice: equal content is "unchanged".
+// A child daemon is not started again here, because the proxy exits when
+// its child exits.
+async function daemonFetch(route: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(`${baseURL}${route}`, init);
+  } catch (err) {
+    if (daemonMode === "child") throw err;
+    process.stderr.write(
+      `memstate: no answer from the daemon at ${daemonAddr} (${String(err)}); connecting again\n`
+    );
+    reconnecting ??= ensureDaemon().finally(() => {
+      reconnecting = null;
+    });
+    await reconnecting;
+    process.stderr.write(
+      `memstate: connected again (mode=${daemonMode}, daemon @ http://${daemonAddr})\n`
+    );
+    return fetch(`${baseURL}${route}`, init);
+  }
+}
+
 async function postJSON(route: string, body: unknown): Promise<unknown> {
-  const res = await fetch(`${baseURL}${route}`, {
+  const res = await daemonFetch(route, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -1032,7 +1067,7 @@ async function postJSON(route: string, body: unknown): Promise<unknown> {
 }
 
 async function getJSON(route: string): Promise<unknown> {
-  const res = await fetch(`${baseURL}${route}`);
+  const res = await daemonFetch(route);
   const text = await res.text();
   let parsed: unknown = text;
   try {
@@ -1482,6 +1517,10 @@ Conventions — follow these EXACTLY; every deviation fragments the store:
 - keypath shape: <area>.<topic> or <area>.<topic>.<detail>. Prefer these
   area segments: decisions, todo, notes, gotchas, questions, files, config,
   arch, task.summary.<date>.
+- task.compact.<date> belongs to the compact hook: after a compact it holds
+  the session text of the summary, and the hook files each "###" section of
+  the summary at decisions|gotchas|todo|questions|notes.<topic> (topic
+  "compact"). Read it for the state at the last compact; do not write it.
 - One keypath = one fact. To update a fact, write the SAME keypath with the
   new value; versioning preserves the old one. Do not create a sibling
   keypath for a new value of the same fact.

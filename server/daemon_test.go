@@ -3,7 +3,9 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -248,6 +250,36 @@ func TestSubcommandStatus(t *testing.T) {
 	}
 	if !strings.Contains(string(out), `"service": "memstate"`) {
 		t.Fatalf("expected service line, got:\n%s", out)
+	}
+}
+
+// Regression: before 2026-11-15 `memstated <word>` with a word that is not
+// a verb started a daemon, which did not exit. A hook script that is newer
+// than the binary then held Claude Code until the hook timed out. The exit
+// code must be 1: Claude Code reads exit 2 from a hook as "block".
+func TestUnknownCommandIsRefused(t *testing.T) {
+	bin := buildDaemon(t)
+	for _, args := range [][]string{
+		{"compact-hook-of-a-later-release"},
+		{"--idle-timeout", "1m", "nosuchverb"},
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		cmd := exec.CommandContext(ctx, bin, args...)
+		cmd.Env = append(cleanEnv(),
+			"MEMSTATE_DB="+filepath.Join(t.TempDir(), "t.db"),
+			"MEMSTATE_NO_UPDATE_CHECK=1",
+			"MEMSTATE_CONFIG=off",
+		)
+		out, err := cmd.CombinedOutput()
+		cancel()
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+			t.Fatalf("%v: want exit 1, got %v\n%s", args, err, out)
+		}
+		word := args[len(args)-1]
+		if !strings.Contains(string(out), `unknown command "`+word+`"`) || strings.Contains(string(out), "MEMSTATE_READY") {
+			t.Fatalf("%v: output must name the word and start no daemon:\n%s", args, out)
+		}
 	}
 }
 

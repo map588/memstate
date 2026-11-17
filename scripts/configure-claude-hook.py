@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Install/uninstall the memstate UserPromptSubmit hooks in ~/.claude/settings.json.
+"""Install/uninstall the memstate hooks in ~/.claude/settings.json.
 
-Idempotent: any existing UserPromptSubmit entry whose command references one
-of MARKERS is replaced. Writes a .bak alongside.
+The name of a hook script selects its events (HOOK_EVENTS). Idempotent:
+any existing entry of those events whose command references one of the
+script names is replaced. Writes a .bak alongside.
 """
 from __future__ import annotations
 import json
@@ -11,12 +12,18 @@ import sys
 from pathlib import Path
 
 SETTINGS = Path.home() / ".claude" / "settings.json"
-MARKERS = ("memstate-persist-reminder", "memstate-recall")
+# Script name -> the hook events that run it.
+HOOK_EVENTS = {
+    "memstate-persist-reminder": ("UserPromptSubmit",),
+    "memstate-recall": ("UserPromptSubmit",),
+    "memstate-compact": ("PreCompact", "PostCompact"),
+}
+EVENTS = sorted({event for events in HOOK_EVENTS.values() for event in events})
 
 
 def is_memstate_hook(hook: dict) -> bool:
     command = hook.get("command", "")
-    return any(marker in command for marker in MARKERS)
+    return any(marker in command for marker in HOOK_EVENTS)
 
 
 def load() -> dict:
@@ -38,32 +45,40 @@ def strip_memstate(cfg: dict) -> None:
     hooks = cfg.get("hooks")
     if not hooks:
         return
-    ups = hooks.get("UserPromptSubmit", [])
-    clean = []
-    for entry in ups:
-        kept = [h for h in entry.get("hooks", []) if not is_memstate_hook(h)]
-        if kept:
-            entry["hooks"] = kept
-            clean.append(entry)
-    if clean:
-        hooks["UserPromptSubmit"] = clean
-    else:
-        hooks.pop("UserPromptSubmit", None)
+    for event in EVENTS:
+        clean = []
+        for entry in hooks.get(event, []):
+            kept = [h for h in entry.get("hooks", []) if not is_memstate_hook(h)]
+            if kept:
+                entry["hooks"] = kept
+                clean.append(entry)
+        if clean:
+            hooks[event] = clean
+        else:
+            hooks.pop(event, None)
     if not hooks:
         cfg.pop("hooks", None)
+
+
+def events_for(script_path: str) -> tuple[str, ...]:
+    for marker, events in HOOK_EVENTS.items():
+        if marker in Path(script_path).name:
+            return events
+    sys.exit(f"unknown hook script: {script_path}")
 
 
 def install(script_paths: list[str]) -> None:
     cfg = load()
     strip_memstate(cfg)
-    entries = cfg.setdefault("hooks", {}).setdefault("UserPromptSubmit", [])
+    hooks = cfg.setdefault("hooks", {})
     for script_path in script_paths:
-        entries.append(
-            {
-                "matcher": "",
-                "hooks": [{"type": "command", "command": script_path}],
-            }
-        )
+        for event in events_for(script_path):
+            hooks.setdefault(event, []).append(
+                {
+                    "matcher": "",
+                    "hooks": [{"type": "command", "command": script_path}],
+                }
+            )
     save(cfg)
 
 

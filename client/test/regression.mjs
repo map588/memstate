@@ -22,6 +22,7 @@
 import { execFileSync, spawn, spawnSync } from "child_process";
 import * as fs from "fs";
 import * as http from "http";
+import * as net from "net";
 import * as os from "os";
 import * as path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
@@ -1110,6 +1111,7 @@ async function main() {
   await attachToSlowDaemon();
   await attachRetriesHealth();
   await noDaemonForRemoteAddr();
+  await reconnectAfterDaemonStop();
 
   if (failures > 0) {
     process.stdout.write(`\n${failures} regression check(s) FAILED\n`);
@@ -1270,6 +1272,85 @@ async function noDaemonForRemoteAddr() {
       "the proxy started a daemon");
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
+  }
+}
+
+// reconnectAfterDaemonStop: a shared daemon with an idle timeout stops
+// during a long turn. The proxy looked for its daemon one time, at startup,
+// so each tool call of each open session then failed with "fetch failed"
+// until someone started the daemon by hand (58 idle stops in one daemon log
+// on 2026-11-15). When a request cannot connect, the proxy must find or
+// start the daemon again and send the request one more time. Calls that
+// fail together must start one daemon.
+async function reconnectAfterDaemonStop() {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "memstate-reconnect-"));
+  const addr = await new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.listen(0, "127.0.0.1", () => {
+      const { port } = srv.address();
+      srv.close(() => resolve(`127.0.0.1:${port}`));
+    });
+  });
+  const env = {
+    ...process.env,
+    MEMSTATE_ADDR: addr,
+    MEMSTATE_DB: path.join(tmp, "reconnect.db"),
+    MEMSTATE_NO_UPDATE_CHECK: "1",
+    MEMSTATE_CONFIG: "off",
+    MEMSTATE_EMBEDDING_URL: "http://127.0.0.1:9",
+  };
+  delete env.MEMSTATE_CHILD;
+  delete env.MEMSTATE_IDLE_TIMEOUT;
+  const log = path.join(tmp, "memstated.log");
+  const answers = async () => {
+    try {
+      return (await fetch(`http://${addr}/health`)).ok;
+    } catch {
+      return false;
+    }
+  };
+  const stopDaemon = async () => {
+    execFileSync(DAEMON, ["stop", "--addr", addr], { env, stdio: "ignore" });
+    for (let i = 0; i < 100 && (await answers()); i++) await new Promise((r) => setTimeout(r, 50));
+    if (await answers()) throw new Error("reconnect: the daemon did not stop");
+  };
+  try {
+    await withProxy(env, process.cwd(), async (client) => {
+      let r = await call(client, "memstate_set", {
+        project_id: "reconnect_test", keypath: "notes.before", value: "written before the stop", new_project: true,
+      });
+      check("reconnect: the proxy starts the daemon of MEMSTATE_ADDR",
+        !r.isError && readyLines(log) === 1,
+        JSON.stringify(r));
+
+      await stopDaemon();
+      r = await call(client, "memstate_get", { project_id: "reconnect_test", keypath: "notes.before" });
+      check("reconnect: a read after the daemon stopped starts it again and succeeds",
+        !r.isError && r.data.memories?.[0]?.content === "written before the stop" && readyLines(log) === 2,
+        JSON.stringify(r));
+
+      await stopDaemon();
+      const many = await Promise.all([1, 2, 3, 4].map((n) =>
+        call(client, "memstate_set", { project_id: "reconnect_test", keypath: `notes.after_${n}`, value: `value ${n}` })));
+      check("reconnect: four writes that fail together all succeed",
+        many.every((m) => !m.isError && m.data.action === "created"),
+        JSON.stringify(many));
+      check("reconnect: four writes that fail together start one daemon",
+        readyLines(log) === 3,
+        `${readyLines(log)} daemon starts in the log`);
+      r = await call(client, "memstate_get", { project_id: "reconnect_test", keypath: "notes" });
+      check("reconnect: each write is stored one time",
+        !r.isError && r.data.total_count === 5 && r.data.memories.every((m) => m.version === 1),
+        JSON.stringify(r));
+    });
+  } finally {
+    if (await answers()) {
+      try {
+        execFileSync(DAEMON, ["stop", "--addr", addr], { env, stdio: "ignore" });
+      } catch {}
+      for (let i = 0; i < 100 && (await answers()); i++) await new Promise((r) => setTimeout(r, 50));
+    }
+    fs.rmSync(tmp, { recursive: true, force: true });
   }
 }
 

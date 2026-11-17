@@ -26,7 +26,7 @@
 # layout as the repository, so the MCP proxy finds the daemon next to it:
 #   server/memstated        the daemon
 #   client/                 the MCP proxy and its node_modules
-#   skill/ skill-precompact/ hooks/ configure-claude-hook.py   the Claude Code skills
+#   skill/ hooks/ configure-claude-hook.py   the Claude Code skill and hooks
 # MEMSTATE_INSTALL_DIR gets three links: memstated, memstate (the human CLI)
 # and memstate-mcp. Run the script again to update both parts.
 set -euo pipefail
@@ -115,16 +115,19 @@ install_skill() {
     return 0
   fi
   local skill_dir="$CLAUDE_HOME/skills/memstate" hooks_dir="$CLAUDE_HOME/hooks"
+  # The pre-compact skill of an older release. The compact hook replaced
+  # it, so the script only removes it.
   local precompact_dir="$CLAUDE_HOME/skills/memstate-precompact"
   mkdir -p "$CLAUDE_HOME/skills" "$hooks_dir"
   rm -rf "$skill_dir" "$precompact_dir"
   cp -R "$ROOT/skill" "$skill_dir"
-  cp -R "$ROOT/skill-precompact" "$precompact_dir"
-  install -m 0755 "$ROOT/hooks/memstate-persist-reminder.sh" "$hooks_dir/memstate-persist-reminder.sh"
-  install -m 0755 "$ROOT/hooks/memstate-recall.sh" "$hooks_dir/memstate-recall.sh"
-  python3 "$ROOT/configure-claude-hook.py" install \
-    "$hooks_dir/memstate-persist-reminder.sh" "$hooks_dir/memstate-recall.sh" </dev/null
-  log "installed the skills in $skill_dir and $precompact_dir"
+  local hook hook_paths=()
+  for hook in memstate-persist-reminder.sh memstate-recall.sh memstate-compact.sh; do
+    install -m 0755 "$ROOT/hooks/$hook" "$hooks_dir/$hook"
+    hook_paths+=("$hooks_dir/$hook")
+  done
+  python3 "$ROOT/configure-claude-hook.py" install "${hook_paths[@]}" </dev/null
+  log "installed the skill in $skill_dir"
   log "installed the hooks in $hooks_dir and added them to $CLAUDE_HOME/settings.json"
   log "the recall hook needs a shared daemon: set MEMSTATE_ADDR, or start 'memstated --addr 127.0.0.1:8765'"
 }

@@ -82,7 +82,7 @@ To uninstall on macOS or Linux:
 
 ```bash
 python3 ~/.local/share/memstate/configure-claude-hook.py uninstall   # removes the hooks from settings.json
-rm -rf ~/.local/share/memstate ~/.claude/skills/memstate ~/.claude/skills/memstate-precompact ~/.claude/hooks/memstate-*.sh
+rm -rf ~/.local/share/memstate ~/.claude/skills/memstate ~/.claude/hooks/memstate-*.sh
 rm -f ~/.local/bin/memstated ~/.local/bin/memstate ~/.local/bin/memstate-mcp
 claude mcp remove memstate --scope user
 ```
@@ -91,7 +91,7 @@ To uninstall on Windows:
 
 ```powershell
 python "$env:LOCALAPPDATA\Programs\memstate\configure-claude-hook.py" uninstall
-Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Programs\memstate", "$HOME\.claude\skills\memstate", "$HOME\.claude\skills\memstate-precompact", "$HOME\.claude\hooks\memstate-*.sh"
+Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Programs\memstate", "$HOME\.claude\skills\memstate", "$HOME\.claude\hooks\memstate-*.sh"
 claude mcp remove memstate --scope user
 ```
 
@@ -180,10 +180,9 @@ of writes does not make searches wait.
 ### Claude Code skill and hook (optional)
 
 If you use Claude Code, the install script asks whether to install the
-bundled skills. From a clone, `make install-skill` installs them. The
-memstate skill goes to `~/.claude/skills/memstate/`, the pre-compact
-skill to `~/.claude/skills/memstate-precompact/`, and two
-UserPromptSubmit hooks are added:
+bundled skill and hooks. From a clone, `make install-skill` installs
+them. The memstate skill goes to `~/.claude/skills/memstate/`, and
+three hook scripts are added. Two run on UserPromptSubmit:
 
 - `memstate-persist-reminder.sh` points you to `memstate_remember`
   after three or more file edits since your last persist.
@@ -203,13 +202,37 @@ Claude Code runs hooks with Git Bash, so the install script adds the
 hooks only when it finds Git Bash. The persist reminder also needs `jq`
 and does nothing without it.
 
-Before a `/compact`, run `/memstate-precompact`. The agent writes the
-session state (task summary, decisions, gotchas, todo, open questions)
-to memstate and prints the `/compact` line to paste. That line tells
-the summary what to keep and tells the next context window to read
-those keypaths first.
+The third script, `memstate-compact.sh`, runs `memstated compact-hook`
+on PreCompact and PostCompact, so a `/compact` or an auto-compact needs
+no other step:
 
-`make uninstall-skill` removes both skills and both hooks. The install
+- Before the compact, it prints instructions for the summary. The
+  model writes a `## Session` part (the task, what is done with its
+  evidence, what is not done) and then one `### <topic>` section for
+  each decision, gotcha, todo item, open question and note, as many as
+  the handoff needs. The hook also lists the keypaths that the project
+  holds in those areas, so the model updates a fact under its name.
+  Text that you give to `/compact` stays in effect.
+- After the compact, it files each `###` section as one memory at
+  `decisions.<topic>`, `gotchas.<topic>`, `todo.<topic>`,
+  `questions.<topic>` or `notes.<topic>` in the session's project. A
+  memory that exists under that name is superseded, as with any write,
+  and `memstate history` shows each version. The session part goes to
+  `task.compact.<YYYY_MM_DD>` with the list of the keypaths that were
+  filed; a second compact on the same day supersedes it. The hook does
+  not write to `task.summary.<date>`, which the agent writes at the end
+  of a task, and not to an area keypath such as `decisions` itself.
+  Each memory has the topic `compact`.
+
+The compact hook starts the shared daemon when none runs, for example
+after the daemon's idle timeout. It does not create a project outside
+a git repository, and it stores nothing from the home directory or for
+a subagent. When it cannot store a part of the summary, Claude Code
+shows you the reason. The summary is the model's text: the
+instructions tell it to leave out secrets and denied tool calls, and
+the hook does not check that.
+
+`make uninstall-skill` removes the skill and the hooks. The install
 is idempotent and safe to run again. It replaces existing memstate
 entries in `settings.json` and does not duplicate them.
 
@@ -493,6 +516,12 @@ exits when nothing has used it for the timeout period:
 ```bash
 export MEMSTATE_IDLE_TIMEOUT=30m    # optional
 ```
+
+A proxy that is open when the daemon stops is not left without one. When
+a tool call cannot connect, the proxy finds or starts the daemon again
+with the same rule as at startup, and sends the call one more time. The
+compact hook starts the daemon too. The recall hook and the Python
+scripts do not.
 
 Two variables change the default:
 

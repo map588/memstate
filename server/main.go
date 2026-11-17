@@ -187,6 +187,8 @@ func main() {
 			os.Exit(cmdEmbed(os.Args[2:]))
 		case "recall":
 			os.Exit(cmdRecall(os.Args[2:]))
+		case "compact-hook":
+			os.Exit(cmdCompactHook(os.Args[2:]))
 		case "-h", "--help", "help":
 			printUsage()
 			os.Exit(0)
@@ -214,6 +216,16 @@ func main() {
 			"Env: MEMSTATE_EMBED_TIMEOUT.")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
+	}
+	// The daemon takes flags only. A word here is a verb that this binary
+	// does not have, for example from a hook script that is newer than
+	// the binary. Before 2026-11-15 the word was ignored and a daemon
+	// started, which did not exit and held the hook. The exit code is 1
+	// and not 2: Claude Code reads exit 2 from a hook as "block", and the
+	// proxy reads exit 2 from a daemon as "port occupied".
+	if fs.NArg() > 0 {
+		fmt.Fprintf(os.Stderr, "memstated: unknown command %q; `memstated --help` lists the commands\n", fs.Arg(0))
+		os.Exit(1)
 	}
 
 	idleTimeout := *idleTimeoutFlag
@@ -477,6 +489,15 @@ func printUsage() {
                                    hook event on stdin, search the shared daemon
                                    (MEMSTATE_ADDR, else daemon.addr) with the
                                    prompt, print unseen hits; always exits 0
+  memstated compact-hook           Claude Code PreCompact and PostCompact hook:
+                                   read the hook event on stdin; before a
+                                   compact print the summary instructions,
+                                   after it file each "###" section of the
+                                   summary as one memory (decisions.<topic>,
+                                   gotchas.<topic>, ...) and the session text
+                                   at task.compact.<date>; starts the shared
+                                   daemon when none runs; exits 2 when a
+                                   part of the summary is not stored
 
 Environment:
   MEMSTATE_ADDR           default for --addr

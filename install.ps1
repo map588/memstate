@@ -28,7 +28,7 @@
 #   server\memstate.exe     a copy that runs as the human CLI
 #   server\memstate-mcp.cmd runs the MCP proxy
 #   client\                 the MCP proxy and its node_modules
-#   skill\ skill-precompact\ hooks\ configure-claude-hook.py   the Claude Code skills
+#   skill\ hooks\ configure-claude-hook.py   the Claude Code skill and hooks
 # The script adds server\ to the user PATH. Run it again to update both parts.
 
 # The script block gives the script its own scope, so `irm | iex` does not
@@ -173,13 +173,14 @@
             return
         }
         $skillDir = Join-Path $ClaudeHome 'skills\memstate'
+        # The pre-compact skill of an older release. The compact hook
+        # replaced it, so the script only removes it.
         $precompactDir = Join-Path $ClaudeHome 'skills\memstate-precompact'
         New-Item -ItemType Directory -Force -Path (Join-Path $ClaudeHome 'skills') | Out-Null
         if (Test-Path -LiteralPath $skillDir) { Remove-Item -LiteralPath $skillDir -Recurse -Force }
         if (Test-Path -LiteralPath $precompactDir) { Remove-Item -LiteralPath $precompactDir -Recurse -Force }
         Copy-Item -LiteralPath (Join-Path $Root 'skill') -Destination $skillDir -Recurse
-        Copy-Item -LiteralPath (Join-Path $Root 'skill-precompact') -Destination $precompactDir -Recurse
-        Say "installed the skills in $skillDir and $precompactDir"
+        Say "installed the skill in $skillDir"
 
         $bash = Find-GitBash
         if (-not $bash) {
@@ -190,7 +191,7 @@
         $hooksDir = Join-Path $ClaudeHome 'hooks'
         New-Item -ItemType Directory -Force -Path $hooksDir | Out-Null
         $hookPaths = @()
-        foreach ($hook in @('memstate-persist-reminder.sh', 'memstate-recall.sh')) {
+        foreach ($hook in @('memstate-persist-reminder.sh', 'memstate-recall.sh', 'memstate-compact.sh')) {
             Copy-Item -LiteralPath (Join-Path $Root "hooks\$hook") -Destination (Join-Path $hooksDir $hook) -Force
             # Git Bash reads a backslash as an escape character, so the hook
             # command uses forward slashes.

@@ -55,6 +55,13 @@ Every deviation fragments the store into disconnected near-duplicates.
 - **keypath shape**: `<area>.<topic>` or `<area>.<topic>.<detail>`.
   Preferred area segments: `decisions`, `todo`, `notes`, `gotchas`,
   `questions`, `files`, `config`, `arch`, `task.summary.<date>`.
+- **`task.compact.<date>` belongs to the compact hook.** After a
+  `/compact` or an auto-compact, the hook stores the session text of
+  the summary there. It files each `###` section of the summary as one
+  memory at `decisions.<topic>`, `gotchas.<topic>`, `todo.<topic>`,
+  `questions.<topic>` or `notes.<topic>`, with the topic `compact`.
+  Read `task.compact.<date>` for the state at the last compact. Do not
+  write it: your task summary goes to `task.summary.<date>`.
 - **One keypath = one fact.** To update a fact, write the SAME keypath
   with the new value. Versioning keeps the old one. Do not create a
   sibling keypath for a new value of the same fact.
