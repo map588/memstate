@@ -104,6 +104,10 @@ func (m *uiModel) layout() {
 	m.rowView.SetHeight(max(paneH-3, 1))
 	// The footer gives half of the line to the label and half to the input.
 	m.input.SetWidth(max(m.width/2-3, 5))
+	// The input shows a part of its text and chose that part for its old
+	// width. A cursor move makes it choose again, or a narrower window gets
+	// a footer line that is wider than the window.
+	m.input.SetCursor(m.input.Position())
 	m.setGrid()
 }
 

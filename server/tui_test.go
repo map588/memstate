@@ -881,6 +881,32 @@ func TestUIEscapeSequencesInContent(t *testing.T) {
 }
 
 // isTermControl is true for each control character other than a newline.
+// TestUIFormFitsANarrowerWindow: a text input shows a part of its text, and
+// it chose that part for the width it had. After a resize to a narrower
+// window the input showed the old part, so the footer line was wider than
+// the window until the next key. TestUIKeysProperty found it on 2026-11-17
+// (seed 14788091216565168968): the purge form, 28 characters typed, then a
+// window of 50 cells gave a line of 54.
+func TestUIFormFitsANarrowerWindow(t *testing.T) {
+	f := newUIFixture(t)
+	m := f.m
+	m.b.readOnly = "read-only: test"
+	uiSelect(t, m, "decisions.db")
+	uiKeys(t, m, "X")
+	if m.form == nil {
+		t.Fatalf("no purge form; status %q", m.status)
+	}
+	uiType(t, m, strings.Repeat("j", 40))
+	for _, width := range []int{50, 57, 20, 120} {
+		uiSend(t, m, tea.WindowSizeMsg{Width: width, Height: 40})
+		for _, line := range strings.Split(uiScreenText(m), "\n") {
+			if w := lipgloss.Width(line); w > width {
+				t.Fatalf("a line of %d cells in a window of %d:\n%q", w, width, line)
+			}
+		}
+	}
+}
+
 func isTermControl(r rune) bool {
 	return (r < 0x20 && r != '\n') || (r >= 0x7f && r <= 0x9f)
 }
