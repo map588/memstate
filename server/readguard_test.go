@@ -119,6 +119,39 @@ func TestKeypathsReadGuardExamples(t *testing.T) {
 	if note, _ := out["note"].(string); !strings.Contains(note, "Read the keypaths that you need") || !strings.Contains(note, "recursive=false") {
 		t.Fatalf("note = %q", note)
 	}
+	// A memory at "decisions" has the three memories below it. With
+	// recursive=false the read gives that one memory, in full. Before
+	// 2026-11-19 the daemon did not read the field: the read gave the
+	// subtree as previews, and the content of such a memory could not be
+	// read through MCP.
+	if code, out := postJSON(t, ts.URL+"/api/v1/memories/store", map[string]any{
+		"project_id": "guard", "keypath": "decisions", "content": "root " + big,
+	}); code != 200 {
+		t.Fatalf("store: %d %v", code, out)
+	}
+	out, memories = readKeypaths(t, ts.URL, map[string]any{
+		"project_id": "guard", "keypath": "decisions", "recursive": false, "include_content": true, "max_content_bytes": 8000,
+	})
+	if _, cut := out["truncated"]; cut || len(memories) != 1 || memories[0]["keypath"] != "decisions" || memories[0]["content"] != "root "+big {
+		t.Fatalf("recursive=false must give the one memory in full: truncated=%v, %d memories", out["truncated"], len(memories))
+	}
+	// recursive=false at a keypath that holds no memory gives nothing.
+	_, memories = readKeypaths(t, ts.URL, map[string]any{
+		"project_id": "guard", "keypath": "decision", "recursive": false, "include_content": true,
+	})
+	if len(memories) != 0 {
+		t.Fatalf("recursive=false at a keypath with no memory: %d memories", len(memories))
+	}
+	// A request without the field reads the subtree, as before.
+	_, memories = readKeypaths(t, ts.URL, map[string]any{
+		"project_id": "guard", "keypath": "decisions", "include_content": false,
+	})
+	if len(memories) != 4 {
+		t.Fatalf("a read without the field must give the subtree: %d memories", len(memories))
+	}
+	if code, out := postJSON(t, ts.URL+"/api/v1/memories/delete", map[string]any{"project_id": "guard", "keypath": "decisions"}); code != 200 {
+		t.Fatalf("delete: %d %v", code, out)
+	}
 	// Without a limit the read is complete: the CLI and older clients send none.
 	out, memories = readKeypaths(t, ts.URL, map[string]any{
 		"project_id": "guard", "keypath": "decisions", "include_content": true,

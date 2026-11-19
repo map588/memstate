@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -800,10 +801,13 @@ func handleHistory(store *Store) http.HandlerFunc {
 }
 
 type keypathsReq struct {
-	ProjectID      string `json:"project_id"`
-	Keypath        string `json:"keypath,omitempty"`
-	Recursive      bool   `json:"recursive,omitempty"`
-	IncludeContent bool   `json:"include_content,omitempty"`
+	ProjectID string `json:"project_id"`
+	Keypath   string `json:"keypath,omitempty"`
+	// Recursive false gives the one memory at Keypath, and not the
+	// memories below it. Absent means true: clients from before
+	// 2026-11-19 do not send the field or expect the subtree.
+	Recursive      *bool `json:"recursive,omitempty"`
+	IncludeContent bool  `json:"include_content,omitempty"`
 	// MaxContentBytes is the read guard. A read of more than one memory
 	// whose content is above this size answers with a preview per memory.
 	// Zero means no limit: the CLI and older clients send none. The MCP
@@ -854,6 +858,10 @@ func handleKeypaths(store *Store) http.HandlerFunc {
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
+		}
+		if in.Recursive != nil && !*in.Recursive && in.Keypath != "" {
+			exact := NormalizeKeypath(in.Keypath)
+			list = slices.DeleteFunc(list, func(m *Memory) bool { return m.Keypath != exact })
 		}
 		// Strip content when not requested, to match hosted behavior.
 		if !in.IncludeContent {

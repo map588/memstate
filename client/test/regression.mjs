@@ -185,6 +185,8 @@ async function main() {
     check("wording: memstate_remember says that a heading is one fact",
       /ONE fact/.test(descOf("memstate_remember")) && /### /.test(descOf("memstate_remember")),
       descOf("memstate_remember"));
+    check("wording: the recursive field of memstate_get says what false does",
+      /only this keypath/.test(propOf("memstate_get", "recursive")), propOf("memstate_get", "recursive"));
     check("wording: the rerank field says what false does",
       /reranker/.test(propOf("memstate_search", "rerank")), propOf("memstate_search", "rerank"));
     check("wording: the instructions keep session state out of decisions and gotchas",
@@ -563,6 +565,15 @@ async function main() {
     r = await call(client, "memstate_set", { project_id: HINTS, keypath: "notes.build_order", value: "The build runs the daemon first and the proxy second, because the proxy test starts the daemon binary. " + "The order is in the Makefile target build. ".repeat(8) + "See notes.fixture_contents, notes.verification_commands and decisions.test_library." });
     check("hint: a memory with text of its own can name three keypaths",
       !r.isError && r.data.hint === undefined, JSON.stringify(r));
+    r = await call(client, "memstate_remember", { project_id: HINTS, content: "Loose text with no heading and no keypath." });
+    check("hint: text with no heading says where it went",
+      !r.isError && r.data.items[0].keypath === "preamble" && /preamble/.test(r.data.hint ?? ""), JSON.stringify(r));
+    r = await call(client, "memstate_set", { project_id: HINTS, keypath: "gotchas", value: "a memory at the name of an area" });
+    r = await call(client, "memstate_set", { project_id: HINTS, keypath: "gotchas.one_trap", value: "a trap below it" });
+    r = await call(client, "memstate_get", { project_id: HINTS, keypath: "gotchas", recursive: false });
+    check("get: recursive=false reads one memory that has memories below it",
+      !r.isError && r.data.memories.length === 1 && r.data.memories[0].content === "a memory at the name of an area",
+      JSON.stringify(r));
     r = await call(client, "memstate_delete_project", { project_id: HINTS });
     check("hint: test project deleted", !r.isError, JSON.stringify(r));
 
@@ -1251,6 +1262,12 @@ async function main() {
     check("set: missing required fields is an error",
       bad.isError === true,
       JSON.stringify(bad));
+    // The parameter is "value". The error named "content", the name of the
+    // field of the daemon (report of a test agent, 2026-11-19).
+    const noValue = await client.callTool({ name: "memstate_set", arguments: { project_id: PROJECT, keypath: "notes.empty", value: "" } });
+    check("set: an empty value gets an error that names the parameter",
+      noValue.isError === true && /value/.test(noValue.content?.[0]?.text ?? "") && !/content/.test(noValue.content?.[0]?.text ?? ""),
+      JSON.stringify(noValue));
 
     // ---- default daemon mode --------------------------------------------------
     // One shared daemon per database is the default: a daemon that published

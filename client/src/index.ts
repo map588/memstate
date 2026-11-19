@@ -726,8 +726,12 @@ const HINT_INDEX_REFS = 3;
 const HINT_INDEX_BYTES = 400;
 const KEYPATH_REF = new RegExp(`\\b(?:${AREAS.join("|")})\\.[a-z0-9_]+`, "g");
 
-// areaHint is the hint for a memory at the name of an area.
+// areaHint is the hint for a memory at the name of an area, and for text
+// that had no heading.
 function areaHint(keypaths: string[]): string | undefined {
+  if (keypaths.some((k) => k === "preamble" || k.endsWith(".preamble"))) {
+    return 'The text before the first heading went to "preamble". Give it a "## <area>" and "### <topic>" heading, or pass keypath.';
+  }
   const areas = keypaths.filter((k) => AREAS.includes(k));
   if (areas.length === 0) return undefined;
   const names = areas.map((k) => `"${k}"`).join(", ");
@@ -1294,8 +1298,12 @@ const TOOLS: ToolDef[] = [
       },
       required: ["keypath", "value"],
     },
-    handler: async (a) =>
-      withHint(
+    handler: async (a) => {
+      // The daemon names its own field, "content", in this error.
+      if (typeof a.value !== "string" || a.value === "") {
+        throw new Error("value is required: the text of the fact");
+      }
+      return withHint(
         slimWrite(
           (await postJSON("/memories/store", {
             project_id: await resolveProject(a, true),
@@ -1307,7 +1315,8 @@ const TOOLS: ToolDef[] = [
           })) as WriteResult
         ),
         factHint(String(a.keypath ?? ""), String(a.value ?? ""))
-      ),
+      );
+    },
   },
   {
     name: "memstate_remember",
@@ -1406,8 +1415,12 @@ const TOOLS: ToolDef[] = [
           default: false,
           description: "list every project id",
         },
-        recursive: { type: "boolean", default: true },
-        include_content: { type: "boolean", default: true },
+        recursive: {
+          type: "boolean",
+          default: true,
+          description: "false: only this keypath, not the ones below",
+        },
+        include_content: { type: "boolean", default: true, description: "false: no content" },
       },
     },
     handler: async (a) => {
