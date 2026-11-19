@@ -34,6 +34,9 @@ var configSettings = []struct{ key, def, help string }{
 	{"MEMSTATE_EMBEDDING_URL", defaultEmbeddingURL, "embedding server; a URL ending in /v1 is OpenAI-compatible (llama.cpp, LM Studio, vLLM)"},
 	{"MEMSTATE_EMBED_MODEL", defaultEmbedModel, "embedding model, as the server names it"},
 	{"MEMSTATE_EMBED_TIMEOUT", defaultEmbedTimeout.String(), "max time per embedding call (covers a cold model load)"},
+	{"MEMSTATE_RERANK_MODEL", "", "reranker model for hybrid search (empty: no reranker)"},
+	{"MEMSTATE_RERANK_URL", "", "rerank server, a base URL ending in /v1 (empty: the embedding URL)"},
+	{"MEMSTATE_RERANK_TIMEOUT", defaultRerankTimeout.String(), "max time per rerank call"},
 	{"MEMSTATE_SEMANTIC_THRESHOLD", fmt.Sprint(defaultThreshold), "cosine floor for semantic and hybrid search"},
 	{"MEMSTATE_IDLE_TIMEOUT", "", "shared daemon exits after this much idleness (empty: never)"},
 	{"MEMSTATE_ADDR", defaultAddr, "shared daemon address"},
@@ -259,6 +262,13 @@ func cmdConfig(args []string) int {
 		fmt.Fprintf(w, "%-28s %-40s %s\n", k, v, src)
 	}
 
+	if v, _ := configSource("MEMSTATE_RERANK_MODEL", ""); v == "" {
+		model, _ := configSource("MEMSTATE_EMBED_MODEL", defaultEmbedModel)
+		if hint := rerankHint(model); hint != "" {
+			fmt.Fprintf(w, "\nno reranker is set: %s\n", hint)
+		}
+	}
+
 	addr := subAddr(nil)
 	h, err := fetchHealth(addr)
 	if err != nil || h.Service != healthServiceName {
@@ -285,6 +295,7 @@ func cmdConfig(args []string) int {
 	check("embed_timeout", h.EmbedTimeout, want("MEMSTATE_EMBED_TIMEOUT", defaultEmbedTimeout.String()))
 	check("semantic_threshold", fmt.Sprint(h.SemanticThreshold), want("MEMSTATE_SEMANTIC_THRESHOLD", fmt.Sprint(defaultThreshold)))
 	check("idle_timeout", h.IdleTimeout, want("MEMSTATE_IDLE_TIMEOUT", ""))
+	check("rerank_model", h.RerankModel, want("MEMSTATE_RERANK_MODEL", ""))
 	if drift {
 		fmt.Fprintf(w, "  -> `memstated restart` starts a daemon from the config above; flags it was started with still win\n")
 	}

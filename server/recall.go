@@ -425,6 +425,8 @@ func recallSearch(addr, project, prompt string) ([]recallHit, error) {
 		"mode":            "hybrid",
 		"limit":           recallSearchLim,
 		"include_content": true,
+		// The hook runs on each prompt and must not wait for a reranker.
+		"rerank": false,
 	}
 	if project != "" {
 		req["project_id"] = project

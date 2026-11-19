@@ -169,7 +169,7 @@ func TestEmbedContentReEmbedOnChangeAndDeleteOnTombstone(t *testing.T) {
 	defer ollama.Close()
 	embedder := newTestEmbedder(t, ollama)
 	store := newTestStore(t)
-	ts := httptest.NewServer(newRouter(store, nil, embedder))
+	ts := httptest.NewServer(newRouter(store, nil, embedder, nil))
 	t.Cleanup(ts.Close)
 
 	write := func(content string) {
@@ -230,7 +230,7 @@ func TestEmbedHealsMissingVectorOnUnchangedWrite(t *testing.T) {
 		errorLogCool: time.Hour,
 	}
 	store := newTestStore(t)
-	tsDead := httptest.NewServer(newRouter(store, nil, deadEmbedder))
+	tsDead := httptest.NewServer(newRouter(store, nil, deadEmbedder, nil))
 	postJSON(t, tsDead.URL+"/api/v1/memories/store", map[string]any{
 		"project_id": "p", "keypath": "k", "content": "v",
 	})
@@ -239,7 +239,7 @@ func TestEmbedHealsMissingVectorOnUnchangedWrite(t *testing.T) {
 
 	// Same store, healthy embedder, identical content: action=unchanged but
 	// the missing vector must be healed.
-	ts := httptest.NewServer(newRouter(store, nil, embedder))
+	ts := httptest.NewServer(newRouter(store, nil, embedder, nil))
 	t.Cleanup(ts.Close)
 	code, body := postJSON(t, ts.URL+"/api/v1/memories/store", map[string]any{
 		"project_id": "p", "keypath": "k", "content": "v",
@@ -342,7 +342,7 @@ func TestRebuildAndPruneEmbeddings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []EmbeddingModelStat{{"mock", 2, 8, 64}, {"old-model", 1, 3, 12}}
+	want := []EmbeddingModelStat{{"mock", 2, 8, 8, 64}, {"old-model", 1, 3, 3, 12}}
 	if len(stats) != 2 || stats[0] != want[0] || stats[1] != want[1] {
 		t.Fatalf("stats: got %+v want %+v", stats, want)
 	}

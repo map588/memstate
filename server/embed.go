@@ -93,20 +93,7 @@ func NewEmbedder(url, model string, timeout time.Duration) *Embedder {
 	if model == "" {
 		model = defaultEmbedModel
 	}
-	if timeout == 0 {
-		if v := os.Getenv("MEMSTATE_EMBED_TIMEOUT"); v != "" {
-			d, err := time.ParseDuration(v)
-			if err != nil || d <= 0 {
-				fmt.Fprintf(os.Stderr, "memstated: bad MEMSTATE_EMBED_TIMEOUT %q, using %s\n",
-					v, defaultEmbedTimeout)
-			} else {
-				timeout = d
-			}
-		}
-	}
-	if timeout == 0 {
-		timeout = defaultEmbedTimeout
-	}
+	timeout = durationSetting(timeout, "MEMSTATE_EMBED_TIMEOUT", defaultEmbedTimeout)
 	return &Embedder{
 		URL:          url,
 		Model:        model,
@@ -121,6 +108,23 @@ const (
 	defaultEmbedModel   = "nomic-embed-text"
 	defaultEmbedTimeout = 60 * time.Second
 )
+
+// durationSetting resolves a timeout: the explicit value, then the
+// environment variable key (Go duration syntax), then def. A bad value in
+// the environment gets one line on stderr and def.
+func durationSetting(explicit time.Duration, key string, def time.Duration) time.Duration {
+	if explicit != 0 {
+		return explicit
+	}
+	if v := os.Getenv(key); v != "" {
+		d, err := time.ParseDuration(v)
+		if err == nil && d > 0 {
+			return d
+		}
+		fmt.Fprintf(os.Stderr, "memstated: bad %s %q, using %s\n", key, v, def)
+	}
+	return def
+}
 
 // deprecatedName prints the one-line notice for an option that was given
 // under its old name.
@@ -219,8 +223,44 @@ func (e *Embedder) EmbedQuery(ctx context.Context, text string) ([]float32, erro
 // openAIBase reports whether URL is the base of an OpenAI-compatible API.
 // By convention such a base ends in /v1: the llama.cpp server, LM Studio,
 // vLLM, and Ollama's own /v1 all serve POST {base}/embeddings.
-func (e *Embedder) openAIBase() bool {
-	return strings.HasSuffix(strings.TrimRight(e.URL, "/"), "/v1")
+func (e *Embedder) openAIBase() bool { return isOpenAIBase(e.URL) }
+
+func isOpenAIBase(url string) bool {
+	return strings.HasSuffix(strings.TrimRight(url, "/"), "/v1")
+}
+
+// vectorSizeError says that a vector from the embedding server and the
+// vectors in the store for the same model name have different lengths.
+// That occurs when the server puts another model, or another output size,
+// behind a name. Cosine similarity between the two has no meaning, so the
+// store refuses the new vector and a search reports the mismatch.
+type vectorSizeError struct {
+	Model       string
+	Got, Stored int
+}
+
+func (e *vectorSizeError) Error() string {
+	return fmt.Sprintf("embedding size mismatch: model %s returns %d values, the store holds vectors of %d for it; run `memstated embed rebuild --model %s`",
+		e.Model, e.Got, e.Stored, e.Model)
+}
+
+// checkVector refuses a vector that cannot be compared: one with a NaN or
+// infinite component, and one with only zeros. A model server can compute
+// NaN for each component (llama.cpp issue 29216: Qwen3-Embedding 8B Q8_0 on
+// Metal). JSON has no NaN, so the server writes null, and the decoder
+// leaves a float32 at 0 for null: the bad vector arrives as zeros.
+func checkVector(vec []float32) error {
+	zero := true
+	for i, x := range vec {
+		if math.IsNaN(float64(x)) || math.IsInf(float64(x), 0) {
+			return &embedStatusError{msg: fmt.Sprintf("embedding server returned a vector with a value that is not finite at position %d", i)}
+		}
+		zero = zero && x == 0
+	}
+	if zero {
+		return &embedStatusError{msg: "embedding server returned a vector of zeros (a model server writes NaN as null)"}
+	}
+	return nil
 }
 
 // Two budgets cap the embedding calls in flight across the whole daemon,
@@ -275,7 +315,7 @@ func (e *Embedder) embedOnce(ctx context.Context, text string) ([]float32, error
 		if len(out.Data) == 0 || len(out.Data[0].Embedding) == 0 {
 			return nil, errors.New("embedding server returned empty embedding")
 		}
-		return out.Data[0].Embedding, nil
+		return out.Data[0].Embedding, checkVector(out.Data[0].Embedding)
 	}
 	var out struct {
 		Embedding []float32 `json:"embedding"`
@@ -288,7 +328,7 @@ func (e *Embedder) embedOnce(ctx context.Context, text string) ([]float32, error
 	if len(out.Embedding) == 0 {
 		return nil, errors.New("ollama returned empty embedding")
 	}
-	return out.Embedding, nil
+	return out.Embedding, checkVector(out.Embedding)
 }
 
 // post sends payload as JSON to url and decodes the reply into out. A reply
@@ -296,13 +336,19 @@ func (e *Embedder) embedOnce(ctx context.Context, text string) ([]float32, error
 // rejected); a transport error comes back as is (server down). what names
 // the endpoint in the error message.
 func (e *Embedder) post(ctx context.Context, url, what string, payload, out any) error {
+	return postModelServer(ctx, e.Client, url, what, payload, out)
+}
+
+// postModelServer is post for any model server: the embedder and the
+// reranker use it.
+func postModelServer(ctx context.Context, client *http.Client, url, what string, payload, out any) error {
 	body, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := e.Client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}

@@ -38,6 +38,11 @@ type healthResponse struct {
 	EmbeddingURL string `json:"embedding_url,omitempty"`
 	EmbedTimeout string `json:"embed_timeout,omitempty"` // Go duration
 	IdleTimeout  string `json:"idle_timeout,omitempty"`  // Go duration, absent when disabled
+	// RerankModel, RerankURL and RerankTimeout are absent when no reranker
+	// is configured.
+	RerankModel   string `json:"rerank_model,omitempty"`
+	RerankURL     string `json:"rerank_url,omitempty"`
+	RerankTimeout string `json:"rerank_timeout,omitempty"` // Go duration
 	// Pid, Args and ConfigFile say what is running and how it was started:
 	// `memstated config` prints them, and restart/upgrade replay Args so
 	// a daemon keeps the flags it was given.
@@ -61,7 +66,7 @@ func decodeHealth(r io.Reader) (*healthResponse, error) {
 	return &h, nil
 }
 
-func newRouter(store *Store, shutdown func(), embedder *Embedder) http.Handler {
+func newRouter(store *Store, shutdown func(), embedder *Embedder, reranker *Reranker) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -82,6 +87,11 @@ func newRouter(store *Store, shutdown func(), embedder *Embedder) http.Handler {
 		}
 		if daemonIdleTimeout > 0 {
 			h.IdleTimeout = daemonIdleTimeout.String()
+		}
+		if reranker != nil {
+			h.RerankModel = reranker.Model
+			h.RerankURL = reranker.URL
+			h.RerankTimeout = reranker.timeout().String()
 		}
 		writeJSON(w, http.StatusOK, h)
 	})
@@ -109,7 +119,7 @@ func newRouter(store *Store, shutdown func(), embedder *Embedder) http.Handler {
 	mux.HandleFunc("POST /api/v1/projects/delete", handleDeleteProject(store))
 
 	// --- reads ------------------------------------------------------------
-	mux.HandleFunc("POST /api/v1/memories/search", handleSearch(store, embedder))
+	mux.HandleFunc("POST /api/v1/memories/search", handleSearch(store, embedder, reranker))
 	mux.HandleFunc("POST /api/v1/memories/history", handleHistory(store))
 	mux.HandleFunc("POST /api/v1/keypaths", handleKeypaths(store))
 	mux.HandleFunc("GET /api/v1/tree", handleTree(store))
@@ -482,6 +492,12 @@ type searchReq struct {
 	// IncludeContent adds the full content to every hit. Off by default:
 	// a hit carries a preview, and the caller reads the keypaths it wants.
 	IncludeContent bool `json:"include_content,omitempty"`
+	// Rerank applies to the hybrid mode. When the field is absent, the
+	// reranker orders the hits if the daemon has one. false keeps the
+	// order of rrfFuse. `memstated recall` sends false, because a rerank
+	// is too slow for a hook that runs on each prompt. true is an error
+	// when the daemon has no reranker.
+	Rerank *bool `json:"rerank,omitempty"`
 }
 
 // searchResult is one hit as the API returns it: the memory's metadata, a
@@ -500,6 +516,8 @@ type searchResult struct {
 	CreatedAt int64    `json:"created_at"`
 	Score     *float32 `json:"score,omitempty"`
 	Sources   []string `json:"sources,omitempty"`
+	// RerankScore is set on a hybrid hit that the reranker read.
+	RerankScore *float32 `json:"rerank_score,omitempty"`
 }
 
 func newSearchResult(m *Memory, full bool) searchResult {
@@ -543,12 +561,13 @@ func hybridResults(hs []*HybridHit, full bool) []searchResult {
 		score := h.Score
 		r.Score = &score
 		r.Sources = h.Sources
+		r.RerankScore = h.RerankScore
 		out = append(out, r)
 	}
 	return out
 }
 
-func handleSearch(store *Store, embedder *Embedder) http.HandlerFunc {
+func handleSearch(store *Store, embedder *Embedder, reranker *Reranker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var in searchReq
 		if err := decodeJSON(r, &in); err != nil {
@@ -580,9 +599,20 @@ func handleSearch(store *Store, embedder *Embedder) http.HandlerFunc {
 		if in.Threshold != nil {
 			threshold = *in.Threshold
 		}
+		if in.Rerank != nil && *in.Rerank {
+			if mode != "hybrid" {
+				writeErr(w, http.StatusBadRequest, "rerank applies to the hybrid mode only")
+				return
+			}
+			if reranker == nil {
+				writeErr(w, http.StatusBadRequest,
+					"rerank requested, but no reranker is configured (set MEMSTATE_RERANK_MODEL)")
+				return
+			}
+		}
 		switch mode {
 		case "hybrid":
-			out, status, err := hybridSearch(r.Context(), store, embedder, in, filter, threshold)
+			out, status, err := hybridSearch(r.Context(), store, embedder, reranker, in, filter, threshold)
 			if err != nil {
 				writeErr(w, status, err.Error())
 				return
@@ -616,7 +646,12 @@ func handleSearch(store *Store, embedder *Embedder) http.HandlerFunc {
 			}
 			hits, err := store.SemanticSearch(in.ProjectID, qvec, embedder.Model, threshold, filter, in.Limit)
 			if err != nil {
-				writeErr(w, http.StatusInternalServerError, err.Error())
+				status := http.StatusInternalServerError
+				var vse *vectorSizeError
+				if errors.As(err, &vse) {
+					status = http.StatusConflict
+				}
+				writeErr(w, status, err.Error())
 				return
 			}
 			writeJSON(w, http.StatusOK, map[string]any{
@@ -640,7 +675,7 @@ func handleSearch(store *Store, embedder *Embedder) http.HandlerFunc {
 // returned alone and the response carries a "degraded" reason, so a search
 // never fails because Ollama is down. The returned status is only used when
 // err is non-nil.
-func hybridSearch(ctx context.Context, store *Store, embedder *Embedder, in searchReq, filter SearchFilter, threshold float32) (map[string]any, int, error) {
+func hybridSearch(ctx context.Context, store *Store, embedder *Embedder, reranker *Reranker, in searchReq, filter SearchFilter, threshold float32) (map[string]any, int, error) {
 	limit := in.Limit
 	if limit <= 0 {
 		limit = defaultSearchLimit
@@ -668,14 +703,45 @@ func hybridSearch(ctx context.Context, store *Store, embedder *Embedder, in sear
 			out["degraded"] = fmt.Sprintf("semantic unavailable: embed query: %v", err)
 		} else {
 			sem, err = store.SemanticSearch(in.ProjectID, qvec, embedder.Model, threshold, filter, pool)
-			if err != nil {
+			var vse *vectorSizeError
+			switch {
+			case errors.As(err, &vse):
+				out["degraded"] = "semantic unavailable: " + err.Error()
+			case err != nil:
 				return nil, http.StatusInternalServerError, err
+			default:
+				out["model"] = embedder.Model
+				out["threshold"] = threshold
 			}
-			out["model"] = embedder.Model
-			out["threshold"] = threshold
 		}
 	}
-	hits := rrfFuse(fts, sem, limit)
+	// The reranker reads more hits than the caller asked for, so a hit
+	// that the fusion put low can still come first.
+	rerank := reranker != nil && (in.Rerank == nil || *in.Rerank)
+	fuseLimit := limit
+	if rerank {
+		fuseLimit = max(limit, rerankMaxDocs)
+	}
+	hits := rrfFuse(fts, sem, fuseLimit)
+	if rerank && len(hits) > 0 {
+		docs := make([]string, min(len(hits), rerankMaxDocs))
+		for i := range docs {
+			docs[i] = rerankDoc(hits[i].Memory)
+		}
+		rctx, cancel := context.WithTimeout(ctx, reranker.timeout())
+		scores, err := reranker.Rerank(rctx, in.Query, docs)
+		cancel()
+		if err != nil {
+			// The search still answers, in the order of rrfFuse.
+			out["rerank_degraded"] = fmt.Sprintf("rerank unavailable: %v", err)
+		} else {
+			hits = applyRerank(hits, scores)
+			out["reranker"] = reranker.Model
+		}
+	}
+	if len(hits) > limit {
+		hits = hits[:limit]
+	}
 	out["results"] = hybridResults(hits, in.IncludeContent)
 	out["total_found"] = len(hits)
 	return out, http.StatusOK, nil

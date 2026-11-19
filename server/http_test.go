@@ -20,7 +20,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 func newTestServerWithEmbedder(t *testing.T, embedder *Embedder) *httptest.Server {
 	t.Helper()
 	store := newTestStore(t)
-	ts := httptest.NewServer(newRouter(store, nil, embedder))
+	ts := httptest.NewServer(newRouter(store, nil, embedder, nil))
 	t.Cleanup(ts.Close)
 	return ts
 }

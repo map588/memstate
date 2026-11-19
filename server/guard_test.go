@@ -109,7 +109,7 @@ func TestGuardRefusedWriteStoresNothing(t *testing.T) {
 // it. The Origin rule must.
 func TestGuardShutdownRefusesWebPage(t *testing.T) {
 	var calls atomic.Int32
-	ts := httptest.NewServer(newRouter(newTestStore(t), func() { calls.Add(1) }, nil))
+	ts := httptest.NewServer(newRouter(newTestStore(t), func() { calls.Add(1) }, nil, nil))
 	t.Cleanup(ts.Close)
 
 	code, _ := guardRequest(t, ts, "POST", "/admin/shutdown", "", map[string]string{"Origin": "https://attacker.example"}, "")

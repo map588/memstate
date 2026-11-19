@@ -18,6 +18,7 @@ type modelStatus struct {
 	Rows       int   // vectors stored, stale rows included
 	Missing    int   // current keypaths with no vector under this model
 	Dim        int   // vector length
+	MixedDims  bool  // the store holds more than one vector length for the model
 	Bytes      int64 // vector storage
 }
 
@@ -108,7 +109,7 @@ func collectEmbedStatus(store *Store, emb *Embedder, threshold float32, probe bo
 			return nil, fmt.Errorf("missing for %s: %w", st.Model, err)
 		}
 		ms := modelStatus{
-			Model: st.Model, Rows: st.Rows, Dim: st.Dim, Bytes: st.Bytes,
+			Model: st.Model, Rows: st.Rows, Dim: st.Dim, MixedDims: st.MinDim != st.Dim, Bytes: st.Bytes,
 			Missing: len(missing), Configured: st.Model == emb.Model,
 		}
 		seen = seen || ms.Configured
@@ -263,6 +264,9 @@ func renderEmbedStatus(w io.Writer, r *embedStatusReport) {
 		}
 		fmt.Fprintf(w, "%s %-28s %s %6d/%-6d %3d%%  %5d  %8s  %d\n",
 			mark, m.Model, bar(done, r.Total, 30), done, r.Total, pct, m.Dim, humanBytes(m.Bytes), m.Rows)
+		if m.MixedDims {
+			fmt.Fprintf(w, "    %s holds vectors of more than one size; run `memstated embed rebuild --model %s`\n", m.Model, m.Model)
+		}
 	}
 	fmt.Fprintln(w)
 

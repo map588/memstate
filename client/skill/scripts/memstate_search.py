@@ -5,7 +5,10 @@ Three modes:
 - hybrid (default): FTS match on any query word fused with the semantic
                  ranking (reciprocal rank fusion). When the embedder is
                  unavailable the FTS hits are returned alone and the
-                 response carries a `degraded` reason.
+                 response carries a `degraded` reason. When the daemon
+                 has a reranker (MEMSTATE_RERANK_MODEL), it orders the
+                 fused hits and each hit carries `rerank_score`;
+                 --no-rerank skips it.
 - fts:           SQLite FTS5 keyword match on content + keypath. Every
                  query word must match.
 - semantic:      cosine similarity between the query and embeddings of
@@ -39,6 +42,8 @@ def main() -> int:
                     help="only return memories with this category")
     ap.add_argument("--topics", default=None,
                     help="comma-separated: match memories tagged with any of these")
+    ap.add_argument("--no-rerank", action="store_true",
+                    help="hybrid: keep the fused order and skip the reranker (faster)")
     ap.add_argument("--keypath-prefix", default=None,
                     help="only memories at this keypath or below, e.g. branches.feature_x")
     args = ap.parse_args()
@@ -56,6 +61,8 @@ def main() -> int:
         body["topics"] = args.topics.split(",")
     if args.keypath_prefix:
         body["keypath_prefix"] = args.keypath_prefix
+    if args.no_rerank:
+        body["rerank"] = False
 
     def search():
         out = fetch("POST", "/memories/search", body)

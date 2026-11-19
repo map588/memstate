@@ -549,7 +549,7 @@ func TestCompactHookEndToEnd(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		second = httptest.NewUnstartedServer(newRouter(newTestStore(t), nil, nil))
+		second = httptest.NewUnstartedServer(newRouter(newTestStore(t), nil, nil, nil))
 		second.Listener.Close()
 		second.Listener = ln
 		second.Start()

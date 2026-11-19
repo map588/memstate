@@ -77,7 +77,7 @@ func TestWriteRefusesUnsafeNames(t *testing.T) {
 // A keypath that an older daemon accepted must still be deletable.
 func TestDeleteRemovesAnUnsafeLegacyKeypath(t *testing.T) {
 	store := newTestStore(t)
-	ts := httptest.NewServer(newRouter(store, nil, nil))
+	ts := httptest.NewServer(newRouter(store, nil, nil, nil))
 	t.Cleanup(ts.Close)
 	for _, stmt := range []string{
 		`INSERT INTO projects(id, created_at) VALUES('legacy', 1)`,

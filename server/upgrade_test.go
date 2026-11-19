@@ -386,7 +386,7 @@ func TestHostIsLocalProperty(t *testing.T) {
 func TestLocateDaemon(t *testing.T) {
 	// A daemon of this machine: the real router reports the PID of this
 	// process.
-	ts := httptest.NewServer(newRouter(newTestStore(t), nil, nil))
+	ts := httptest.NewServer(newRouter(newTestStore(t), nil, nil, nil))
 	t.Cleanup(ts.Close)
 	here := strings.TrimPrefix(ts.URL, "http://")
 	if h, site := locateDaemon(here); site != daemonHere || h == nil || h.Pid != os.Getpid() {

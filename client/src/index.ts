@@ -1450,6 +1450,9 @@ const TOOLS: ToolDef[] = [
           description:
             "similarity floor 0..1 for hybrid and semantic (default 0.5)",
         },
+        // No description: the schemas are at their size budget. false
+        // keeps the fused order and skips the reranker of the daemon.
+        rerank: { type: "boolean" },
       },
       required: ["query"],
     },
@@ -1458,7 +1461,17 @@ const TOOLS: ToolDef[] = [
       if (!all_projects) {
         body.project_id = await resolveProject(a);
       }
-      const out = (await postJSON("/memories/search", body)) as {
+      let reply: unknown;
+      try {
+        reply = await postJSON("/memories/search", body);
+      } catch (err) {
+        // A daemon from before the reranker refuses the field. That daemon
+        // has no reranker, so rerank=false holds without the field.
+        if (body.rerank !== false || !String(err).includes('unknown field "rerank"')) throw err;
+        delete body.rerank;
+        reply = await postJSON("/memories/search", body);
+      }
+      const out = reply as {
         results?: { keypath: string }[];
         total_found?: number;
       };

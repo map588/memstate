@@ -544,14 +544,55 @@ func (s *Store) HasKeypathEmbedding(projectID, keypath, model string) (bool, err
 
 // UpsertKeypathEmbedding inserts or replaces the vector for (project, keypath, model).
 func (s *Store) UpsertKeypathEmbedding(projectID, keypath, model string, dim int, vector []byte) error {
-	_, err := s.db.Exec(
+	// One statement checks and writes, so two writers cannot put two
+	// sizes into the store for one model.
+	res, err := s.db.Exec(
 		`INSERT INTO keypath_embeddings(project_id, keypath, model, dim, vector, created_at)
-		 VALUES(?, ?, ?, ?, ?, ?)
+		 SELECT ?, ?, ?, ?, ?, ?
+		 WHERE NOT EXISTS (SELECT 1 FROM keypath_embeddings WHERE model=? AND dim<>?)
 		 ON CONFLICT(project_id, keypath, model) DO UPDATE SET
 		   dim=excluded.dim, vector=excluded.vector, created_at=excluded.created_at`,
-		projectID, keypath, model, dim, vector, time.Now().Unix(),
+		projectID, keypath, model, dim, vector, time.Now().Unix(), model, dim,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil || n > 0 {
+		return err
+	}
+	dims, err := s.EmbeddingDims(model)
+	if err != nil {
+		return err
+	}
+	stored := 0
+	for _, d := range dims {
+		if d != dim {
+			stored = d
+			break
+		}
+	}
+	return &vectorSizeError{Model: model, Got: dim, Stored: stored}
+}
+
+// EmbeddingDims returns each vector length that the store holds for model,
+// smallest first. More than one length means that the model behind the
+// name changed, and only `memstated embed rebuild` repairs that.
+func (s *Store) EmbeddingDims(model string) ([]int, error) {
+	rows, err := s.db.Query(
+		`SELECT DISTINCT dim FROM keypath_embeddings WHERE model=? ORDER BY dim`, model)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []int
+	for rows.Next() {
+		var d int
+		if err := rows.Scan(&d); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
 }
 
 // MissingEmbedding is a current, non-tombstoned memory in a live project
@@ -598,10 +639,11 @@ func (s *Store) ListMissingEmbeddings(model string) ([]MissingEmbedding, error) 
 
 // EmbeddingModelStat summarizes the vectors stored under one model name.
 type EmbeddingModelStat struct {
-	Model string
-	Rows  int
-	Dim   int
-	Bytes int64 // total vector storage
+	Model  string
+	Rows   int
+	Dim    int   // largest vector length
+	MinDim int   // smallest vector length; it differs from Dim when the model behind the name changed
+	Bytes  int64 // total vector storage
 }
 
 // EmbeddingModelStats lists every model that has vectors in the store,
@@ -609,7 +651,7 @@ type EmbeddingModelStat struct {
 // a model always produces one dim, so MIN and MAX agree in practice.
 func (s *Store) EmbeddingModelStats() ([]EmbeddingModelStat, error) {
 	rows, err := s.db.Query(`
-		SELECT model, COUNT(*), MAX(dim), SUM(LENGTH(vector)) FROM keypath_embeddings
+		SELECT model, COUNT(*), MAX(dim), MIN(dim), SUM(LENGTH(vector)) FROM keypath_embeddings
 		GROUP BY model ORDER BY model`)
 	if err != nil {
 		return nil, err
@@ -618,7 +660,7 @@ func (s *Store) EmbeddingModelStats() ([]EmbeddingModelStat, error) {
 	var out []EmbeddingModelStat
 	for rows.Next() {
 		var st EmbeddingModelStat
-		if err := rows.Scan(&st.Model, &st.Rows, &st.Dim, &st.Bytes); err != nil {
+		if err := rows.Scan(&st.Model, &st.Rows, &st.Dim, &st.MinDim, &st.Bytes); err != nil {
 			return nil, err
 		}
 		out = append(out, st)
@@ -714,6 +756,12 @@ func (s *Store) SemanticSearch(projectID string, query []float32, model string, 
 	type ranked struct {
 		pid, kp string
 		score   float32
+	}
+	// When no stored vector has the length of the query vector, the
+	// model behind the name changed. Say so: each cosine would be 0 and
+	// the search would look like one with no match.
+	if len(rows) > 0 && !slices.ContainsFunc(rows, func(r *KeypathEmbedding) bool { return len(r.Vector) == len(query) }) {
+		return nil, &vectorSizeError{Model: model, Got: len(query), Stored: len(rows[0].Vector)}
 	}
 	picks := make([]ranked, 0, len(rows))
 	for _, r := range rows {

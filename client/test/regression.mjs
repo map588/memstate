@@ -500,6 +500,15 @@ async function main() {
           h.sources.length === 1 && h.sources[0] === "fts"),
       JSON.stringify(r));
 
+    r = await call(client, "memstate_search", { project_id: PROJECT, query: "sqlite", rerank: false });
+    check("search: rerank=false is accepted when the daemon has no reranker",
+      !r.isError && r.data.results.some((h) => h.keypath === "decisions") && r.data.reranker === undefined,
+      JSON.stringify(r));
+    r = await call(client, "memstate_search", { project_id: PROJECT, query: "sqlite", rerank: true });
+    check("search: rerank=true is refused when the daemon has no reranker",
+      r.isError && JSON.stringify(r).includes("MEMSTATE_RERANK_MODEL"),
+      JSON.stringify(r));
+
     r = await call(client, "memstate_search", {
       project_id: PROJECT,
       query: "sqlite",
@@ -1363,6 +1372,11 @@ async function readFromOlderDaemon() {
       } else if (req.url.endsWith("/keypaths") && body.includes("max_content_bytes")) {
         refused++;
         answer(400, { error: 'json: unknown field "max_content_bytes"' });
+      } else if (req.url.endsWith("/memories/search") && body.includes('"rerank"')) {
+        refused++;
+        answer(400, { error: 'json: unknown field "rerank"' });
+      } else if (req.url.endsWith("/memories/search")) {
+        answer(200, { mode: "hybrid", query: "x", results: [{ id: 1, project_id: "older", keypath: "notes.a", preview: "from the older daemon" }], total_found: 1 });
       } else if (req.url.endsWith("/keypaths")) {
         answer(200, {
           memories: [{ id: 1, project_id: "older", keypath: "notes.a", content: "from the older daemon", version: 1, created_at: 1794900000 }],
@@ -1390,6 +1404,15 @@ async function readFromOlderDaemon() {
       r = await call(older, "memstate_get", { project_id: "older", keypath: "notes" });
       check("older daemon: the proxy sends the field one time only",
         !r.isError && refused === 1,
+        JSON.stringify({ r, refused }));
+      // The same daemon has no reranker and refuses the field rerank.
+      r = await call(older, "memstate_search", { project_id: "older", query: "daemon", rerank: false });
+      check("older daemon: a search with rerank=false works without the field",
+        !r.isError && r.data.results?.[0]?.keypath === "notes.a" && refused === 2,
+        JSON.stringify({ r, refused }));
+      r = await call(older, "memstate_search", { project_id: "older", query: "daemon", rerank: true });
+      check("older daemon: rerank=true is an error, not a search without a reranker",
+        r.isError && refused === 3,
         JSON.stringify({ r, refused }));
     });
   } finally {

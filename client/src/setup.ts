@@ -333,6 +333,7 @@ export async function main(): Promise<void> {
     console.log(`\nNothing to save; settings live in ${configFile}.`);
   }
   console.log("`memstated config` shows every setting with its source.");
+  console.log("A reranker is optional (MEMSTATE_RERANK_MODEL); `memstated config` names one that fits the embedding model.");
 
   if (detected.length === 0) {
     console.log("\nNo agents auto-detected. Add an entry like this to your agent's MCP config:\n");

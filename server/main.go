@@ -214,6 +214,12 @@ func main() {
 	embedTimeoutFlag := fs.Duration("embed-timeout", 0,
 		"max time for one embedding call, must cover a cold model load (default 60s). "+
 			"Env: MEMSTATE_EMBED_TIMEOUT.")
+	rerankModelFlag := fs.String("rerank-model", "",
+		"reranker model for hybrid search (default: none). Env: MEMSTATE_RERANK_MODEL.")
+	rerankURLFlag := fs.String("rerank-url", "",
+		"rerank server base URL, an OpenAI-compatible base ending in /v1 (default: the embedding URL). Env: MEMSTATE_RERANK_URL.")
+	rerankTimeoutFlag := fs.Duration("rerank-timeout", 0,
+		"max time for one rerank call (default 15s). Env: MEMSTATE_RERANK_TIMEOUT.")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
 	}
@@ -289,7 +295,16 @@ func main() {
 		embedder.Model, embedder.URL, embedder.timeout(), envThreshold())
 	// Eagerly repair any missing vectors (post-migration wipe, model switch,
 	// writes made while the embedding server was down). Non-blocking; failures just log.
+	if dims, err := store.EmbeddingDims(embedder.Model); err == nil && len(dims) > 1 {
+		fmt.Fprintf(os.Stderr, "memstated: the store holds vectors of %d sizes %v for model %s; new vectors are refused until `memstated embed rebuild --model %s`\n",
+			len(dims), dims, embedder.Model, embedder.Model)
+	}
 	embedder.BackfillEmbeddings(store)
+	reranker := NewReranker(*rerankURLFlag, *rerankModelFlag, *rerankTimeoutFlag, embedder.URL)
+	if reranker != nil {
+		fmt.Fprintf(os.Stderr, "memstated: reranker model=%s url=%s timeout=%s\n",
+			reranker.Model, reranker.URL, reranker.timeout())
+	}
 
 	// Idle-exit is only meaningful for long-lived detached daemons; when
 	// --owner-pid is set the parent already owns our lifetime.
@@ -297,7 +312,7 @@ func main() {
 		daemonIdleTimeout = idleTimeout
 	}
 	daemonBindHost = bindHostName(resolved)
-	handler := newRouter(store, shutdownFn, embedder)
+	handler := newRouter(store, shutdownFn, embedder, reranker)
 	if idleTimeout > 0 && *ownerPIDFlag == 0 {
 		var lastActivity atomic.Int64
 		lastActivity.Store(time.Now().UnixNano())
@@ -447,6 +462,9 @@ func printUsage() {
   memstated --embed-model NAME     embedding model for semantic search
   memstated --embedding-url URL    embedding server base URL (Ollama, or an OpenAI-compatible base ending in /v1)
   memstated --embed-timeout 60s    max time per embedding call (cold load included)
+  memstated --rerank-model NAME    reranker model for hybrid search (default: none)
+  memstated --rerank-url URL       rerank server base URL ending in /v1 (default: the embedding URL)
+  memstated --rerank-timeout 15s   max time per rerank call
   memstated stop   [--addr HOST:PORT]   send a shutdown request to a running daemon
   memstated status [--addr HOST:PORT]   query /health
   memstated restart [--addr HOST:PORT]  stop the shared daemon and start it again,
@@ -509,6 +527,9 @@ Environment:
   MEMSTATE_EMBED_MODEL    default for --embed-model (nomic-embed-text)
   MEMSTATE_EMBEDDING_URL  default for --embedding-url (http://127.0.0.1:11434; a /v1 URL is OpenAI-compatible)
   MEMSTATE_EMBED_TIMEOUT  default for --embed-timeout (60s)
+  MEMSTATE_RERANK_MODEL   default for --rerank-model (empty: no reranker)
+  MEMSTATE_RERANK_URL     default for --rerank-url (the embedding URL)
+  MEMSTATE_RERANK_TIMEOUT default for --rerank-timeout (15s)
   MEMSTATE_NO_UPDATE_CHECK  set to disable the daemon's daily release check
 `)
 }

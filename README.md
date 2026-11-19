@@ -353,6 +353,87 @@ result carries `score` (the fused score) and `sources` (`fts`,
 embedding fails, the response holds the FTS hits alone and `degraded`
 names the reason. Hybrid search never fails because Ollama is down.
 
+### `memstate_search`: reranker (optional)
+
+A reranker is a second model that reads the query and one memory
+together and gives a relevance score. It finds the memory that answers
+the query among memories that only share words with it. The daemon has
+no reranker until you set `MEMSTATE_RERANK_MODEL`:
+
+```bash
+memstated config set MEMSTATE_RERANK_MODEL qwen3-reranker-4b
+memstated restart
+```
+
+With a reranker, a hybrid search sends the first 10 fused hits to the
+rerank server and orders them by score. The server gets the keypath and
+the first 1200 bytes of each memory. The response names the model in
+`reranker`, and each hit carries `rerank_score` beside `score` and
+`sources`. When the rerank server does not answer in
+`MEMSTATE_RERANK_TIMEOUT` (15s), or its answer is not complete, the
+response holds the fused order and `rerank_degraded` gives the reason.
+
+A request with `rerank: false` skips the reranker. The recall hook
+sends it, because a rerank is too slow for each prompt. A request with
+`rerank: true` is an error when the daemon has no reranker. The `fts`
+and `semantic` modes are not reranked.
+
+The rerank server is the embedding server unless `MEMSTATE_RERANK_URL`
+names another. The URL must end in `/v1`: the request is
+`POST {url}/rerank` with `query` and `documents`, as the llama.cpp
+server and vLLM serve it. Ollama has no rerank API.
+
+Cost, measured with Qwen3-Reranker-4B (Q4_K_M) on an Apple M4 Max: 10
+hits take about 4 seconds, and 20 hits took 9 seconds. That is why the
+bound is 10 hits.
+
+### Embedder and reranker pairs
+
+A reranker reads text, not vectors. It does not need the vector space of
+the embedder, so each pair works in principle. These conditions decide
+if a pair works in practice:
+
+- The server has `/v1/rerank`, and it can serve the two models at one
+  time.
+- The reranker file is made for the server. For llama.cpp, a
+  Qwen3-Reranker GGUF must come from `convert_hf_to_gguf.py` of
+  llama.cpp. That converter writes the rerank prompt and the `cls.output`
+  tensor. A GGUF from another tool gives scores without meaning.
+- The context of the reranker holds the query and 1200 bytes of a memory.
+
+| Embedder | Reranker | Server | Status |
+|---|---|---|---|
+| `qwen3-embedding` (0.6b, 4b, 8b) | `qwen3-reranker` of the same size | llama.cpp | 4b pair measured on 2026-11-19: embedding parity 1.0, a relevant document scored 0.9996 and unrelated documents below 0.02 |
+| `bge-m3` | `bge-reranker-v2-m3` | llama.cpp | The llama.cpp documentation names this reranker. Not measured here. |
+| `nomic-embed-text` | `bge-reranker-v2-m3` | Ollama for the embedder, a `/v1` server for the reranker | Not measured here. Needs `MEMSTATE_RERANK_URL`. |
+
+`memstated config` prints the pair for the configured embedder when no
+reranker is set.
+
+To serve the two models from one llama.cpp server, start `llama-server`
+with no `-m` and a preset file (router mode). Each section is one model,
+and the server sends a request to the section that its `model` field
+names:
+
+```ini
+; llama-server --models-preset models.ini --models-max 2 --port 8081
+version = 1
+
+[qwen3-embedding-4b]
+model = /models/Qwen3-Embedding-4B-Q4_K_M.gguf
+embedding = true
+pooling = last
+
+[qwen3-reranker-4b]
+model = /models/Qwen3-Reranker-4B-Q4_K_M.gguf
+reranking = true
+```
+
+The section names must be equal to `MEMSTATE_EMBED_MODEL` and
+`MEMSTATE_RERANK_MODEL`. Do not use a colon in a section name: the
+server writes the text after the colon in upper case, and a request for
+`qwen3-embedding:4b` then gets "model not found".
+
 ### `memstate_search`: semantic mode
 
 In `mode="semantic"`, the daemon embeds the query with the embedding
@@ -398,6 +479,15 @@ seconds while a backfill runs. `--probe` times one live Ollama call.
 model name: a new prompt format, a new Ollama build with different
 output, or a corrupted set. It runs one Ollama call at a time and prints
 progress per keypath.
+
+The store holds one vector size per model name. When the server returns
+a vector of another size for the name (another model, or another output
+size), the daemon does not store it. A hybrid search then answers with
+the FTS hits and `degraded` names the two sizes. A `semantic` search
+answers HTTP 409. `embed status` marks a model that holds more than one
+size. `memstated embed rebuild --model NAME` is the repair. The daemon
+also refuses a vector of zeros and a vector with a value that is not
+finite, which a model server returns when its computation failed.
 
 ## How storage works
 
@@ -489,6 +579,9 @@ setting that changed. `MEMSTATE_CONFIG` names another file, and
 | Embed model | `nomic-embed-text` (override with `MEMSTATE_EMBED_MODEL` or `--embed-model`) |
 | Embed timeout | `60s` per embedding call (override with `MEMSTATE_EMBED_TIMEOUT` or `--embed-timeout`). Must cover a cold model load: a 4B model needs about 20s on first use. |
 | Semantic threshold | `0.5` (override with `MEMSTATE_SEMANTIC_THRESHOLD` or per request) |
+| Rerank model | none (set `MEMSTATE_RERANK_MODEL` or `--rerank-model`); see [reranker](#memstate_search-reranker-optional) |
+| Rerank URL | the embedding URL (override with `MEMSTATE_RERANK_URL` or `--rerank-url`). It must end in `/v1`. |
+| Rerank timeout | `15s` per rerank call (override with `MEMSTATE_RERANK_TIMEOUT` or `--rerank-timeout`) |
 | Network | The daemon binds `127.0.0.1` unless `--addr` or `MEMSTATE_ADDR` names another address; see [Who can reach the daemon](#who-can-reach-the-daemon). Embedding calls, when enabled, go to the configured embedding URL, which is usually also loopback. |
 
 For a per-project database, set `MEMSTATE_DB` in the MCP config's

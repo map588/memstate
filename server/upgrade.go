@@ -580,6 +580,9 @@ func reportRestartDiff(w io.Writer, prev, next *healthResponse) {
 		{"embed_timeout", "MEMSTATE_EMBED_TIMEOUT", prev.EmbedTimeout, next.EmbedTimeout},
 		{"semantic_threshold", "MEMSTATE_SEMANTIC_THRESHOLD", fmt.Sprint(prev.SemanticThreshold), fmt.Sprint(next.SemanticThreshold)},
 		{"idle_timeout", "MEMSTATE_IDLE_TIMEOUT", prev.IdleTimeout, next.IdleTimeout},
+		{"rerank_model", "MEMSTATE_RERANK_MODEL", prev.RerankModel, next.RerankModel},
+		{"rerank_url", "MEMSTATE_RERANK_URL", prev.RerankURL, next.RerankURL},
+		{"rerank_timeout", "MEMSTATE_RERANK_TIMEOUT", prev.RerankTimeout, next.RerankTimeout},
 	} {
 		if !sameSetting(c.was, c.now) {
 			fmt.Fprintf(w, "  %s changed: %q -> %q (set %s in config.env to pin it)\n", c.name, c.was, c.now, c.key)

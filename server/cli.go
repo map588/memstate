@@ -563,16 +563,21 @@ func cliHistory(args []string) int {
 // searchHit is one daemon search result: a memory plus fusion metadata.
 type searchHit struct {
 	Memory
-	Score   float32  `json:"score,omitempty"`
-	Sources []string `json:"sources,omitempty"`
+	Score       float32  `json:"score,omitempty"`
+	Sources     []string `json:"sources,omitempty"`
+	RerankScore *float32 `json:"rerank_score,omitempty"`
 }
 
 type searchOut struct {
-	Mode       string      `json:"mode"`
-	Query      string      `json:"query"`
-	Degraded   string      `json:"degraded,omitempty"`
-	Results    []searchHit `json:"results"`
-	TotalFound int         `json:"total_found"`
+	Mode     string `json:"mode"`
+	Query    string `json:"query"`
+	Degraded string `json:"degraded,omitempty"`
+	// Reranker names the model that ordered the hits. RerankDegraded is
+	// the reason when the daemon has a reranker and it did not answer.
+	Reranker       string      `json:"reranker,omitempty"`
+	RerankDegraded string      `json:"rerank_degraded,omitempty"`
+	Results        []searchHit `json:"results"`
+	TotalFound     int         `json:"total_found"`
 }
 
 func cliSearch(args []string) int {
@@ -667,6 +672,12 @@ func cliSearch(args []string) int {
 		} else {
 			head += " · " + p.yellow("degraded: "+out.Degraded)
 		}
+	}
+	if out.Reranker != "" {
+		head += " · reranked by " + out.Reranker
+	}
+	if out.RerankDegraded != "" {
+		head += " · " + p.yellow(out.RerankDegraded)
 	}
 	fmt.Fprintf(cliOut, "%s\n\n", p.dim(head))
 	if out.TotalFound == 0 {

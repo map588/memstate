@@ -10,6 +10,9 @@ type HybridHit struct {
 	*Memory
 	Score   float32  `json:"score"`
 	Sources []string `json:"sources"`
+	// RerankScore is the relevance score from the reranker. It is nil
+	// when no reranker read the hit.
+	RerankScore *float32 `json:"rerank_score,omitempty"`
 }
 
 // rrfK is the reciprocal rank fusion constant. 60 is the value from the

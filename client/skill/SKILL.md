@@ -304,6 +304,7 @@ python3 scripts/memstate_search.py --query "PLAIN WORDS" \
   [--keypath-prefix KP]      # only this keypath or below, e.g. branches.feature_x
   [--limit N]                # default 10
   [--include-content]        # full content per hit instead of a 40-word preview
+  [--no-rerank]              # hybrid: keep the fused order, skip the reranker (faster)
 ```
 
 Only the current version of each keypath is searchable. Tombstoned
@@ -315,7 +316,10 @@ read the keypaths that matter with `memstate_get.py`, or pass
 `results[]`, `total_found`, `query`, `mode` (+ `score`
 per result and `threshold`/`model` in semantic and hybrid modes; hybrid
 adds `sources` per result and `degraded` when the embedder was
-unavailable and only FTS hits are present).
+unavailable and only FTS hits are present). When the daemon has a
+reranker (`MEMSTATE_RERANK_MODEL`), it orders the hybrid hits: the
+response carries `reranker` and each hit `rerank_score`, or
+`rerank_degraded` with the fused order when the reranker did not answer.
 
 ### `memstate_history.py`: version chain of one keypath
 

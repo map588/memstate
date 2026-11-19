@@ -148,7 +148,7 @@ func newUIFixture(t *testing.T) *uiFixture {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { store.Close() })
-	ts := httptest.NewServer(newRouter(store, nil, nil))
+	ts := httptest.NewServer(newRouter(store, nil, nil, nil))
 	t.Cleanup(ts.Close)
 
 	f := &uiFixture{store: store, edit: func(string) error { return nil }}
