@@ -28,7 +28,7 @@
 #   server\memstate.exe     a copy that runs as the human CLI
 #   server\memstate-mcp.cmd runs the MCP proxy
 #   client\                 the MCP proxy and its node_modules
-#   skill\ hooks\ configure-claude-hook.py   the Claude Code skill and hooks
+#   skill\ skill-rectify\ hooks\ configure-claude-hook.py   the Claude Code skills and hooks
 # The script adds server\ to the user PATH. Run it again to update both parts.
 
 # The script block gives the script its own scope, so `irm | iex` does not
@@ -180,6 +180,13 @@
         if (Test-Path -LiteralPath $skillDir) { Remove-Item -LiteralPath $skillDir -Recurse -Force }
         if (Test-Path -LiteralPath $precompactDir) { Remove-Item -LiteralPath $precompactDir -Recurse -Force }
         Copy-Item -LiteralPath (Join-Path $Root 'skill') -Destination $skillDir -Recurse
+        # The rectify skill came after v0.11.0, so an older release has none.
+        $rectifySource = Join-Path $Root 'skill-rectify'
+        $rectifyDir = Join-Path $ClaudeHome 'skills\memstate-rectify'
+        if (Test-Path -LiteralPath $rectifySource) {
+            if (Test-Path -LiteralPath $rectifyDir) { Remove-Item -LiteralPath $rectifyDir -Recurse -Force }
+            Copy-Item -LiteralPath $rectifySource -Destination $rectifyDir -Recurse
+        }
         Say "installed the skill in $skillDir"
 
         $bash = Find-GitBash

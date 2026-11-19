@@ -574,14 +574,21 @@ _SECRET_SHAPES = [
 ]
 
 
+def fixed_keypath(keypath: str) -> Optional[str]:
+    """The keypath in the correct format, or None when no simple change
+    gives one."""
+    fixed = re.sub(r"[^a-z0-9_.]+", "_", keypath.lower())
+    fixed = re.sub(r"\.{2,}", ".", fixed).strip("._")
+    return fixed if _KEYPATH_FORMAT.fullmatch(fixed) else None
+
+
 def check_keypath_format(keypath: str, field: str) -> None:
     """A keypath is lowercase snake_case segments joined by dots. Exits 1
     with the corrected keypath on stderr."""
     if _KEYPATH_FORMAT.fullmatch(keypath):
         return
-    fixed = re.sub(r"[^a-z0-9_.]+", "_", keypath.lower())
-    fixed = re.sub(r"\.{2,}", ".", fixed).strip("._")
-    tail = f': use "{fixed}".' if _KEYPATH_FORMAT.fullmatch(fixed) else "."
+    fixed = fixed_keypath(keypath)
+    tail = f': use "{fixed}".' if fixed else "."
     raise SystemExit(
         f'Error: {field} "{keypath}" must be lowercase snake_case segments '
         f"[a-z0-9_] joined by dots{tail}")
@@ -631,24 +638,59 @@ def area_hint(keypaths: list) -> Optional[str]:
             'or a "### <topic>" heading below the area heading.')
 
 
-def fact_hint(keypath: str, content: str) -> Optional[str]:
-    """The hint for one memory that a search will not find well. A task
-    summary is long by design and gets no hint."""
+def fact_rule(keypath: str, content: str) -> Optional[tuple]:
+    """The name of the rule and the hint for one memory that a search will
+    not find well. A task summary is long by design and gets none."""
     if keypath.startswith("task."):
         return None
     items = len(_LIST_ITEM.findall(content))
     if items >= HINT_LIST_ITEMS:
-        return (f"{items} list items in one memory. If a search can ask for one item "
+        return ("list_items", f"{items} list items in one memory. If a search can ask for one item "
                 "alone, write one memory for each item.")
     size = len(content.encode("utf-8"))
     refs = len(set(_KEYPATH_REF.findall(content)))
     if refs >= HINT_INDEX_REFS and size <= HINT_INDEX_BYTES:
-        return (f"This memory names {refs} other keypaths and holds little else. The keypath "
+        return ("index", f"This memory names {refs} other keypaths and holds little else. The keypath "
                 "tree is the index: a memory that lists other memories comes before them in a search.")
     if size > HINT_BYTES:
-        return (f"{size} bytes in one memory. A search finds a short memory with one fact: "
+        return ("size", f"{size} bytes in one memory. A search finds a short memory with one fact: "
                 "split this one if it holds more than one fact.")
     return None
+
+
+def fact_hint(keypath: str, content: str) -> Optional[str]:
+    """The hint text of fact_rule for a write result."""
+    rule = fact_rule(keypath, content)
+    return rule[1] if rule else None
+
+
+def audit_memory(keypath: str, content: str, shared: bool = False) -> list:
+    """The write rules applied to a memory that the store holds already:
+    one finding for each rule that the memory breaks. memstate_audit.py
+    prints them. A finding never holds the text of the memory."""
+    found = []
+    for kind, shape in _SECRET_SHAPES:
+        if shape.search(content):
+            found.append({"rule": "credential", "detail": f"The text holds {kind}."})
+            break
+    if not _KEYPATH_FORMAT.fullmatch(keypath):
+        finding = {"rule": "keypath_format",
+                   "detail": "The keypath is not lowercase snake_case segments joined by dots."}
+        fixed = fixed_keypath(keypath)
+        if fixed:
+            finding["use"] = fixed
+        found.append(finding)
+    if not shared and keypath in AREAS:
+        found.append({"rule": "area_keypath",
+                      "detail": f'"{keypath}" is an area, not a fact. Its facts belong at '
+                                f"{keypath}.<topic>, one memory for each fact."})
+    if keypath == "preamble" or keypath.endswith(".preamble"):
+        found.append({"rule": "preamble",
+                      "detail": "Text that had no heading. Give it a keypath named after its fact."})
+    rule = fact_rule(keypath, content)
+    if rule:
+        found.append({"rule": rule[0], "detail": rule[1]})
+    return found
 
 
 def post_write(path: str, body: dict, hint) -> int:

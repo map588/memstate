@@ -1219,6 +1219,42 @@ async function main() {
     p = pyRem(["--keypath", "task.summary.2026_11_19", "--content", "## Done\n" + pyBullets + "\n" + "word ".repeat(400)]);
     check("hint (python): a task summary gets no hint",
       p.code === 0 && !p.out.includes('"hint"'), JSON.stringify(p).slice(0, 300));
+    // memstate_audit.py applies the write rules to the memories that the
+    // store holds. The project gate_py holds one memory for each hint rule
+    // from the checks above.
+    const AUDIT_PY = path.resolve(__dirname, "..", "skill", "scripts", "memstate_audit.py");
+    const au = spawnSync(PY, [AUDIT_PY], { cwd: pyCwd, env, encoding: "utf8" });
+    const audit = au.status === 0 ? JSON.parse(au.stdout) : { findings: [], by_rule: {} };
+    const auditRule = (kp) => audit.findings.filter((f) => f.keypath === kp).map((f) => f.rule).join(",");
+    check("audit (python): each stored memory that breaks a hint rule is a finding, and no other memory is",
+      au.status === 0 && audit.project_id === "gate_py" &&
+      auditRule("notes.build_list") === "list_items" && auditRule("notes.long_text") === "size" &&
+      auditRule("notes.where_to_look") === "index" && auditRule("preamble") === "preamble" &&
+      auditRule("task.summary.2026_11_19") === "" && auditRule("notes.a") === "" &&
+      audit.findings.length === 4 && audit.by_rule.size === 1 && !au.stdout.includes("fact number"),
+      JSON.stringify({ code: au.status, err: au.stderr, out: (au.stdout || "").slice(0, 900) }));
+    // The scripts cannot store a memory that breaks a refusal rule, so
+    // these rules are checked on audit_memory directly.
+    const auditUnit = spawnSync(PY, ["-c", [
+      "import json, sys",
+      "sys.path.insert(0, sys.argv[1])",
+      "from _client import audit_memory",
+      "rules = lambda k, c, s=False: [f['rule'] for f in audit_memory(k, c, s)]",
+      "print(json.dumps({",
+      "  'area': rules('gotchas', 'one trap'),",
+      "  'area_shared': rules('preferences', 'x', True),",
+      "  'format': audit_memory('Notes.Self-Test', 'a fact'),",
+      "  'secret': audit_memory('config.login', 'the deploy uses ' + sys.argv[2]),",
+      "  'clean': rules('decisions.use_sqlite', 'One file.'),",
+      "}))",
+    ].join("\n"), path.dirname(AUDIT_PY), pyToken], { env, encoding: "utf8" });
+    const unit = auditUnit.status === 0 ? JSON.parse(auditUnit.stdout) : null;
+    check("audit (python): an area keypath, a bad keypath and a credential are findings, and the credential is not printed",
+      unit !== null && unit.area.join() === "area_keypath" && unit.area_shared.length === 0 &&
+      unit.format[0].rule === "keypath_format" && unit.format[0].use === "notes.self_test" &&
+      unit.secret[0].rule === "credential" && unit.secret[0].detail.includes("a GitHub token") &&
+      !auditUnit.stdout.includes(pyToken) && unit.clean.length === 0,
+      JSON.stringify({ code: auditUnit.status, err: auditUnit.stderr, out: (auditUnit.stdout || "").replace(pyToken, "<cut>") }));
     check("log (python): the scripts write the daemon log next to MEMSTATE_DB",
       readyLines(daemonLog) > readyBeforePy,
       `${readyLines(daemonLog)} MEMSTATE_READY lines, ${readyBeforePy} before the Python runs`);

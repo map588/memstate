@@ -374,6 +374,21 @@ reranker (`MEMSTATE_RERANK_MODEL`), it orders the hybrid hits: the
 response carries `reranker` and each hit `rerank_score`, or
 `rerank_degraded` with the fused order when the reranker did not answer.
 
+### `memstate_audit.py`: memories that break the write rules
+
+```bash
+python3 scripts/memstate_audit.py [--project ID] [--scope shared]
+```
+
+The script applies the write rules to each current memory of the
+project and writes nothing. **Response:** `project_id`,
+`total_memories`, `findings[]` (each with `keypath`, `bytes`, `rule`,
+`detail`, and `use` for a keypath that has a corrected form) and
+`by_rule`. A finding never holds the text of a memory. Rules:
+`area_keypath`, `keypath_format`, `credential`, `preamble`, and the
+three hints `list_items`, `index`, `size`. The `memstate-rectify` skill
+says how to repair each one.
+
 ### `memstate_history.py`: version chain of one keypath
 
 ```bash

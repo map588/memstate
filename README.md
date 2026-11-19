@@ -82,7 +82,7 @@ To uninstall on macOS or Linux:
 
 ```bash
 python3 ~/.local/share/memstate/configure-claude-hook.py uninstall   # removes the hooks from settings.json
-rm -rf ~/.local/share/memstate ~/.claude/skills/memstate ~/.claude/hooks/memstate-*.sh
+rm -rf ~/.local/share/memstate ~/.claude/skills/memstate ~/.claude/skills/memstate-rectify ~/.claude/hooks/memstate-*.sh
 rm -f ~/.local/bin/memstated ~/.local/bin/memstate ~/.local/bin/memstate-mcp
 claude mcp remove memstate --scope user
 ```
@@ -91,7 +91,7 @@ To uninstall on Windows:
 
 ```powershell
 python "$env:LOCALAPPDATA\Programs\memstate\configure-claude-hook.py" uninstall
-Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Programs\memstate", "$HOME\.claude\skills\memstate", "$HOME\.claude\hooks\memstate-*.sh"
+Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Programs\memstate", "$HOME\.claude\skills\memstate", "$HOME\.claude\skills\memstate-rectify", "$HOME\.claude\hooks\memstate-*.sh"
 claude mcp remove memstate --scope user
 ```
 
@@ -182,7 +182,14 @@ of writes does not make searches wait.
 If you use Claude Code, the install script asks whether to install the
 bundled skill and hooks. From a clone, `make install-skill` installs
 them. The memstate skill goes to `~/.claude/skills/memstate/`, and
-three hook scripts are added. Two run on UserPromptSubmit:
+three hook scripts are added. A second skill, `/memstate-rectify`, goes
+to `~/.claude/skills/memstate-rectify/`. It tells an agent to bring the
+memories of one project into the current form: it splits a memory that
+holds a list of facts, moves a memory away from the bare name of an
+area, corrects keypaths, and makes each text start with the question.
+`memstate_audit.py` in the memstate skill lists the memories that break
+the write rules, and it writes nothing. Two hooks run on
+UserPromptSubmit:
 
 - `memstate-persist-reminder.sh` points you to `memstate_remember`
   after three or more file edits since your last persist.

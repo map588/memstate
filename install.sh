@@ -26,7 +26,7 @@
 # layout as the repository, so the MCP proxy finds the daemon next to it:
 #   server/memstated        the daemon
 #   client/                 the MCP proxy and its node_modules
-#   skill/ hooks/ configure-claude-hook.py   the Claude Code skill and hooks
+#   skill/ skill-rectify/ hooks/ configure-claude-hook.py   the Claude Code skills and hooks
 # MEMSTATE_INSTALL_DIR gets three links: memstated, memstate (the human CLI)
 # and memstate-mcp. Run the script again to update both parts.
 set -euo pipefail
@@ -121,6 +121,12 @@ install_skill() {
   mkdir -p "$CLAUDE_HOME/skills" "$hooks_dir"
   rm -rf "$skill_dir" "$precompact_dir"
   cp -R "$ROOT/skill" "$skill_dir"
+  # The rectify skill came after v0.11.0, so an older release has none.
+  local rectify_dir="$CLAUDE_HOME/skills/memstate-rectify"
+  if [ -d "$ROOT/skill-rectify" ]; then
+    rm -rf "$rectify_dir"
+    cp -R "$ROOT/skill-rectify" "$rectify_dir"
+  fi
   local hook hook_paths=()
   # This script installs a release that can be older than the script: the
   # latest release until the next one is published, or MEMSTATE_VERSION. A
