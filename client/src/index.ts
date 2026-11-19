@@ -720,6 +720,11 @@ function slimWrite(out: WriteResult): Row {
 const HINT_LIST_ITEMS = 5;
 const HINT_BYTES = 1500;
 const AREAS = ["decisions", "todo", "notes", "gotchas", "questions", "files", "config", "arch"];
+// A memory of at most HINT_INDEX_BYTES that names HINT_INDEX_REFS keypaths
+// is a list of other memories. A longer memory has text of its own.
+const HINT_INDEX_REFS = 3;
+const HINT_INDEX_BYTES = 400;
+const KEYPATH_REF = new RegExp(`\\b(?:${AREAS.join("|")})\\.[a-z0-9_]+`, "g");
 
 // areaHint is the hint for a memory at the name of an area.
 function areaHint(keypaths: string[]): string | undefined {
@@ -743,6 +748,10 @@ function factHint(keypath: string, content: string): string | undefined {
     return `${items} list items in one memory. If a search can ask for one item alone, write one memory for each item.`;
   }
   const bytes = Buffer.byteLength(content, "utf8");
+  const refs = new Set(content.match(KEYPATH_REF) ?? []).size;
+  if (refs >= HINT_INDEX_REFS && bytes <= HINT_INDEX_BYTES) {
+    return `This memory names ${refs} other keypaths and holds little else. The keypath tree is the index: a memory that lists other memories comes before them in a search.`;
+  }
   if (bytes > HINT_BYTES) {
     return `${bytes} bytes in one memory. A search finds a short memory with one fact: split this one if it holds more than one fact.`;
   }
@@ -1500,7 +1509,7 @@ const TOOLS: ToolDef[] = [
         threshold: {
           type: "number",
           description:
-            "similarity floor 0..1 for hybrid and semantic (default 0.5)",
+            "similarity floor 0..1 for hybrid and semantic (daemon default)",
         },
         // No description: the schemas are at their size budget. false
         // keeps the fused order and skips the reranker of the daemon.

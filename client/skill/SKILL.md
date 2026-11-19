@@ -131,8 +131,8 @@ did.
 
 The MCP tools help with two of these rules. A write result carries
 `hint` when the value has 5 or more list items, when it is longer than
-1500 bytes, or when its keypath is the name of an area (`gotchas`,
-`decisions`, ...). A task summary gets no hint. The scripts print no
+1500 bytes, when its keypath is the name of an area (`gotchas`,
+`decisions`, ...), or when it is short and names 3 other keypaths. A task summary gets no hint. The scripts print no
 hint.
 
 ## Shared scope: facts that hold in every repository
@@ -345,7 +345,7 @@ python3 scripts/memstate_search.py --query "PLAIN WORDS" \
   [--project ID]             # default: this repo's project
   [--all-projects]           # search the whole store
   [--mode hybrid|fts|semantic]  # hybrid (default) = any word + meaning, fused; fts = every word; semantic = meaning only (needs Ollama)
-  [--threshold 0.0-1.0]      # semantic and hybrid, default 0.5
+  [--threshold 0.0-1.0]      # semantic and hybrid; default is the daemon setting (0.5 unless MEMSTATE_SEMANTIC_THRESHOLD is set)
   [--category WORD] [--topics TAG1,TAG2]   # topics = match any
   [--keypath-prefix KP]      # only this keypath or below, e.g. branches.feature_x
   [--limit N]                # default 10

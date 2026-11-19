@@ -536,6 +536,15 @@ async function main() {
     r = await call(client, "memstate_remember", { project_id: HINTS, content: "## Decisions\n\n### Use wal\nReads do not wait.\n" });
     check("hint: one fact below each heading gets no hint",
       !r.isError && r.data.hint === undefined, JSON.stringify(r));
+    // A memory that only names other memories came before the memory with
+    // the answer in the field test. A memory with text of its own can name
+    // other memories.
+    r = await call(client, "memstate_set", { project_id: HINTS, keypath: "notes.where_to_look", value: "See notes.fixture_contents, notes.verification_commands and decisions.test_library." });
+    check("hint: a short memory that names three keypaths gets a hint",
+      !r.isError && /names 3 other keypaths/.test(r.data.hint ?? ""), JSON.stringify(r));
+    r = await call(client, "memstate_set", { project_id: HINTS, keypath: "notes.build_order", value: "The build runs the daemon first and the proxy second, because the proxy test starts the daemon binary. " + "The order is in the Makefile target build. ".repeat(8) + "See notes.fixture_contents, notes.verification_commands and decisions.test_library." });
+    check("hint: a memory with text of its own can name three keypaths",
+      !r.isError && r.data.hint === undefined, JSON.stringify(r));
     r = await call(client, "memstate_delete_project", { project_id: HINTS });
     check("hint: test project deleted", !r.isError, JSON.stringify(r));
 

@@ -37,7 +37,7 @@ def main() -> int:
                     help="return the full content of each hit, not only a 40-word preview")
     ap.add_argument("--mode", choices=("hybrid", "fts", "semantic"), default="hybrid")
     ap.add_argument("--threshold", type=float, default=None,
-                    help="semantic and hybrid: cosine floor for hits (default 0.5)")
+                    help="semantic and hybrid: cosine floor for hits (default: MEMSTATE_SEMANTIC_THRESHOLD of the daemon, else 0.5; the result gives it)")
     ap.add_argument("--category", default=None,
                     help="only return memories with this category")
     ap.add_argument("--topics", default=None,
