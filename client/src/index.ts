@@ -1249,9 +1249,7 @@ const TOOLS: ToolDef[] = [
   {
     name: "memstate_set",
     description:
-      "Save ONE short fact at ONE keypath (e.g. `config.port` = `8080`). To " +
-      "update a fact, write the SAME keypath: the result carries `prior`, a " +
-      "40-word preview of the old version. For a summary use memstate_remember.",
+      "Save ONE fact at ONE keypath. To update a fact, write the SAME keypath.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1268,12 +1266,14 @@ const TOOLS: ToolDef[] = [
         keypath: {
           type: "string",
           description:
-            "lowercase snake_case segments joined by dots, <area>.<topic>[.<detail>], " +
-            "e.g. \"decisions.auth_provider\". Dates as YYYY_MM_DD.",
+            "<area>.<topic>[.<detail>], e.g. \"decisions.auth_provider\". Name it " +
+            "after the fact, not after where or when you found it.",
         },
         value: {
           type: "string",
-          description: "the fact itself, plain text — short and self-contained",
+          description:
+            "Start with the question or symptom a searcher would type, then the fact, " +
+            "then the reason. A gotcha: what went wrong first. Do not list other memories.",
         },
         source: {
           type: "string",
@@ -1313,10 +1313,8 @@ const TOOLS: ToolDef[] = [
     name: "memstate_remember",
     description:
       "Save a markdown summary at task end. With `keypath`: ALL content is one " +
-      "memory there. Without: one memory per `##` heading at the top level " +
-      "(`## Auth` → `auth`; `###` nests as a further segment; text before the " +
-      "first heading → `preamble`). Common headings map to the area names " +
-      "(TODOs → todo, Open Questions → questions).",
+      "memory there. Without: one memory per heading. A heading is ONE fact, not " +
+      "a subject: `## Decisions`, then `### <topic>` per fact → decisions.<topic>.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1456,10 +1454,8 @@ const TOOLS: ToolDef[] = [
   {
     name: "memstate_search",
     description:
-      "Find current memories when you don't know the keypath (latest versions " +
-      "only; deleted ones never match). Searches the project of this repo; " +
-      "all_projects=true searches the store. A hit carries `preview` (40 " +
-      "words): read the keypaths that matter with memstate_get(keypath).",
+      "Find current memories when you do not know the keypath. A hit carries " +
+      "`preview`: read the ones that matter with memstate_get(keypath).",
     inputSchema: {
       type: "object",
       properties: {
@@ -1511,9 +1507,10 @@ const TOOLS: ToolDef[] = [
           description:
             "similarity floor 0..1 for hybrid and semantic (daemon default)",
         },
-        // No description: the schemas are at their size budget. false
-        // keeps the fused order and skips the reranker of the daemon.
-        rerank: { type: "boolean" },
+        rerank: {
+          type: "boolean",
+          description: "false: skip the reranker (faster, fused order)",
+        },
       },
       required: ["query"],
     },
@@ -1658,6 +1655,7 @@ Keypaths (follow exactly; a deviation fragments the store):
 - Segments are lowercase snake_case [a-z0-9_], joined by dots. Dates are YYYY_MM_DD: task.summary.2026_07_03, never 2026-07-03.
 - Shape <area>.<topic>[.<detail>]. Areas: decisions, todo, notes, gotchas, questions, files, config, arch, task.summary.<date>.
 - One keypath = one fact. To update a fact, write the SAME keypath; memstate_history keeps the old versions, and deletes keep history. A write result carries "prior", a 40-word preview of the version it replaced.
+- State that changes each session (a version, a count) goes to todo or task.summary, not into a decision or a gotcha.
 - memstate_remember without keypath splits by "## " headings: "## Auth" lands at "auth". root="notes" nests the sections.
 - A fact true only on an unmerged branch goes under branches.<branch_slug>.<area> ("feature/foo-bar" → branches.feature_foo_bar). After the merge, write the outcomes at the top level and delete the subtree (recursive=true). Decisions, gotchas and architecture always go at the top level.
 - task.compact.<date> belongs to the compact hook, which also files sections under the areas above (topic "compact"). Read it; do not write it.

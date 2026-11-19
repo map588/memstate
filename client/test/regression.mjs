@@ -171,6 +171,24 @@ async function main() {
     check("budget: the tool schemas stay within 9,500 characters",
       schemaText.length <= 9500,
       `${schemaText.length} chars`);
+    // The form of a memory decides if a search finds it (field test of
+    // 2026-11-19). The tool list must say how to write one, because an
+    // agent reads the tool list and not SKILL.md.
+    const propOf = (tool, name) => tools.find((t) => t.name === tool)?.inputSchema.properties[name]?.description ?? "";
+    const descOf = (tool) => tools.find((t) => t.name === tool)?.description ?? "";
+    check("wording: memstate_set tells the model to start with the question or symptom",
+      /question or (the )?symptom/.test(propOf("memstate_set", "value")) && /gotcha/.test(propOf("memstate_set", "value")),
+      propOf("memstate_set", "value"));
+    check("wording: the keypath field says how to name a keypath, the value field says not to list memories",
+      /after the fact/.test(propOf("memstate_set", "keypath")) && /list other memories/.test(propOf("memstate_set", "value")),
+      propOf("memstate_set", "keypath") + " | " + propOf("memstate_set", "value"));
+    check("wording: memstate_remember says that a heading is one fact",
+      /ONE fact/.test(descOf("memstate_remember")) && /### /.test(descOf("memstate_remember")),
+      descOf("memstate_remember"));
+    check("wording: the rerank field says what false does",
+      /reranker/.test(propOf("memstate_search", "rerank")), propOf("memstate_search", "rerank"));
+    check("wording: the instructions keep session state out of decisions and gotchas",
+      /changes (in )?each session/.test(budgetText), "");
     check("budget: the tool schemas do not name this host",
       budgetSlug !== "" && !schemaText.includes(`host_${budgetSlug}`),
       "a schema carries the host topic, so its size follows the host name");
