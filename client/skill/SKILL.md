@@ -129,6 +129,13 @@ did.
   The installed version, a commit count and a test count go to `todo` or
   `task.summary.<date>`.
 
+The MCP tools refuse three writes (the `memstate` CLI and the scripts
+do not): a keypath that is the bare name of an area (`gotchas`,
+`decisions`, ...), also as a `##` heading with text directly below it; a
+keypath that is not lowercase snake_case segments joined by dots; and a
+text that holds a credential (a private key block, a token with a known
+prefix, a JSON Web Token). Store where a secret is kept, not the secret.
+
 The MCP tools help with two of these rules. A write result carries
 `hint` when the value has 5 or more list items, when it is longer than
 1500 bytes, when its keypath is the name of an area (`gotchas`,

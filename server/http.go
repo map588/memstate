@@ -300,6 +300,11 @@ type rememberReq struct {
 	// Empty (the default) writes sections at the top level, in the same
 	// tree as explicit-keypath writes.
 	Root string `json:"root,omitempty"`
+	// DenyKeypaths names keypaths that a heading split must not write.
+	// The MCP proxy sends the names of the areas ("gotchas", "decisions"):
+	// text below an area heading would replace the memory at that name
+	// with a list of facts. The CLI and the compact hook send none.
+	DenyKeypaths []string `json:"deny_keypaths,omitempty"`
 }
 
 // extractedItem is one entry in a batch remember response.
@@ -347,6 +352,14 @@ func handleRemember(store *Store, embedder *Embedder) http.HandlerFunc {
 			}
 		}
 
+		for _, sec := range sections {
+			if method == "headings" && slices.Contains(in.DenyKeypaths, sec.Keypath) {
+				writeErr(w, http.StatusBadRequest, fmt.Sprintf(
+					"%q is an area, not a fact, and nothing was written. Put each fact below a \"### <topic>\" heading, so that it goes to %s.<topic>.",
+					sec.Keypath, sec.Keypath))
+				return
+			}
+		}
 		meta := WriteMeta{Source: in.Source, Category: in.Category, Topics: in.Topics}
 		batch, err := store.WriteBatch(in.ProjectID, sections, meta)
 		if err != nil {

@@ -726,8 +726,62 @@ const HINT_INDEX_REFS = 3;
 const HINT_INDEX_BYTES = 400;
 const KEYPATH_REF = new RegExp(`\\b(?:${AREAS.join("|")})\\.[a-z0-9_]+`, "g");
 
+// Three checks refuse a write before the daemon sees it (user decisions of
+// 2026-11-19, after a test agent stored each of these with no complaint).
+// The memstate CLI is the way for a person to store what they refuse.
+
+// A keypath is lowercase snake_case segments joined by dots. Reads and
+// deletes take any name, because stores hold names from older clients.
+const KEYPATH_FORMAT = /^[a-z0-9_]+(?:\.[a-z0-9_]+)*$/;
+
+function checkKeypathFormat(keypath: string, field: string): void {
+  if (KEYPATH_FORMAT.test(keypath)) return;
+  const fixed = keypath
+    .toLowerCase()
+    .replace(/[^a-z0-9_.]+/g, "_")
+    .replace(/\.{2,}/g, ".")
+    .replace(/^[._]+|[._]+$/g, "");
+  throw new Error(
+    `${field} "${keypath}" must be lowercase snake_case segments [a-z0-9_] joined by dots` +
+      (KEYPATH_FORMAT.test(fixed) ? `: use "${fixed}".` : ".")
+  );
+}
+
+// A memory at the bare name of an area takes the place of the facts that
+// belong below it, and comes before them in a search.
+function checkNotArea(keypath: string): void {
+  if (AREAS.includes(keypath)) {
+    throw new Error(
+      `"${keypath}" is an area, not a fact, and nothing was written. Use ${keypath}.<topic>, named after the fact.`
+    );
+  }
+}
+
+// SECRET_SHAPES are texts that are a credential with near certainty. A
+// word such as "password" is not in the list: notes about a login flow
+// hold it. The error names the kind and never the text.
+const SECRET_SHAPES: [string, RegExp][] = [
+  ["a private key block", /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
+  ["an API key (sk-...)", /\bsk-[A-Za-z0-9_-]{20,}/],
+  ["a GitHub token", /\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})/],
+  ["an AWS access key id", /\bAKIA[0-9A-Z]{16}\b/],
+  ["a Slack token", /\bxox[baprs]-[A-Za-z0-9-]{10,}/],
+  ["a JSON Web Token", /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/],
+];
+
+function checkNoSecret(text: string): void {
+  for (const [kind, shape] of SECRET_SHAPES) {
+    if (shape.test(text)) {
+      throw new Error(
+        `The text holds ${kind}, and nothing was written. Memories are not a place for credentials: store where the secret is kept, not the secret.`
+      );
+    }
+  }
+}
+
 // areaHint is the hint for a memory at the name of an area, and for text
-// that had no heading.
+// that had no heading. The proxy refuses a write to an area; the hint is
+// for a daemon from before the refusal of a heading split.
 function areaHint(keypaths: string[]): string | undefined {
   if (keypaths.some((k) => k === "preamble" || k.endsWith(".preamble"))) {
     return 'The text before the first heading went to "preamble". Give it a "## <area>" and "### <topic>" heading, or pass keypath.';
@@ -745,8 +799,6 @@ function areaHint(keypaths: string[]): string | undefined {
 // summary is long by design and gets no hint.
 function factHint(keypath: string, content: string): string | undefined {
   if (keypath.startsWith("task.")) return undefined;
-  const area = areaHint([keypath]);
-  if (area) return area;
   const items = content.split("\n").filter((line) => /^\s*(?:[-*]|\d+\.)\s+/.test(line)).length;
   if (items >= HINT_LIST_ITEMS) {
     return `${items} list items in one memory. If a search can ask for one item alone, write one memory for each item.`;
@@ -1303,6 +1355,9 @@ const TOOLS: ToolDef[] = [
       if (typeof a.value !== "string" || a.value === "") {
         throw new Error("value is required: the text of the fact");
       }
+      checkKeypathFormat(String(a.keypath ?? ""), "keypath");
+      if (a.scope !== "shared") checkNotArea(String(a.keypath));
+      checkNoSecret(a.value);
       return withHint(
         slimWrite(
           (await postJSON("/memories/store", {
@@ -1369,13 +1424,28 @@ const TOOLS: ToolDef[] = [
       required: ["content"],
     },
     handler: async (a) => {
-      const out = slimRemember(
-        (await postJSON("/memories/remember", {
-          ...stripProxyFields(a),
-          topics: hostTopics(a),
-          project_id: await resolveProject(a, true),
-        })) as { method?: string; items?: WriteResult[] }
-      );
+      checkNoSecret(String(a.content ?? ""));
+      if (a.keypath) {
+        checkKeypathFormat(String(a.keypath), "keypath");
+        if (a.scope !== "shared") checkNotArea(String(a.keypath));
+      }
+      if (a.root) checkKeypathFormat(String(a.root), "root");
+      const body: Row = {
+        ...stripProxyFields(a),
+        topics: hostTopics(a),
+        project_id: await resolveProject(a, true),
+      };
+      // The daemon knows where each heading goes, so it refuses a section
+      // at the name of an area. A daemon from before that rule refuses the
+      // field: the proxy then writes without it and gives the hint.
+      let reply: unknown;
+      try {
+        reply = await postJSON("/memories/remember", a.keypath ? body : { ...body, deny_keypaths: AREAS });
+      } catch (err) {
+        if (!String(err).includes('unknown field "deny_keypaths"')) throw err;
+        reply = await postJSON("/memories/remember", body);
+      }
+      const out = slimRemember(reply as { method?: string; items?: WriteResult[] });
       // With a keypath the proxy knows the text of the one memory. With
       // headings it knows only where each section went.
       const hint = a.keypath

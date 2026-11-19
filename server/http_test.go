@@ -573,3 +573,30 @@ func TestHTTPSearchReturnsPreviewNotContent(t *testing.T) {
 		t.Fatalf("default limit: got %d hits, want %d", n, defaultSearchLimit)
 	}
 }
+
+// A caller can name keypaths that a heading split must not write. The MCP
+// proxy sends the area names: on 2026-11-19 a summary with "## Gotchas"
+// and text below it replaced the memory at "gotchas". The refusal comes
+// before any write.
+func TestRememberRefusesDeniedKeypaths(t *testing.T) {
+	ts := newTestServer(t)
+	url := ts.URL + "/api/v1/memories/remember"
+	content := "## Decisions\n\n### Storage\nuse sqlite\n\n## Gotchas\nloose text\n"
+	code, out := postJSON(t, url, map[string]any{
+		"project_id": "p", "content": content, "deny_keypaths": []string{"decisions", "gotchas"},
+	})
+	if code != 400 || !strings.Contains(fmt.Sprint(out["error"]), "gotchas") {
+		t.Fatalf("a section at a denied keypath must be refused by name: %d %v", code, out)
+	}
+	// Sections below the area pass. The action "created" shows that the
+	// refused call wrote nothing: its first section was this keypath.
+	code, out = postJSON(t, url, map[string]any{
+		"project_id": "p", "content": "## Decisions\n\n### Storage\nuse sqlite\n", "deny_keypaths": []string{"decisions", "gotchas"},
+	})
+	if items, _ := out["items"].([]any); code != 200 || len(items) != 1 || items[0].(map[string]any)["action"] != "created" {
+		t.Fatalf("a section below an area must pass, and the refused call must have written nothing: %d %v", code, out)
+	}
+	if code, out = postJSON(t, url, map[string]any{"project_id": "p", "content": content}); code != 200 {
+		t.Fatalf("a call without deny_keypaths must write as before: %d %v", code, out)
+	}
+}

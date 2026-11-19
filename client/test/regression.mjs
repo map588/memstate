@@ -432,9 +432,9 @@ async function main() {
       project_id: PROJECT,
       content:
         "intro prose before headings\n\n" +
-        "## Decisions\nuse sqlite\n\n" +
+        "## Decisions\n\n### Storage\nuse sqlite\n\n" +
         "### Auth\ntokens only\n\n" +
-        "## TODOs\nship it\n",
+        "## TODOs\n\n### Ship\nship it\n",
       category: "note",
     });
     const kps = r.isError ? [] : r.data.items.map((i) => i.keypath).sort();
@@ -442,7 +442,7 @@ async function main() {
       !r.isError &&
         r.data.method === "headings" &&
         JSON.stringify(kps) ===
-          JSON.stringify(["decisions", "decisions.auth", "preamble", "todo"]),
+          JSON.stringify(["decisions.auth", "decisions.storage", "preamble", "todo.ship"]),
       JSON.stringify(kps));
 
     r = await call(client, "memstate_remember", {
@@ -516,13 +516,13 @@ async function main() {
       !r.isError &&
         r.data.mode === "hybrid" &&
         typeof r.data.degraded === "string" &&
-        r.data.results.some((h) => h.keypath === "decisions" &&
+        r.data.results.some((h) => h.keypath === "decisions.storage" &&
           h.sources.length === 1 && h.sources[0] === "fts"),
       JSON.stringify(r));
 
     r = await call(client, "memstate_search", { project_id: PROJECT, query: "sqlite", rerank: false });
     check("search: rerank=false is accepted when the daemon has no reranker",
-      !r.isError && r.data.results.some((h) => h.keypath === "decisions") && r.data.reranker === undefined,
+      !r.isError && r.data.results.some((h) => h.keypath === "decisions.storage") && r.data.reranker === undefined,
       JSON.stringify(r));
     r = await call(client, "memstate_search", { project_id: PROJECT, query: "sqlite", rerank: true });
     check("search: rerank=true is refused when the daemon has no reranker",
@@ -544,15 +544,57 @@ async function main() {
     r = await call(client, "memstate_set", { project_id: HINTS, keypath: "notes.long_text", value: "word ".repeat(400) });
     check("hint: a value above 1500 bytes gets a hint",
       !r.isError && /2000 bytes/.test(r.data.hint ?? ""), JSON.stringify(r));
+    // ---- refused writes ---------------------------------------------------
+    // User decisions of 2026-11-19, after a test agent on a second project
+    // stored each of these through MCP with no complaint.
     r = await call(client, "memstate_set", { project_id: HINTS, keypath: "gotchas", value: "all the traps of the build" });
-    check("hint: a write to the name of an area gets a hint",
-      !r.isError && /"gotchas" is an area/.test(r.data.hint ?? ""), JSON.stringify(r));
+    check("refuse: a write to the name of an area",
+      r.isError && /"gotchas" is an area/.test(r.message) && /gotchas\.<topic>/.test(r.message), JSON.stringify(r));
+    r = await call(client, "memstate_remember", { project_id: HINTS, keypath: "decisions", content: "every decision in one memory" });
+    check("refuse: memstate_remember with the name of an area as keypath",
+      r.isError && /"decisions" is an area/.test(r.message), JSON.stringify(r));
+    for (const [bad, good] of [
+      ["notes.selftest-2026-11-19", "notes.selftest_2026_11_19"],
+      ["Notes.SelfTest", "notes.selftest"],
+      ["notes..double dot", "notes.double_dot"],
+    ]) {
+      r = await call(client, "memstate_set", { project_id: HINTS, keypath: bad, value: "a fact" });
+      check(`refuse: keypath ${bad} is not snake_case, and the error gives ${good}`,
+        r.isError && r.message.includes(`"${good}"`), JSON.stringify(r));
+    }
+    r = await call(client, "memstate_remember", { project_id: HINTS, root: "My-Notes", content: "## A\n\n### B\ntext\n" });
+    check("refuse: a root that is not snake_case", r.isError && /root "My-Notes"/.test(r.message), JSON.stringify(r));
+    r = await call(client, "memstate_set", { project_id: HINTS, keypath: "selftest", value: "one segment is a valid keypath" });
+    check("refuse: one lowercase segment is not refused (format only, any depth)", !r.isError, JSON.stringify(r));
+    // The texts are put together here, so that this file holds no text
+    // with the shape of a credential.
+    const fakeSecrets = {
+      "an API key": "sk-" + "a1B2c3D4e5".repeat(3),
+      "a GitHub token": "ghp_" + "a1B2c3D4e5F6".repeat(3),
+      "an AWS access key id": "AKIA" + "ABCDEFGHIJKLMNOP",
+      "a Slack token": "xoxb-" + "1234567890-abcdefghij",
+      "a private key block": "-----BEGIN OPENSSH " + "PRIVATE KEY-----",
+      "a JSON Web Token": ["eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiIxMjM0NTY3ODkwIn0", "c2lnbmF0dXJlX3RleHQ"].join("."),
+    };
+    for (const [kind, text] of Object.entries(fakeSecrets)) {
+      r = await call(client, "memstate_set", { project_id: HINTS, keypath: "config.deploy_login", value: `The deploy uses ${text} for the upload.` });
+      check(`refuse: a value with ${kind}, and the error does not repeat it`,
+        r.isError && r.message.includes(kind) && !r.message.includes(text), JSON.stringify(r).replace(text, "<cut>"));
+    }
+    r = await call(client, "memstate_remember", { project_id: HINTS, content: "## Config\n\n### Deploy\nkey " + fakeSecrets["a GitHub token"] + "\n" });
+    check("refuse: a summary with a credential", r.isError && /GitHub token/.test(r.message), "");
+    r = await call(client, "memstate_get", { project_id: HINTS, keypath: "config" });
+    check("refuse: a refused write stored nothing", !r.isError && r.data.total_count === 0, JSON.stringify(r));
+    r = await call(client, "memstate_set", { project_id: HINTS, keypath: "config.deploy_login", value: "The login flow asks for a password and a token. The password is in the vault of the team, entry deploy." });
+    check("refuse: a note that names a password, with no credential in it, is stored", !r.isError, JSON.stringify(r));
     r = await call(client, "memstate_remember", { project_id: HINTS, keypath: "task.summary.2026_11_19", content: "## Done\n" + bullets(9) + "\n" + "word ".repeat(400) });
     check("hint: a task summary is long by design and gets no hint",
       !r.isError && r.data.hint === undefined, JSON.stringify(r));
     r = await call(client, "memstate_remember", { project_id: HINTS, content: "## Gotchas\n" + bullets(3) + "\n\n## Decisions\n\n### Use sqlite\nOne file.\n" });
-    check("hint: a heading that is an area with text below it gets a hint",
-      !r.isError && /"gotchas" is an area/.test(r.data.hint ?? "") && !/"decisions"/.test(r.data.hint ?? ""), JSON.stringify(r));
+    check("refuse: a heading that is an area with text below it, before any write",
+      r.isError && /"gotchas" is an area/.test(r.message) && /### <topic>/.test(r.message), JSON.stringify(r));
+    r = await call(client, "memstate_get", { project_id: HINTS, keypath: "decisions.use_sqlite" });
+    check("refuse: the refused summary wrote none of its sections", !r.isError && r.data.total_count === 0, JSON.stringify(r));
     r = await call(client, "memstate_remember", { project_id: HINTS, content: "## Decisions\n\n### Use wal\nReads do not wait.\n" });
     check("hint: one fact below each heading gets no hint",
       !r.isError && r.data.hint === undefined, JSON.stringify(r));
@@ -568,11 +610,11 @@ async function main() {
     r = await call(client, "memstate_remember", { project_id: HINTS, content: "Loose text with no heading and no keypath." });
     check("hint: text with no heading says where it went",
       !r.isError && r.data.items[0].keypath === "preamble" && /preamble/.test(r.data.hint ?? ""), JSON.stringify(r));
-    r = await call(client, "memstate_set", { project_id: HINTS, keypath: "gotchas", value: "a memory at the name of an area" });
-    r = await call(client, "memstate_set", { project_id: HINTS, keypath: "gotchas.one_trap", value: "a trap below it" });
-    r = await call(client, "memstate_get", { project_id: HINTS, keypath: "gotchas", recursive: false });
+    r = await call(client, "memstate_set", { project_id: HINTS, keypath: "notes.parent", value: "a memory with a memory below it" });
+    r = await call(client, "memstate_set", { project_id: HINTS, keypath: "notes.parent.child", value: "the memory below it" });
+    r = await call(client, "memstate_get", { project_id: HINTS, keypath: "notes.parent", recursive: false });
     check("get: recursive=false reads one memory that has memories below it",
-      !r.isError && r.data.memories.length === 1 && r.data.memories[0].content === "a memory at the name of an area",
+      !r.isError && r.data.memories.length === 1 && r.data.memories[0].content === "a memory with a memory below it",
       JSON.stringify(r));
     r = await call(client, "memstate_delete_project", { project_id: HINTS });
     check("hint: test project deleted", !r.isError, JSON.stringify(r));
@@ -585,7 +627,7 @@ async function main() {
     check("search: fts finds current content",
       !r.isError &&
         r.data.mode === "fts" &&
-        r.data.results.some((h) => h.keypath === "decisions"),
+        r.data.results.some((h) => h.keypath === "decisions.storage"),
       JSON.stringify(r));
 
     r = await call(client, "memstate_search", {
@@ -603,7 +645,7 @@ async function main() {
       mode: "hybrid",
     });
     check("search: hybrid matches on any word",
-      !r.isError && r.data.results.some((h) => h.keypath === "decisions"),
+      !r.isError && r.data.results.some((h) => h.keypath === "decisions.storage"),
       JSON.stringify(r));
 
     r = await call(client, "memstate_search", {
@@ -623,7 +665,7 @@ async function main() {
       category: "note",
     });
     check("search: category filter matches",
-      !r.isError && r.data.results.some((h) => h.keypath === "decisions"),
+      !r.isError && r.data.results.some((h) => h.keypath === "decisions.storage"),
       JSON.stringify(r));
 
     r = await call(client, "memstate_search", {
@@ -957,7 +999,7 @@ async function main() {
       check("gate: a write that would create the cwd project is refused",
         f.isError && f.message.includes("new_project") && f.message.includes('"gate_dir"'),
         JSON.stringify(f));
-      f = await call(g, "memstate_remember", { content: "## Notes\nbody\n" });
+      f = await call(g, "memstate_remember", { content: "## Notes\n\n### Topic\nbody\n" });
       check("gate: remember is gated like set",
         f.isError && f.message.includes("new_project"),
         JSON.stringify(f));
@@ -1096,7 +1138,7 @@ async function main() {
     check("gate: an explicit near-duplicate id is refused even with new_project",
       r.isError && r.message.includes(`"${PROJECT}"`) && r.message.includes("memstate CLI"),
       JSON.stringify(r));
-    r = await call(client, "memstate_remember", { project_id: "fresh_explicit", content: "## Notes\nbody\n", new_project: true });
+    r = await call(client, "memstate_remember", { project_id: "fresh_explicit", content: "## Notes\n\n### Topic\nbody\n", new_project: true });
     check("gate: new_project=true creates an explicit project",
       !r.isError && r.data.project_id === "fresh_explicit",
       JSON.stringify(r));
@@ -1446,6 +1488,13 @@ async function readFromOlderDaemon() {
       } else if (req.url.endsWith("/keypaths") && body.includes("max_content_bytes")) {
         refused++;
         answer(400, { error: 'json: unknown field "max_content_bytes"' });
+      } else if (req.url.endsWith("/projects")) {
+        answer(200, { projects: [{ id: "older", memory_count: 1 }] });
+      } else if (req.url.endsWith("/memories/remember") && body.includes("deny_keypaths")) {
+        refused++;
+        answer(400, { error: 'json: unknown field "deny_keypaths"' });
+      } else if (req.url.endsWith("/memories/remember")) {
+        answer(200, { method: "headings", items: [{ keypath: "gotchas", action: "created", stored: { id: 2, project_id: "older", keypath: "gotchas", version: 1 } }] });
       } else if (req.url.endsWith("/memories/search") && body.includes('"rerank"')) {
         refused++;
         answer(400, { error: 'json: unknown field "rerank"' });
@@ -1487,6 +1536,12 @@ async function readFromOlderDaemon() {
       r = await call(older, "memstate_search", { project_id: "older", query: "daemon", rerank: true });
       check("older daemon: rerank=true is an error, not a search without a reranker",
         r.isError && refused === 3,
+        JSON.stringify({ r, refused }));
+      // The same daemon does not know deny_keypaths. The summary is stored
+      // as that daemon stores it, and the result has the hint.
+      r = await call(older, "memstate_remember", { project_id: "older", content: "## Gotchas\nloose text\n" });
+      check("older daemon: a summary is stored without deny_keypaths, with the area hint",
+        !r.isError && refused === 4 && /"gotchas" is an area/.test(r.data.hint ?? ""),
         JSON.stringify({ r, refused }));
     });
   } finally {
