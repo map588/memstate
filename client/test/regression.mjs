@@ -1170,6 +1170,55 @@ async function main() {
     check("gate (python): once the project exists, writes need no flag",
       p.code === 0,
       JSON.stringify(p));
+    // The scripts make the same three refusals and give the same hints as
+    // the proxy (user request of 2026-11-19). The rules are a second
+    // implementation in _client.py, so each one has a check here.
+    const REM_PY = path.resolve(__dirname, "..", "skill", "scripts", "memstate_remember.py");
+    const pyRem = (args) => {
+      const out = spawnSync(PY, [REM_PY, ...args], { cwd: pyCwd, env, encoding: "utf8" });
+      return { code: out.status, err: out.stderr, out: out.stdout };
+    };
+    const pyBullets = Array.from({ length: 5 }, (_, i) => `- fact number ${i} about the build`).join("\n");
+    p = py(pyCwd, ["--keypath", "gotchas", "--value", "all the traps"]);
+    check("refuse (python): a write to the name of an area",
+      p.code === 1 && p.err.includes('"gotchas" is an area') && p.err.includes("gotchas.<topic>"), JSON.stringify(p));
+    p = py(pyCwd, ["--keypath", "Notes.Self-Test", "--value", "a fact"]);
+    check("refuse (python): a keypath that is not snake_case, and the error gives the corrected one",
+      p.code === 1 && p.err.includes('"notes.self_test"'), JSON.stringify(p));
+    const pyToken = "ghp_" + "a1B2c3D4e5F6".repeat(3);
+    p = py(pyCwd, ["--keypath", "config.deploy_login", "--value", `the deploy uses ${pyToken}`]);
+    check("refuse (python): a value with a credential, and the error does not repeat it",
+      p.code === 1 && p.err.includes("a GitHub token") && !p.err.includes(pyToken), JSON.stringify(p).replace(pyToken, "<cut>"));
+    p = py(pyCwd, ["--keypath", "config.deploy_login", "--value", "The password is in the vault of the team."]);
+    check("refuse (python): a note that names a password is stored, with no hint",
+      p.code === 0 && !p.out.includes('"hint"'), JSON.stringify(p));
+    p = py(pyCwd, ["--keypath", "notes.build_list", "--value", pyBullets]);
+    check("hint (python): a value with five list items gets a hint",
+      p.code === 0 && /"hint": "5 list items/.test(p.out), JSON.stringify(p));
+    p = py(pyCwd, ["--keypath", "notes.long_text", "--value", "word ".repeat(400)]);
+    check("hint (python): a value above 1500 bytes gets a hint",
+      p.code === 0 && /"hint": "2000 bytes/.test(p.out), JSON.stringify(p).slice(0, 300));
+    p = py(pyCwd, ["--keypath", "notes.where_to_look", "--value", "See notes.a, notes.b and decisions.c."]);
+    check("hint (python): a short memory that names three keypaths gets a hint",
+      p.code === 0 && /names 3 other keypaths/.test(p.out), JSON.stringify(p));
+    p = pyRem(["--content", "## Gotchas\nloose text\n\n## Decisions\n\n### Use sqlite\nOne file.\n"]);
+    check("refuse (python): a heading that is an area with text below it",
+      p.code === 1 && p.err.includes("gotchas") && p.err.includes("is an area"), JSON.stringify(p));
+    p = pyRem(["--keypath", "decisions", "--content", "every decision"]);
+    check("refuse (python): memstate_remember.py with the name of an area as keypath",
+      p.code === 1 && p.err.includes('"decisions" is an area'), JSON.stringify(p));
+    p = pyRem(["--root", "My-Notes", "--content", "## A\n\n### B\ntext\n"]);
+    check("refuse (python): a root that is not snake_case",
+      p.code === 1 && p.err.includes('root "My-Notes"'), JSON.stringify(p));
+    p = pyRem(["--content", "## Decisions\n\n### Use sqlite\nOne file.\n"]);
+    check("refuse (python): one fact below each heading is stored, so the refused summary wrote nothing",
+      p.code === 0 && p.out.includes('"action": "created"') && !p.out.includes('"hint"'), JSON.stringify(p));
+    p = pyRem(["--content", "Loose text with no heading."]);
+    check("hint (python): text with no heading says where it went",
+      p.code === 0 && /"hint": "The text before the first heading/.test(p.out), JSON.stringify(p));
+    p = pyRem(["--keypath", "task.summary.2026_11_19", "--content", "## Done\n" + pyBullets + "\n" + "word ".repeat(400)]);
+    check("hint (python): a task summary gets no hint",
+      p.code === 0 && !p.out.includes('"hint"'), JSON.stringify(p).slice(0, 300));
     check("log (python): the scripts write the daemon log next to MEMSTATE_DB",
       readyLines(daemonLog) > readyBeforePy,
       `${readyLines(daemonLog)} MEMSTATE_READY lines, ${readyBeforePy} before the Python runs`);
@@ -1544,6 +1593,21 @@ async function readFromOlderDaemon() {
         !r.isError && refused === 4 && /"gotchas" is an area/.test(r.data.hint ?? ""),
         JSON.stringify({ r, refused }));
     });
+    // The script has the same rule for that daemon.
+    const remPy = path.resolve(__dirname, "..", "skill", "scripts", "memstate_remember.py");
+    // Not spawnSync: the fake daemon is in this process and must answer.
+    const out = await new Promise((resolve) => {
+      const child = spawn(process.platform === "win32" ? "python" : "python3",
+        [remPy, "--project", "older", "--content", "## Gotchas\nloose text\n"], { cwd: home, env });
+      let stdout = "", stderr = "";
+      child.stdout.on("data", (d) => (stdout += d));
+      child.stderr.on("data", (d) => (stderr += d));
+      const timer = setTimeout(() => child.kill(), 15000);
+      child.on("exit", (status) => { clearTimeout(timer); resolve({ status, stdout, stderr }); });
+    });
+    check("older daemon (python): a summary is stored without deny_keypaths, with the area hint",
+      out.status === 0 && refused === 5 && /"gotchas\\" is an area/.test(out.stdout),
+      JSON.stringify({ code: out.status, out: out.stdout, err: out.stderr, refused }));
   } finally {
     fake.close();
     fs.rmSync(home, { recursive: true, force: true });

@@ -547,6 +547,144 @@ def count_values(nodes: list) -> int:
     return n
 
 
+# ---- write rules -------------------------------------------------------
+# The same three refusals and the same hints as the TS proxy
+# (client/src/index.ts: checkKeypathFormat, checkNotArea, checkNoSecret,
+# factHint, areaHint). This is a second implementation: change the two
+# together. The regression suite has a check for each rule on each side.
+
+AREAS = ["decisions", "todo", "notes", "gotchas", "questions", "files", "config", "arch"]
+_KEYPATH_FORMAT = re.compile(r"[a-z0-9_]+(?:\.[a-z0-9_]+)*")
+_KEYPATH_REF = re.compile(r"\b(?:" + "|".join(AREAS) + r")\.[a-z0-9_]+")
+_LIST_ITEM = re.compile(r"^\s*(?:[-*]|\d+\.)\s+", re.MULTILINE)
+HINT_LIST_ITEMS = 5
+HINT_BYTES = 1500
+HINT_INDEX_REFS = 3
+HINT_INDEX_BYTES = 400
+
+# Texts that are a credential with near certainty. The word "password" is
+# not in the list: notes about a login flow hold it.
+_SECRET_SHAPES = [
+    ("a private key block", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("an API key (sk-...)", re.compile(r"\bsk-[A-Za-z0-9_-]{20,}")),
+    ("a GitHub token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})")),
+    ("an AWS access key id", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("a Slack token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}")),
+    ("a JSON Web Token", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")),
+]
+
+
+def check_keypath_format(keypath: str, field: str) -> None:
+    """A keypath is lowercase snake_case segments joined by dots. Exits 1
+    with the corrected keypath on stderr."""
+    if _KEYPATH_FORMAT.fullmatch(keypath):
+        return
+    fixed = re.sub(r"[^a-z0-9_.]+", "_", keypath.lower())
+    fixed = re.sub(r"\.{2,}", ".", fixed).strip("._")
+    tail = f': use "{fixed}".' if _KEYPATH_FORMAT.fullmatch(fixed) else "."
+    raise SystemExit(
+        f'Error: {field} "{keypath}" must be lowercase snake_case segments '
+        f"[a-z0-9_] joined by dots{tail}")
+
+
+def check_not_area(keypath: str) -> None:
+    """A memory at the bare name of an area takes the place of the facts
+    that belong below it, and comes before them in a search."""
+    if keypath in AREAS:
+        raise SystemExit(
+            f'Error: "{keypath}" is an area, not a fact, and nothing was written. '
+            f"Use {keypath}.<topic>, named after the fact.")
+
+
+def check_no_secret(text: str) -> None:
+    """The error names the kind of credential and never the text."""
+    for kind, shape in _SECRET_SHAPES:
+        if shape.search(text):
+            raise SystemExit(
+                f"Error: the text holds {kind}, and nothing was written. Memories are "
+                "not a place for credentials: store where the secret is kept, not the secret.")
+
+
+def check_write(args, keypath: Optional[str], text: str, root: Optional[str] = None) -> None:
+    """The three refusals for one write. The shared scope has its own
+    keypath rule in the daemon, so the area rule does not apply there."""
+    check_no_secret(text)
+    if keypath:
+        check_keypath_format(keypath, "keypath")
+        if args.scope != "shared":
+            check_not_area(keypath)
+    if root:
+        check_keypath_format(root, "root")
+
+
+def area_hint(keypaths: list) -> Optional[str]:
+    """The hint for text that had no heading, and for a memory at the name
+    of an area that a daemon from before deny_keypaths stored."""
+    if any(k == "preamble" or k.endswith(".preamble") for k in keypaths):
+        return ('The text before the first heading went to "preamble". Give it a '
+                '"## <area>" and "### <topic>" heading, or pass keypath.')
+    areas = [k for k in keypaths if k in AREAS]
+    if not areas:
+        return None
+    names = ", ".join(f'"{k}"' for k in areas)
+    return (f"{names} is an area, not a fact. Give each fact its keypath: <area>.<topic>, "
+            'or a "### <topic>" heading below the area heading.')
+
+
+def fact_hint(keypath: str, content: str) -> Optional[str]:
+    """The hint for one memory that a search will not find well. A task
+    summary is long by design and gets no hint."""
+    if keypath.startswith("task."):
+        return None
+    items = len(_LIST_ITEM.findall(content))
+    if items >= HINT_LIST_ITEMS:
+        return (f"{items} list items in one memory. If a search can ask for one item "
+                "alone, write one memory for each item.")
+    size = len(content.encode("utf-8"))
+    refs = len(set(_KEYPATH_REF.findall(content)))
+    if refs >= HINT_INDEX_REFS and size <= HINT_INDEX_BYTES:
+        return (f"This memory names {refs} other keypaths and holds little else. The keypath "
+                "tree is the index: a memory that lists other memories comes before them in a search.")
+    if size > HINT_BYTES:
+        return (f"{size} bytes in one memory. A search finds a short memory with one fact: "
+                "split this one if it holds more than one fact.")
+    return None
+
+
+def post_write(path: str, body: dict, hint) -> int:
+    """post() for a write. hint is a text, None, or a function of the
+    daemon result that gives one; the hint goes into the printed result."""
+    def call():
+        result = fetch("POST", path, body)
+        text = hint(result) if callable(hint) else hint
+        if text and isinstance(result, dict):
+            result["hint"] = text
+        return result
+    return emit(call)
+
+
+def post_remember(body: dict) -> int:
+    """A heading split: the daemon knows where each heading goes, so it
+    refuses a section at the name of an area (deny_keypaths). A daemon from
+    before that rule refuses the field; the script then writes without it
+    and the result has the hint."""
+    def call():
+        try:
+            result = fetch("POST", "/memories/remember", {**body, "deny_keypaths": AREAS})
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", errors="replace")
+            if "deny_keypaths" not in detail:
+                # The body of the error is read, so emit() cannot print it.
+                raise SystemExit(f"Error: HTTP {e.code} {detail}") from None
+            result = fetch("POST", "/memories/remember", body)
+        if isinstance(result, dict):
+            text = area_hint([item.get("keypath", "") for item in result.get("items", [])])
+            if text:
+                result["hint"] = text
+        return result
+    return emit(call)
+
+
 def post(path: str, body: dict) -> int:
     return emit(lambda: fetch("POST", path, body))
 

@@ -15,11 +15,18 @@ section rejects the whole call, nothing is written.
 Server response (both modes): { method, items: [{keypath, action, stored, superseded?}] }.
 stored and superseded name the versions (id, keypath, version, ...) and
 carry no content; superseded has a 40-word preview.
+
+A heading is one fact, not a subject: write "## Decisions", then one
+"### <topic>" for each fact. The script refuses text directly below an
+area heading, an area name as --keypath, a keypath or root that is not
+lowercase snake_case, and content that holds a credential. Nothing is
+written then. The result carries "hint" for text with no heading.
 """
 import argparse
 import sys
 
-from _client import add_scope_args, add_write_args, check_write_target, host_topics, post, resolve_project
+from _client import (add_scope_args, add_write_args, check_write, check_write_target, fact_hint,
+                     host_topics, post_remember, post_write, resolve_project)
 
 
 def main() -> int:
@@ -38,6 +45,7 @@ def main() -> int:
                     help="comma-separated tags applied to every written section")
     args = ap.parse_args()
 
+    check_write(args, args.keypath, args.content, args.root)
     project = resolve_project(args)
     check_write_target(args, project)
     body = {
@@ -55,7 +63,9 @@ def main() -> int:
     topics = host_topics(args, args.topics.split(",") if args.topics else None)
     if topics:
         body["topics"] = topics
-    return post("/memories/remember", body)
+    if args.keypath:
+        return post_write("/memories/remember", body, fact_hint(args.keypath, args.content))
+    return post_remember(body)
 
 
 if __name__ == "__main__":
