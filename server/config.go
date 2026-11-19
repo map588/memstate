@@ -262,11 +262,12 @@ func cmdConfig(args []string) int {
 		fmt.Fprintf(w, "%-28s %-40s %s\n", k, v, src)
 	}
 
-	if v, _ := configSource("MEMSTATE_RERANK_MODEL", ""); v == "" {
-		model, _ := configSource("MEMSTATE_EMBED_MODEL", defaultEmbedModel)
-		if hint := rerankHint(model); hint != "" {
-			fmt.Fprintf(w, "\nno reranker is set: %s\n", hint)
-		}
+	embedModel, _ := configSource("MEMSTATE_EMBED_MODEL", defaultEmbedModel)
+	embedURL, _ := configSource("MEMSTATE_EMBEDDING_URL", defaultEmbeddingURL)
+	rerankModel, _ := configSource("MEMSTATE_RERANK_MODEL", "")
+	rerankURL, _ := configSource("MEMSTATE_RERANK_URL", "")
+	if text := rerankSetup(embedModel, embedURL, rerankModel, rerankURL); text != "" {
+		fmt.Fprintf(w, "\n%s\n", text)
 	}
 
 	addr := subAddr(nil)

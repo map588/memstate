@@ -525,8 +525,9 @@ async function main() {
       !r.isError && r.data.results.some((h) => h.keypath === "decisions.storage") && r.data.reranker === undefined,
       JSON.stringify(r));
     r = await call(client, "memstate_search", { project_id: PROJECT, query: "sqlite", rerank: true });
-    check("search: rerank=true is refused when the daemon has no reranker",
-      r.isError && JSON.stringify(r).includes("MEMSTATE_RERANK_MODEL"),
+    check("search: rerank=true is not an error when the daemon has no reranker, and the result says why",
+      !r.isError && r.data.results.some((h) => h.keypath === "decisions.storage") &&
+      r.data.reranker === undefined && String(r.data.rerank_degraded).includes("MEMSTATE_RERANK_MODEL"),
       JSON.stringify(r));
 
     // ---- write hints -----------------------------------------------------
@@ -1619,8 +1620,9 @@ async function readFromOlderDaemon() {
         !r.isError && r.data.results?.[0]?.keypath === "notes.a" && refused === 2,
         JSON.stringify({ r, refused }));
       r = await call(older, "memstate_search", { project_id: "older", query: "daemon", rerank: true });
-      check("older daemon: rerank=true is an error, not a search without a reranker",
-        r.isError && refused === 3,
+      check("older daemon: rerank=true works without the field, and the result says why",
+        !r.isError && r.data.results?.[0]?.keypath === "notes.a" && refused === 3 &&
+        String(r.data.rerank_degraded).includes("no reranker"),
         JSON.stringify({ r, refused }));
       // The same daemon does not know deny_keypaths. The summary is stored
       // as that daemon stores it, and the result has the hint.

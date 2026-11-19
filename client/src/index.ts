@@ -1607,10 +1607,13 @@ const TOOLS: ToolDef[] = [
         reply = await postJSON("/memories/search", body);
       } catch (err) {
         // A daemon from before the reranker refuses the field. That daemon
-        // has no reranker, so rerank=false holds without the field.
-        if (body.rerank !== false || !String(err).includes('unknown field "rerank"')) throw err;
+        // has no reranker, so the search runs without the field. A request
+        // for a rerank gets the reason, as a newer daemon gives it.
+        if (body.rerank === undefined || !String(err).includes('unknown field "rerank"')) throw err;
+        const asked = body.rerank === true;
         delete body.rerank;
         reply = await postJSON("/memories/search", body);
+        if (asked) (reply as Row).rerank_degraded = "no reranker: this daemon is from before the reranker";
       }
       const out = reply as {
         results?: { keypath: string }[];

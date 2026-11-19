@@ -233,6 +233,51 @@ var rerankPairs = []struct{ embedPrefix, reranker, note string }{
 	{"nomic-embed", "bge-reranker-v2-m3", "needs a /v1 server for the reranker; Ollama has no rerank API"},
 }
 
+// noRerankerNote is the rerank_degraded reason for a request with
+// rerank=true on a daemon that has no reranker. The search answers in
+// the fused order: a daemon without a reranker refuses no search.
+const noRerankerNote = "no reranker is configured (set MEMSTATE_RERANK_MODEL)"
+
+// smallReranker is the reranker that the setup text names first. It has
+// 0.6 B parameters, and it reads text, so it works with each embedder.
+const smallReranker = "bge-reranker-v2-m3"
+
+// rerankSetup returns the text that `memstated config` prints about the
+// reranker: how to turn one on when none is set, or why a reranker that
+// is set does not run. It returns "" when the reranker is in use.
+func rerankSetup(embedModel, embedURL, rerankModel, rerankURL string) string {
+	url := rerankURL
+	if url == "" {
+		url = embedURL
+	}
+	const pad = "\n              "
+	if rerankModel != "" {
+		if isOpenAIBase(url) {
+			return ""
+		}
+		return "reranker      off: MEMSTATE_RERANK_MODEL is " + rerankModel + ", but " + url + " is not a base URL that ends in /v1." +
+			pad + "Ollama has no rerank API. Name a server that answers POST /v1/rerank (llama.cpp, vLLM):" +
+			pad + "  memstated config set MEMSTATE_RERANK_URL http://HOST:PORT/v1" +
+			pad + "  memstated restart"
+	}
+	var b strings.Builder
+	b.WriteString("reranker      off. A reranker is optional: a search without one sends no extra request and does not wait.")
+	b.WriteString(pad + "To turn one on, serve a reranker model from a server that answers POST /v1/rerank")
+	b.WriteString(pad + "(llama.cpp with --reranking, vLLM; Ollama has no rerank API). Then:")
+	b.WriteString(pad + "  memstated config set MEMSTATE_RERANK_MODEL " + smallReranker + "   # the name that the server gives the model")
+	if !isOpenAIBase(url) {
+		b.WriteString(pad + "  memstated config set MEMSTATE_RERANK_URL http://HOST:PORT/v1    # necessary: " + url + " is not a /v1 server")
+	} else {
+		b.WriteString(pad + "  memstated config set MEMSTATE_RERANK_URL http://HOST:PORT/v1    # only when it is not " + url)
+	}
+	b.WriteString(pad + "  memstated restart")
+	b.WriteString(pad + smallReranker + " is small (0.6 B parameters, about 0.4 s for one search) and works with each embedding model.")
+	if hint := rerankHint(embedModel); hint != "" && !strings.Contains(hint, smallReranker) {
+		b.WriteString(pad + "A larger choice: " + hint + ".")
+	}
+	return b.String()
+}
+
 // rerankHint returns the suggestion for the embedding model, or "" when
 // the list holds no pair for it.
 func rerankHint(embedModel string) string {

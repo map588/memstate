@@ -187,9 +187,13 @@ func TestHybridSearchKeepsFusionOrderWhenRerankFails(t *testing.T) {
 
 func TestRerankRequestWithoutReranker(t *testing.T) {
 	url := rerankFixture(t, nil)
+	_, plain := postJSON(t, url, map[string]any{"project_id": "p", "query": "deploy"})
+	// rerank=true is not an error: the search answers in the fused order
+	// and says why no reranker read the hits.
 	code, body := postJSON(t, url, map[string]any{"project_id": "p", "query": "deploy", "rerank": true})
-	if code != 400 || !strings.Contains(fmt.Sprint(body["error"]), "MEMSTATE_RERANK_MODEL") {
-		t.Fatalf("rerank=true with no reranker must be refused: %d %+v", code, body)
+	if code != 200 || body["rerank_degraded"] != noRerankerNote || body["reranker"] != nil ||
+		!slices.Equal(resultKeypaths(t, body), resultKeypaths(t, plain)) {
+		t.Fatalf("rerank=true with no reranker must answer in the fused order with the reason: %d %+v", code, body)
 	}
 	// Without the field, and with false, the search answers as before.
 	for _, req := range []map[string]any{
@@ -205,6 +209,71 @@ func TestRerankRequestWithoutReranker(t *testing.T) {
 	code, body = postJSON(t, url, map[string]any{"project_id": "p", "query": "deploy", "mode": "fts", "rerank": true})
 	if code != 400 {
 		t.Fatalf("rerank=true with mode fts must be refused: %d %+v", code, body)
+	}
+}
+
+// A daemon with no reranker has no cost from the feature. It answers a
+// hybrid search as a daemon with a reranker answers rerank=false: the
+// same hits, the same scores, no field about a rerank, and no request to
+// a rerank server.
+func TestSearchWithoutRerankerIsThePlainSearch(t *testing.T) {
+	mock := &mockRerank{score: targetScore}
+	_, want := postJSON(t, rerankFixture(t, mock.start(t)), map[string]any{"project_id": "p", "query": "deploy", "rerank": false})
+	scores := func(body map[string]any) []string {
+		var out []string
+		for _, r := range body["results"].([]any) {
+			hit := r.(map[string]any)
+			if hit["rerank_score"] != nil {
+				t.Fatalf("a hit has rerank_score: %+v", hit)
+			}
+			out = append(out, fmt.Sprintf("%v %v %v", hit["keypath"], hit["score"], hit["sources"]))
+		}
+		return out
+	}
+	without := rerankFixture(t, nil)
+	for _, req := range []map[string]any{
+		{"project_id": "p", "query": "deploy"},
+		{"project_id": "p", "query": "deploy", "rerank": false},
+	} {
+		code, got := postJSON(t, without, req)
+		if code != 200 || !slices.Equal(scores(got), scores(want)) {
+			t.Fatalf("%v: %d\n got %v\nwant %v", req, code, scores(got), scores(want))
+		}
+		for key := range got {
+			if strings.Contains(key, "rerank") {
+				t.Fatalf("%v: the response has the field %q", req, key)
+			}
+		}
+	}
+	if len(mock.seen) != 0 {
+		t.Fatalf("a search with rerank=false sent %d requests to the rerank server", len(mock.seen))
+	}
+}
+
+// `memstated config` says how to turn a reranker on, and why a reranker
+// that is set does not run.
+func TestRerankSetup(t *testing.T) {
+	off := rerankSetup("nomic-embed-text", "http://127.0.0.1:11434", "", "")
+	for _, want := range []string{
+		"optional", "sends no extra request",
+		"memstated config set MEMSTATE_RERANK_MODEL " + smallReranker,
+		"MEMSTATE_RERANK_URL http://HOST:PORT/v1    # necessary",
+		"memstated restart",
+	} {
+		if !strings.Contains(off, want) {
+			t.Fatalf("no reranker, Ollama embedder: the text lacks %q:\n%s", want, off)
+		}
+	}
+	v1 := rerankSetup("qwen3-embedding-4b", "http://127.0.0.1:8081/v1", "", "")
+	if !strings.Contains(v1, "# only when it is not http://127.0.0.1:8081/v1") || !strings.Contains(v1, "qwen3-reranker") {
+		t.Fatalf("no reranker, /v1 embedder: the URL is optional and the family pair is named:\n%s", v1)
+	}
+	bad := rerankSetup("nomic-embed-text", "http://127.0.0.1:11434", "bge-reranker-v2-m3", "")
+	if !strings.HasPrefix(bad, "reranker      off: ") || !strings.Contains(bad, "MEMSTATE_RERANK_URL") {
+		t.Fatalf("a reranker with a URL that is not /v1 must say why it is off:\n%s", bad)
+	}
+	if on := rerankSetup("nomic-embed-text", "http://127.0.0.1:11434", "bge-reranker-v2-m3", "http://127.0.0.1:8082/v1"); on != "" {
+		t.Fatalf("a reranker in use needs no text: %q", on)
 	}
 }
 

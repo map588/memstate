@@ -365,12 +365,50 @@ names the reason. Hybrid search never fails because Ollama is down.
 A reranker is a second model that reads the query and one memory
 together and gives a relevance score. It finds the memory that answers
 the query among memories that only share words with it. The daemon has
-no reranker until you set `MEMSTATE_RERANK_MODEL`:
+no reranker until you set `MEMSTATE_RERANK_MODEL`.
 
-```bash
-memstated config set MEMSTATE_RERANK_MODEL qwen3-reranker-4b
-memstated restart
-```
+**Without a reranker there is no cost.** A search sends no request to a
+rerank server and does not wait for one. It gives the same hits in the
+same order as a release from before the reranker. No command prints a
+warning. `memstated config` shows the reranker as off and gives the
+commands below.
+
+#### Turn a reranker on
+
+1. Serve a reranker model from a server that answers `POST /v1/rerank`:
+   the llama.cpp server or vLLM. Ollama has no rerank API. A small model
+   to start with is `bge-reranker-v2-m3` (0.6 B parameters, a 440 MB
+   file as Q4_K_M, for example from `gpustack/bge-reranker-v2-m3-GGUF`
+   on Hugging Face). It works with each embedding model, also with
+   `nomic-embed-text` on Ollama:
+
+   ```bash
+   llama-server -m bge-reranker-v2-m3-Q4_K_M.gguf --reranking \
+     --alias bge-reranker-v2-m3 --host 127.0.0.1 --port 8082 -ngl 99 -c 8192
+   ```
+
+2. Give the daemon the name of the model and the address of the server.
+   The model is the name that the server gives it (`--alias`). Leave out
+   the URL when the embedding server is the same `/v1` server:
+
+   ```bash
+   memstated config set MEMSTATE_RERANK_MODEL bge-reranker-v2-m3
+   memstated config set MEMSTATE_RERANK_URL http://127.0.0.1:8082/v1
+   memstated restart
+   ```
+
+3. Make sure that it works. `memstated config` must show the model with
+   no line that starts with `reranker      off`. A search must name the
+   model:
+
+   ```bash
+   memstate search --json "words of a question" | grep reranker
+   ```
+
+To turn the reranker off again: `memstated config unset
+MEMSTATE_RERANK_MODEL`, then `memstated restart`.
+
+#### What a reranker does to a search
 
 With a reranker, a hybrid search sends the first 10 fused hits to the
 rerank server and orders them by score. The server gets the keypath and
@@ -383,17 +421,28 @@ response holds the fused order and `rerank_degraded` gives the reason.
 
 A request with `rerank: false` skips the reranker. The recall hook
 sends it, because a rerank is too slow for each prompt. A request with
-`rerank: true` is an error when the daemon has no reranker. The `fts`
-and `semantic` modes are not reranked.
+`rerank: true` on a daemon with no reranker is not an error: the
+response holds the fused order, and `rerank_degraded` says that no
+reranker is configured. The `fts` and `semantic` modes are not
+reranked.
 
 The rerank server is the embedding server unless `MEMSTATE_RERANK_URL`
 names another. The URL must end in `/v1`: the request is
 `POST {url}/rerank` with `query` and `documents`, as the llama.cpp
 server and vLLM serve it. Ollama has no rerank API.
 
-Cost, measured with Qwen3-Reranker-4B (Q4_K_M) on an Apple M4 Max: 10
-hits take about 4 seconds, and 20 hits took 9 seconds. That is why the
-bound is 10 hits.
+Cost, measured on an Apple M4 Max with the llama.cpp server, for the 10
+hits of one search (2026-11-19, 8 questions on one project):
+
+| Reranker | Time for 10 hits |
+|---|---|
+| `bge-reranker-v2-m3` (Q4_K_M, 0.6 B) | 0.3 to 0.5 seconds |
+| Qwen3-Reranker-4B (Q4_K_M) | 2.6 to 3.9 seconds |
+
+The two models put the same memory first for 7 of the 8 questions. For
+one question the fused order had the wrong memory first, and each model
+put the right one first. With Qwen3-Reranker-4B, 20 hits took 9
+seconds. That is why the bound is 10 hits.
 
 ### Embedder and reranker pairs
 
@@ -412,11 +461,13 @@ if a pair works in practice:
 | Embedder | Reranker | Server | Status |
 |---|---|---|---|
 | `qwen3-embedding` (0.6b, 4b, 8b) | `qwen3-reranker` of the same size | llama.cpp | 4b pair measured on 2026-11-19: embedding parity 1.0, a relevant document scored 0.9996 and unrelated documents below 0.02 |
-| `bge-m3` | `bge-reranker-v2-m3` | llama.cpp | The llama.cpp documentation names this reranker. Not measured here. |
-| `nomic-embed-text` | `bge-reranker-v2-m3` | Ollama for the embedder, a `/v1` server for the reranker | Not measured here. Needs `MEMSTATE_RERANK_URL`. |
+| each embedder | `bge-reranker-v2-m3` | llama.cpp | The small choice. Measured on 2026-11-19 with `qwen3-embedding-4b` as the embedder: 0.3 to 0.5 seconds for 10 hits, and the same first hit as Qwen3-Reranker-4B for 7 of 8 questions. |
+| `bge-m3` | `bge-reranker-v2-m3` | llama.cpp | The same model family. The reranker was measured (row above); this embedder was not. |
+| `nomic-embed-text` | `bge-reranker-v2-m3` | Ollama for the embedder, a `/v1` server for the reranker | Needs `MEMSTATE_RERANK_URL`. The reranker was measured (row above); this embedder was not. |
 
-`memstated config` prints the pair for the configured embedder when no
-reranker is set.
+Start with `bge-reranker-v2-m3`. Use a larger reranker only when a test
+on your own memories shows a better order. `memstated config` prints
+the commands when no reranker is set.
 
 To serve the two models from one llama.cpp server, start `llama-server`
 with no `-m` and a preset file (router mode). Each section is one model,

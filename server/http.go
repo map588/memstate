@@ -509,8 +509,9 @@ type searchReq struct {
 	// Rerank applies to the hybrid mode. When the field is absent, the
 	// reranker orders the hits if the daemon has one. false keeps the
 	// order of rrfFuse. `memstated recall` sends false, because a rerank
-	// is too slow for a hook that runs on each prompt. true is an error
-	// when the daemon has no reranker.
+	// is too slow for a hook that runs on each prompt. true on a daemon
+	// with no reranker gives the order of rrfFuse and the reason in
+	// rerank_degraded: a daemon without a reranker refuses no search.
 	Rerank *bool `json:"rerank,omitempty"`
 }
 
@@ -613,16 +614,9 @@ func handleSearch(store *Store, embedder *Embedder, reranker *Reranker) http.Han
 		if in.Threshold != nil {
 			threshold = *in.Threshold
 		}
-		if in.Rerank != nil && *in.Rerank {
-			if mode != "hybrid" {
-				writeErr(w, http.StatusBadRequest, "rerank applies to the hybrid mode only")
-				return
-			}
-			if reranker == nil {
-				writeErr(w, http.StatusBadRequest,
-					"rerank requested, but no reranker is configured (set MEMSTATE_RERANK_MODEL)")
-				return
-			}
+		if in.Rerank != nil && *in.Rerank && mode != "hybrid" {
+			writeErr(w, http.StatusBadRequest, "rerank applies to the hybrid mode only")
+			return
 		}
 		switch mode {
 		case "hybrid":
@@ -732,6 +726,9 @@ func hybridSearch(ctx context.Context, store *Store, embedder *Embedder, reranke
 	// The reranker reads more hits than the caller asked for, so a hit
 	// that the fusion put low can still come first.
 	rerank := reranker != nil && (in.Rerank == nil || *in.Rerank)
+	if reranker == nil && in.Rerank != nil && *in.Rerank {
+		out["rerank_degraded"] = noRerankerNote
+	}
 	fuseLimit := limit
 	if rerank {
 		fuseLimit = max(limit, rerankMaxDocs)
