@@ -367,7 +367,8 @@ memstated restart
 
 With a reranker, a hybrid search sends the first 10 fused hits to the
 rerank server and orders them by score. The server gets the keypath and
-the first 1200 bytes of each memory. The response names the model in
+at most 1200 bytes of each memory: the part that holds the most words
+of the query, or the start of the memory when no part holds more. The response names the model in
 `reranker`, and each hit carries `rerank_score` beside `score` and
 `sources`. When the rerank server does not answer in
 `MEMSTATE_RERANK_TIMEOUT` (15s), or its answer is not complete, the

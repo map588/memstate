@@ -726,7 +726,7 @@ func hybridSearch(ctx context.Context, store *Store, embedder *Embedder, reranke
 	if rerank && len(hits) > 0 {
 		docs := make([]string, min(len(hits), rerankMaxDocs))
 		for i := range docs {
-			docs[i] = rerankDoc(hits[i].Memory)
+			docs[i] = rerankDoc(hits[i].Memory, in.Query)
 		}
 		rctx, cancel := context.WithTimeout(ctx, reranker.timeout())
 		scores, err := reranker.Rerank(rctx, in.Query, docs)

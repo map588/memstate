@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Reranker calls a rerank server to score each search candidate against
@@ -144,9 +146,58 @@ func rerankScores(results []rerankResult, n int) ([]float32, error) {
 }
 
 // rerankDoc is the text of one memory that the reranker reads: the keypath,
-// which names the subject, and the head of the content.
-func rerankDoc(m *Memory) string {
-	return m.Keypath + "\n" + truncateBytes(m.Content, rerankMaxBytes)
+// which names the subject, and the part of the content that rerankWindow
+// selects for the query.
+func rerankDoc(m *Memory, query string) string {
+	return m.Keypath + "\n" + rerankWindow(m.Content, query)
+}
+
+// rerankWindowStep is the distance in bytes between two windows that
+// rerankWindow compares.
+const rerankWindowStep = 300
+
+// rerankWindow returns at most rerankMaxBytes of content: the window that
+// holds the most different words of the query. Windows with an equal count
+// give the earliest one, so content with no query word gives its head.
+//
+// The head alone is not sufficient. Measured 2026-11-19 on a memory of 2855
+// bytes whose answer started at byte 1800: the reranker gave the head
+// 0.000, the full text 0.035 and this window 0.725, and the search put the
+// memory at rank 7 where the fusion had it at rank 1.
+func rerankWindow(content, query string) string {
+	if len(content) <= rerankMaxBytes {
+		return content
+	}
+	words := map[string]bool{}
+	for _, w := range strings.FieldsFunc(strings.ToLower(query), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	}) {
+		if len(w) > 2 {
+			words[w] = true
+		}
+	}
+	best, bestCount := truncateBytes(content, rerankMaxBytes), -1
+	for start := 0; start < len(content); start += rerankWindowStep {
+		// Do not start in the middle of a character.
+		for start < len(content) && !utf8.RuneStart(content[start]) {
+			start++
+		}
+		window := truncateBytes(content[start:], rerankMaxBytes)
+		lower := strings.ToLower(window)
+		count := 0
+		for w := range words {
+			if strings.Contains(lower, w) {
+				count++
+			}
+		}
+		if count > bestCount {
+			best, bestCount = window, count
+		}
+		if start+rerankMaxBytes >= len(content) {
+			break
+		}
+	}
+	return best
 }
 
 // applyRerank orders the first len(scores) hits by score, highest first,

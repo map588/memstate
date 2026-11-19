@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"pgregory.net/rapid"
 )
@@ -205,6 +206,76 @@ func TestRerankRequestWithoutReranker(t *testing.T) {
 	if code != 400 {
 		t.Fatalf("rerank=true with mode fts must be refused: %d %+v", code, body)
 	}
+}
+
+// A memory of several facts holds its answer after the first 1200 bytes.
+// On 2026-11-19 the query "shortcut does nothing on mac when key injected"
+// had its memory at rank 1 without the reranker and at rank 7 with it: the
+// reranker read only the head, which is about other faults.
+func TestRerankReadsThePartThatMatchesTheQuery(t *testing.T) {
+	filler := strings.Repeat("The first fault is about window focus after a resize of the display. ", 30) // 2070 bytes
+	long := filler + "Fourth fault: a shortcut does nothing on a Mac when the key is injected, because the target answer is the modifier flag."
+	// The summary node is a partial answer, as it was for the real model.
+	mock := &mockRerank{score: func(q, doc string) float64 {
+		if strings.HasPrefix(doc, "gotchas\n") {
+			return 0.5
+		}
+		return targetScore(q, doc)
+	}}
+	store := newTestStore(t)
+	for kp, content := range map[string]string{
+		"gotchas":                "shortcut key mac injected: a short summary of the faults",
+		"gotchas.four_faults":    long,
+		"gotchas.other_shortcut": "shortcut key mac injected in another subject",
+	} {
+		if _, _, err := store.Write("p", kp, content, WriteMeta{}, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ts := httptest.NewServer(newRouter(store, nil, nil, mock.start(t)))
+	t.Cleanup(ts.Close)
+	code, body := postJSON(t, ts.URL+"/api/v1/memories/search",
+		map[string]any{"project_id": "p", "query": "shortcut does nothing on mac when key injected"})
+	if got := resultKeypaths(t, body); code != 200 || got[0] != "gotchas.four_faults" {
+		t.Fatalf("the memory with the answer below byte 1200 must come first: %d %v", code, got)
+	}
+}
+
+// rerankWindow returns a part of the content that the reranker can read:
+// in one piece, within the byte bound, and valid text.
+func TestRerankWindowProperty(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		piece := rapid.SampledFrom([]string{"alpha ", "béta ", "日本語 ", "word ", "line\n"})
+		// Most draws are longer than the bound, so the window matters.
+		content := strings.Join(rapid.SliceOfN(piece, 0, 900).Draw(t, "pieces"), "")
+		if rapid.Bool().Draw(t, "long") {
+			content += strings.Repeat("filler text ", 200)
+		}
+		query := rapid.SampledFrom([]string{"", "needle", "needle haystack", "alpha", "日本語 needle"}).Draw(t, "query")
+		at := -1
+		if rapid.Bool().Draw(t, "with_needle") {
+			at = rapid.IntRange(0, len(content)).Draw(t, "at")
+			for at < len(content) && !utf8.RuneStart(content[at]) {
+				at++
+			}
+			content = content[:at] + " needle " + content[at:]
+		}
+		got := rerankWindow(content, query)
+		if len(got) > rerankMaxBytes || !utf8.ValidString(got) || !strings.Contains(content, got) {
+			t.Fatalf("window of %d bytes is not a valid part of the content within %d bytes", len(got), rerankMaxBytes)
+		}
+		if len(content) <= rerankMaxBytes && got != content {
+			t.Fatalf("content within the bound must come back whole")
+		}
+		if query == "" && got != truncateBytes(content, rerankMaxBytes) {
+			t.Fatalf("no query word: the window must be the head")
+		}
+		// A query word that the content holds one time is in the window,
+		// when no other query word competes with it.
+		if at >= 0 && query == "needle" && strings.Count(content, "needle") == 1 && !strings.Contains(got, "needle") {
+			t.Fatalf("needle at byte %d of %d is not in the window", at, len(content))
+		}
+	})
 }
 
 // The CLI must show that a reranker ordered the hits, and why not when it
