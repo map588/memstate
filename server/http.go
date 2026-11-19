@@ -874,7 +874,8 @@ func handleKeypaths(store *Store) http.HandlerFunc {
 			resp["truncated"] = true
 			resp["note"] = fmt.Sprintf(
 				"%d memories hold %d bytes of content, above the limit of %d. "+
-					"Each carries a preview. Read the keypaths that you need.",
+					"Each carries a preview. Read the keypaths that you need. "+
+					"A keypath that has keypaths below it reads alone with recursive=false.",
 				len(list), total, in.MaxContentBytes)
 		}
 		writeJSON(w, http.StatusOK, resp)

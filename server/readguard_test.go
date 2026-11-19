@@ -116,7 +116,7 @@ func TestKeypathsReadGuardExamples(t *testing.T) {
 	if out["truncated"] != true || len(memories) != 3 {
 		t.Fatalf("a subtree above the limit must answer with previews: %v", out)
 	}
-	if note, _ := out["note"].(string); !strings.Contains(note, "Read the keypaths that you need") {
+	if note, _ := out["note"].(string); !strings.Contains(note, "Read the keypaths that you need") || !strings.Contains(note, "recursive=false") {
 		t.Fatalf("note = %q", note)
 	}
 	// Without a limit the read is complete: the CLI and older clients send none.

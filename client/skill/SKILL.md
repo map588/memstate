@@ -88,6 +88,53 @@ Every deviation fragments the store into disconnected near-duplicates.
 - **source**: A short provenance string, for example `claude-code
   session 2026_07_04` or `user decision`. Shown in history.
 
+## Write a memory so that a search finds it
+
+A search finds a memory by its words and by its meaning. The person who
+searches does not know the answer. That person knows the symptom or the
+question. These rules come from a search test of 2026-11-19 on one
+project: the wording of a memory changed its rank more than a reranker
+did.
+
+- **Start with the question or the symptom.** Use the words of a person
+  who does not know the answer. Then give the fact. Then give the
+  reason.
+
+  Bad: `Input settle: the library sets 20 ms (DEFAULT_INPUT_SETTLE).`
+
+  Good: `How fast an action returns in a test: 20 ms after the input
+  (DEFAULT_INPUT_SETTLE), because expectations wait for the result.`
+
+- **For a gotcha, start with what went wrong.** Then give the cause.
+  Then give the fix. A search asks for "shortcut does nothing", not for
+  the name of the function that skips the shortcut.
+- **One fact in one memory.** If the text has a list and a search can
+  ask for one item alone, write one memory for each item. A fact in the
+  middle of a long memory is not found.
+- **A heading is one fact, not a subject.** With `## Gotchas` and a list
+  below it, the full list becomes one memory at `gotchas`. Write
+  `### <topic>` below the area heading, one heading for each fact.
+- **Do not write a memory that lists or summarizes other memories.** The
+  keypath tree is the index. A short memory at `gotchas` came before the
+  memory with the answer in the test.
+- **Name the keypath after the fact.** `gotchas.macos_key_event_skips_shortcuts`
+  matches a search. `gotchas.faults_from_last_week` does not. Do not
+  name a keypath after the place or the time of the discovery.
+- **Name each thing in full.** Do not write "it", "this fix" or "the
+  above": the memory is read alone.
+- **When a fact stops being true, delete its keypath** and write the new
+  fact at the keypath that fits it. History keeps the old text. Do not
+  keep a stub that says "superseded": the stub is still a search hit.
+- **State that changes in each session is not a decision or a gotcha.**
+  The installed version, a commit count and a test count go to `todo` or
+  `task.summary.<date>`.
+
+The MCP tools help with two of these rules. A write result carries
+`hint` when the value has 5 or more list items, when it is longer than
+1500 bytes, or when its keypath is the name of an area (`gotchas`,
+`decisions`, ...). A task summary gets no hint. The scripts print no
+hint.
+
 ## Shared scope: facts that hold in every repository
 
 Every memory lives in a project by default. Some facts hold in every
@@ -291,7 +338,6 @@ python3 scripts/memstate_get.py --memory-id N                 # one memory by in
 of content returns `truncated: true` and, for each memory, a 40-word
 `preview` and `content_bytes` in place of `content`: read the keypaths
 you need, or pass `--full`. One keypath always returns its content.
-
 ### `memstate_search.py`: find current memories
 
 ```bash

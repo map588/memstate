@@ -509,6 +509,36 @@ async function main() {
       r.isError && JSON.stringify(r).includes("MEMSTATE_RERANK_MODEL"),
       JSON.stringify(r));
 
+    // ---- write hints -----------------------------------------------------
+    // A memory of several facts is not found by a search for one of them
+    // (field test of 2026-11-19: a list of 13 facts at "gotchas"). The
+    // result of such a write says so.
+    const HINTS = "hint_checks";
+    const bullets = (n) => Array.from({ length: n }, (_, i) => `- fact number ${i} about the build`).join("\n");
+    r = await call(client, "memstate_set", { project_id: HINTS, new_project: true, keypath: "gotchas.build_list", value: bullets(5) });
+    check("hint: a value with five list items gets a hint",
+      !r.isError && /5 list items/.test(r.data.hint ?? ""), JSON.stringify(r));
+    r = await call(client, "memstate_set", { project_id: HINTS, keypath: "gotchas.build_pair", value: "The build has two steps:\n" + bullets(2) });
+    check("hint: a short value with a short list gets no hint",
+      !r.isError && r.data.hint === undefined, JSON.stringify(r));
+    r = await call(client, "memstate_set", { project_id: HINTS, keypath: "notes.long_text", value: "word ".repeat(400) });
+    check("hint: a value above 1500 bytes gets a hint",
+      !r.isError && /2000 bytes/.test(r.data.hint ?? ""), JSON.stringify(r));
+    r = await call(client, "memstate_set", { project_id: HINTS, keypath: "gotchas", value: "all the traps of the build" });
+    check("hint: a write to the name of an area gets a hint",
+      !r.isError && /"gotchas" is an area/.test(r.data.hint ?? ""), JSON.stringify(r));
+    r = await call(client, "memstate_remember", { project_id: HINTS, keypath: "task.summary.2026_11_19", content: "## Done\n" + bullets(9) + "\n" + "word ".repeat(400) });
+    check("hint: a task summary is long by design and gets no hint",
+      !r.isError && r.data.hint === undefined, JSON.stringify(r));
+    r = await call(client, "memstate_remember", { project_id: HINTS, content: "## Gotchas\n" + bullets(3) + "\n\n## Decisions\n\n### Use sqlite\nOne file.\n" });
+    check("hint: a heading that is an area with text below it gets a hint",
+      !r.isError && /"gotchas" is an area/.test(r.data.hint ?? "") && !/"decisions"/.test(r.data.hint ?? ""), JSON.stringify(r));
+    r = await call(client, "memstate_remember", { project_id: HINTS, content: "## Decisions\n\n### Use wal\nReads do not wait.\n" });
+    check("hint: one fact below each heading gets no hint",
+      !r.isError && r.data.hint === undefined, JSON.stringify(r));
+    r = await call(client, "memstate_delete_project", { project_id: HINTS });
+    check("hint: test project deleted", !r.isError, JSON.stringify(r));
+
     r = await call(client, "memstate_search", {
       project_id: PROJECT,
       query: "sqlite",

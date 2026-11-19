@@ -712,6 +712,48 @@ function slimWrite(out: WriteResult): Row {
   return row;
 }
 
+// A write result carries a hint when the memory will be hard to find. A
+// search finds a short memory with one fact. In a field test of 2026-11-19
+// a list of 13 facts at "gotchas" hid each of its facts, and that short
+// parent memory came before its own child. The hint costs no space in the
+// tool schemas, which are at their size budget.
+const HINT_LIST_ITEMS = 5;
+const HINT_BYTES = 1500;
+const AREAS = ["decisions", "todo", "notes", "gotchas", "questions", "files", "config", "arch"];
+
+// areaHint is the hint for a memory at the name of an area.
+function areaHint(keypaths: string[]): string | undefined {
+  const areas = keypaths.filter((k) => AREAS.includes(k));
+  if (areas.length === 0) return undefined;
+  const names = areas.map((k) => `"${k}"`).join(", ");
+  return (
+    `${names} is an area, not a fact. Give each fact its keypath: <area>.<topic>, ` +
+    'or a "### <topic>" heading below the area heading.'
+  );
+}
+
+// factHint is the hint for one memory whose text the proxy knows. A task
+// summary is long by design and gets no hint.
+function factHint(keypath: string, content: string): string | undefined {
+  if (keypath.startsWith("task.")) return undefined;
+  const area = areaHint([keypath]);
+  if (area) return area;
+  const items = content.split("\n").filter((line) => /^\s*(?:[-*]|\d+\.)\s+/.test(line)).length;
+  if (items >= HINT_LIST_ITEMS) {
+    return `${items} list items in one memory. If a search can ask for one item alone, write one memory for each item.`;
+  }
+  const bytes = Buffer.byteLength(content, "utf8");
+  if (bytes > HINT_BYTES) {
+    return `${bytes} bytes in one memory. A search finds a short memory with one fact: split this one if it holds more than one fact.`;
+  }
+  return undefined;
+}
+
+// withHint adds the hint to a result when there is one.
+function withHint(row: Row, hint: string | undefined): Row {
+  return hint ? { ...row, hint } : row;
+}
+
 // slimRemember is slimWrite for each section. All sections go to one
 // project, so the project is named once.
 function slimRemember(out: { method?: string; items?: WriteResult[] }): Row {
@@ -1244,15 +1286,18 @@ const TOOLS: ToolDef[] = [
       required: ["keypath", "value"],
     },
     handler: async (a) =>
-      slimWrite(
-        (await postJSON("/memories/store", {
-          project_id: await resolveProject(a, true),
-          keypath: a.keypath,
-          content: a.value,
-          source: a.source,
-          category: a.category,
-          topics: hostTopics(a),
-        })) as WriteResult
+      withHint(
+        slimWrite(
+          (await postJSON("/memories/store", {
+            project_id: await resolveProject(a, true),
+            keypath: a.keypath,
+            content: a.value,
+            source: a.source,
+            category: a.category,
+            topics: hostTopics(a),
+          })) as WriteResult
+        ),
+        factHint(String(a.keypath ?? ""), String(a.value ?? ""))
       ),
   },
   {
@@ -1307,14 +1352,21 @@ const TOOLS: ToolDef[] = [
       },
       required: ["content"],
     },
-    handler: async (a) =>
-      slimRemember(
+    handler: async (a) => {
+      const out = slimRemember(
         (await postJSON("/memories/remember", {
           ...stripProxyFields(a),
           topics: hostTopics(a),
           project_id: await resolveProject(a, true),
         })) as { method?: string; items?: WriteResult[] }
-      ),
+      );
+      // With a keypath the proxy knows the text of the one memory. With
+      // headings it knows only where each section went.
+      const hint = a.keypath
+        ? factHint(String(a.keypath), String(a.content ?? ""))
+        : areaHint(((out.items as Row[]) ?? []).map((item) => String(item.keypath ?? "")));
+      return withHint(out, hint);
+    },
   },
   {
     name: "memstate_get",
