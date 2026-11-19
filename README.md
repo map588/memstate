@@ -444,6 +444,10 @@ one question the fused order had the wrong memory first, and each model
 put the right one first. With Qwen3-Reranker-4B, 20 hits took 9
 seconds. That is why the bound is 10 hits.
 
+The scale of `rerank_score` comes from the model. Qwen3-Reranker gives
+a value from 0 to 1. `bge-reranker-v2-m3` on the llama.cpp server gives
+a value that can be below 0. Use the order of the hits, not the value.
+
 ### Embedder and reranker pairs
 
 A reranker reads text, not vectors. It does not need the vector space of
